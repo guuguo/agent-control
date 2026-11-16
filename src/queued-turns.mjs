@@ -25,6 +25,7 @@ export function createQueuedTurnQueue({
   filePath = "",
 } = {}) {
   const queues = new Map();
+  const steeringIds = new Set();
   let draining = null;
   let timer = null;
   let writeChain = Promise.resolve();
@@ -62,7 +63,7 @@ export function createQueuedTurnQueue({
   const drain = async () => {
     for (const [threadId, entries] of [...queues]) {
       const entry = entries[0];
-      if (!entry) continue;
+      if (!entry || steeringIds.has(entry.id)) continue;
       if (!await canDeliver(entry)) continue;
       try {
         const result = await deliver(entry);
@@ -130,8 +131,75 @@ export function createQueuedTurnQueue({
       schedule();
       return { ...entry, position: entries.length };
     },
+    enqueuePriority(threadId, input) {
+      const entries = queues.get(threadId) || [];
+      const source = String(input?.source || "resume");
+      if (source === "resume") {
+        const existingResume = entries.find((item) => item?.source === "resume");
+        if (existingResume) {
+          return { ...existingResume, position: 1, deduplicated: true };
+        }
+      }
+      const entry = {
+        id: randomUUID(),
+        threadId,
+        createdAt: Date.now(),
+        source,
+        sourceLabel: input?.sourceLabel || "断点优先恢复",
+        ...input,
+      };
+      entries.unshift(entry);
+      queues.set(threadId, entries);
+      persist();
+      onEvent({ type: "queued", entry, position: 1 });
+      schedule();
+      return { ...entry, position: 1 };
+    },
     list(threadId) {
       return [...(queues.get(threadId) || [])];
+    },
+    get(threadId, id) {
+      const entries = queues.get(threadId) || [];
+      const index = entries.findIndex((item) => item?.id === id);
+      if (index < 0) return null;
+      return { ...entries[index], position: index + 1 };
+    },
+    update(threadId, id, patch = {}) {
+      const entries = queues.get(threadId) || [];
+      const index = entries.findIndex((item) => item?.id === id);
+      if (index < 0) return null;
+      const current = entries[index];
+      if (!current || steeringIds.has(current.id)) return null;
+      const updated = {
+        ...current,
+        ...(patch.text !== undefined ? { text: String(patch.text || "") } : {}),
+        ...(patch.images !== undefined ? { images: Array.isArray(patch.images) ? patch.images : [] } : {}),
+        ...(patch.model !== undefined ? { model: String(patch.model || "") } : {}),
+        ...(patch.effort !== undefined ? { effort: String(patch.effort || "") } : {}),
+        ...(patch.permissionMode !== undefined ? { permissionMode: String(patch.permissionMode || "workspace") } : {}),
+        ...(patch.goalMode !== undefined ? { goalMode: Boolean(patch.goalMode) } : {}),
+        updatedAt: Date.now(),
+      };
+      entries[index] = updated;
+      persist();
+      onEvent({ type: "updated", entry: updated, position: index + 1 });
+      return { ...updated, position: index + 1 };
+    },
+    beginSteer(threadId, id) {
+      const entry = (queues.get(threadId) || []).find((item) => item?.id === id);
+      if (!entry || steeringIds.has(entry.id)) return null;
+      steeringIds.add(entry.id);
+      return { ...entry };
+    },
+    abortSteer(id) {
+      steeringIds.delete(id);
+    },
+    completeSteer(threadId, id, result = null) {
+      steeringIds.delete(id);
+      const entry = removeById(threadId, id);
+      if (!entry) return false;
+      onEvent({ type: "steered", entry, result });
+      return true;
     },
     has(threadId) {
       return (queues.get(threadId)?.length || 0) > 0;

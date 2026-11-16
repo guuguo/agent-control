@@ -12,15 +12,8 @@ import {
   DEFAULT_VOICE_HYDROGEN_MODEL,
   VoiceCallService,
   analyzeWavPcm16Activity,
-  buildDeterministicVoicePlan,
-  classifyNonActionableSpeech,
-  classifyVoiceExecutionTier,
-  detectSpokenRoute,
-  detectVoiceDispatchMode,
   estimateSpeechDurationMs,
-  isRepeatVoiceIntent,
   minAudibleDurationMs,
-  normalizeSpokenChineseText,
   pickPreferredHydrogenModel,
   pickPreferredVoiceModel,
 } from "../src/voice-call-service.mjs";
@@ -31,7 +24,6 @@ import {
   estimateVoiceDurationMs,
   evaluateVoicePlaybackOutcome,
   humanizeVoiceDeliveryReason,
-  matchVoiceTarget,
   minVoiceAudibleMs,
   normalizeVoiceConfig,
   normalizeVoiceTtsPayload,
@@ -50,49 +42,14 @@ const MOCK_VOICE_ASR_BIN = fileURLToPath(new URL("./helpers/mock-voice-asr.mjs",
 
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
 
-test("speech duration estimation, min audible threshold, and repeat intent detection", () => {
+test("speech duration estimation and min audible threshold", () => {
   assert.ok(estimateSpeechDurationMs("你好") >= 600);
   assert.equal(estimateVoiceDurationMs("正在为你查询粉丝站小屋进度"), estimateSpeechDurationMs("正在为你查询粉丝站小屋进度"));
   assert.equal(minAudibleDurationMs(""), 0);
   assert.equal(minVoiceAudibleMs(""), 0);
   assert.ok(minAudibleDurationMs("粉丝站小屋已经完成构建。") >= 180);
 
-  assert.equal(isRepeatVoiceIntent("刚才没听清，再说一遍"), true);
-  assert.equal(isRepeatVoiceIntent("我没听到，能重复一下吗"), true);
-  assert.equal(isRepeatVoiceIntent("再播一遍"), true);
-  assert.equal(isRepeatVoiceIntent("repeat"), true);
-  assert.equal(isRepeatVoiceIntent("让粉丝站再跑一遍测试"), false);
-  assert.equal(isRepeatVoiceIntent("重新检查一下代码"), false);
 
-  const snapshot = {
-    projects: [
-      {
-        cwd: "/dev/fans-home",
-        name: "粉丝站小屋",
-        threadCount: 1,
-        runningCount: 0,
-        pendingCount: 0,
-        threads: [{ id: "t-fans", title: "粉丝站小屋 检查", live: false }],
-      },
-      {
-        cwd: "/dev/agent-control",
-        name: "Agent Control",
-        alias: "控制台",
-        threadCount: 1,
-        runningCount: 1,
-        pendingCount: 0,
-        threads: [{ id: "t1", title: "语音优化", live: true }],
-      },
-    ],
-    threads: [
-      { id: "t1", cwd: "/dev/agent-control", title: "语音优化", live: true, updatedAt: Date.now() },
-    ],
-    pendingRequests: [],
-  };
-  const openConsolePlan = buildDeterministicVoicePlan({ transcript: "打开控制台", snapshot });
-  assert.equal(openConsolePlan.intent, "open_project");
-  const repeatPlan = buildDeterministicVoicePlan({ transcript: "刚才没听清，再说一遍", snapshot });
-  assert.equal(repeatPlan.intent, "repeat_last");
 });
 
 test("normalizeVoiceTtsPayload and evaluateVoicePlaybackOutcome catch silent, muted, fake short end, and interruption cases", () => {
@@ -176,7 +133,7 @@ test("broadcast priority queue, unheard banner HTML, and transcript delivery chi
   assert.equal(EMOJI_RE.test(transcriptHtml), false);
 });
 
-test("VoiceCallService synthesizes macOS say WAV fallback when edge-tts is unavailable and falls back to browser cleanly", async (t) => {
+test("VoiceCallService synthesizes server macOS say fallback and reports no audio when server TTS is unavailable", async (t) => {
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-tts-fallback-"));
   const dataDir = resolve(root, "data");
   await mkdir(dataDir, { recursive: true });
@@ -224,9 +181,9 @@ test("VoiceCallService synthesizes macOS say WAV fallback when edge-tts is unava
     },
   });
   const startBrowser = await browserOnlyService.startCall({ callId: "browser-call-1" });
-  assert.equal(startBrowser.ttsEngine, "browser");
+  assert.equal(startBrowser.ttsEngine, "none");
   const browserTts = await browserOnlyService.synthesizeSpeech("浏览器朗读兜底", { callId: "browser-call-1" });
-  assert.equal(browserTts.provider, "browser");
+  assert.equal(browserTts.provider, "none");
   assert.equal(browserTts.audioBase64, "");
   await browserOnlyService.close();
 });
@@ -556,7 +513,8 @@ test("asyncDispatch splits fast oral ACK from slow background dispatch, handles 
   assert.equal(res1.dispatchPending, true);
   assert.equal(res1.executed.pending, true);
   assert.ok(res1.batchId);
-  assert.match(res1.spokenReply, /已发给粉丝站小屋处理|正在转达给/);
+  assert.equal(res1.plan.intent, "send_turn");
+  assert.equal(res1.plan.targetThreadId, "antigravity:cli:t-fans");
 
   for (let i = 0; i < 30; i += 1) {
     if (emittedEvents.some((e) => e.name === "voice_dispatch" && e.payload.batchId === res1.batchId)) break;
@@ -635,18 +593,6 @@ test("Voice model routing prioritizes fast Hydrogen over slower Carbon/Orchestra
     DEFAULT_VOICE_HYDROGEN_MODEL,
   );
   assert.equal(pickPreferredHydrogenModel([]), DEFAULT_VOICE_HYDROGEN_MODEL);
-
-  // 2. Spoken route detection routes generic/antigravity/hydrogen requests to fast Hydrogen, keeping explicit carbon/orchestrator override.
-  assert.equal(detectSpokenRoute("用 antigravity 在控制台新建任务").explicitFastHydrogen, true);
-  assert.equal(detectSpokenRoute("用 hydrogen 快速查下构建").explicitFastHydrogen, true);
-  assert.equal(detectSpokenRoute("用协调者 carbon 排查复杂问题").model, "gemini-pro-orchestrator");
-
-  const agyMatched = matchVoiceTarget("用 antigravity 新开一个控制台任务", {
-    groups: [{ cwd: "/dev/console", name: "控制台", rawName: "控制台", alias: "控制台", threads: [] }],
-    threads: [],
-  });
-  assert.equal(agyMatched.preferredProvider, "antigravity");
-  assert.equal(agyMatched.preferredModel, "gemini-4-hydrogen-low");
 
   // 3. Service execution defaults voice-created threads to fast Hydrogen (low effort), and routes explicit hydrogen turns cleanly.
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-model-route-"));
@@ -798,20 +744,6 @@ test("VAD and VoiceCallService suppress silence, clicks, ambient noise, and Whis
   const speechDone = vad.pushSamples(roomHum, 0.004);
   assert.equal(speechDone.type, "utterance");
 
-  // 2. Semantic classifier distinguishes silence/hallucinations/backchannels vs real approvals/commands.
-  assert.equal(classifyNonActionableSpeech("").noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("...").noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("[音乐]").noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("谢谢观看，请订阅").noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("嗯嗯", { hasPending: false }).noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("好的", { hasPending: false }).noSpeech, true);
-  assert.equal(classifyNonActionableSpeech("好的", { hasPending: true }).noSpeech, false);
-
-  const emptySnapshot = { projects: [], threads: [], pendingRequests: [] };
-  assert.equal(buildDeterministicVoicePlan({ transcript: "", snapshot: emptySnapshot }).noSpeech, true);
-  assert.equal(buildDeterministicVoicePlan({ transcript: "今天中午吃什么啊", snapshot: emptySnapshot }).noSpeech, true);
-  assert.equal(buildDeterministicVoicePlan({ transcript: "在吗", snapshot: emptySnapshot }).spokenReply, "我在，请讲。");
-
   // 3. Service handleTurn suppresses TTS/utterance registration/compensation on silence & ambient chatter, keeps briefing intact.
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-silence-"));
   const dataDir = resolve(root, "data");
@@ -945,6 +877,7 @@ test("Local WAV PCM16 acoustic gate filters silence and ambient noise before cal
       EDGE_TTS_BIN: MOCK_EDGE_TTS_BIN,
       MACOS_SAY_BIN: MOCK_MAC_SAY_BIN,
       AGY_BIN: MOCK_AGY_BIN,
+      VOICE_ASR_BIN: MOCK_VOICE_ASR_BIN,
     },
   });
   t.after(async () => {
@@ -1001,18 +934,13 @@ test("Local WAV PCM16 acoustic gate filters silence and ambient noise before cal
     mode: "turn",
     tts: false,
   });
-  assert.equal(spawnCount, 1);
+  assert.equal(spawnCount, 0);
+  assert.equal(passRes.model, DEFAULT_VOICE_HYDROGEN_MODEL);
   assert.equal(listThreadsCalls, 1);
   assert.ok(passRes.ok);
 });
 
 test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result or stop-waiting commands", async (t) => {
-  assert.equal(detectVoiceDispatchMode("让 粉丝站小屋 跑一下单测").dispatchMode, "queue");
-  assert.equal(detectVoiceDispatchMode("让 粉丝站小屋 排队执行一下构建").dispatchMode, "queue");
-  assert.equal(detectVoiceDispatchMode("别等了，直接出结果").dispatchMode, "immediate");
-  assert.equal(detectVoiceDispatchMode("停止等待，直接给结论").dispatchMode, "immediate");
-  assert.equal(detectVoiceDispatchMode("让 粉丝站小屋 立即发送，别排队").dispatchMode, "immediate");
-
   const snapshot = {
     projects: [
       {
@@ -1049,23 +977,6 @@ test("Voice dispatch distinguishes queued follow-ups vs immediate direct-result 
     pendingRequests: [],
     activeThreadId: "antigravity:cli:t-fans",
   };
-
-  // Pure interrupt stays interrupt_thread, whereas "别跑了，直接出结果" or "停止等待，直接汇报结论" dispatches immediately!
-  const pureStop = buildDeterministicVoicePlan({ transcript: "停止运行", snapshot });
-  assert.equal(pureStop.intent, "interrupt_thread");
-
-  const stopAndOutput = buildDeterministicVoicePlan({ transcript: "让 粉丝站小屋 别跑了，直接出结果", snapshot });
-  assert.equal(stopAndOutput.intent, "send_turn");
-  assert.equal(stopAndOutput.dispatchMode, "immediate");
-
-  const projectReportNow = buildDeterministicVoicePlan({ transcript: "粉丝站小屋 停止等待，直接汇报结论", snapshot });
-  assert.equal(projectReportNow.intent, "send_turn");
-  assert.equal(projectReportNow.dispatchMode, "immediate");
-
-  const activeNoProjectImmediate = buildDeterministicVoicePlan({ transcript: "别等了，直接出结果", snapshot });
-  assert.equal(activeNoProjectImmediate.intent, "send_turn");
-  assert.equal(activeNoProjectImmediate.targetThreadId, "antigravity:cli:t-fans");
-  assert.equal(activeNoProjectImmediate.dispatchMode, "immediate");
 
   // Service-level test: busy thread (409) queues normal follow-ups, but steers/interrupts-and-sends immediate directives.
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-dispatch-mode-"));
@@ -1205,35 +1116,6 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
     ],
     pendingRequests: [],
   };
-
-  // 1. Tier classification + deterministic routing across all 3 tiers.
-  assert.equal(classifyVoiceExecutionTier("现在有几个任务在跑").tier, "self_simple");
-  const simplePlan = buildDeterministicVoicePlan({ transcript: "现在有几个任务在跑", snapshot });
-  assert.equal(simplePlan.intent, "summarize_progress");
-  assert.equal(simplePlan.executionTier, "self_simple");
-
-  const askResultPlan = buildDeterministicVoicePlan({ transcript: "刚才那个任务结果怎么样", snapshot });
-  assert.equal(askResultPlan.intent, "summarize_progress");
-  assert.equal(askResultPlan.executionTier, "self_simple");
-
-  assert.equal(classifyVoiceExecutionTier("帮我深入分析一下最近构建失败的根因并给出排查清单").tier, "subagent_hydrogen");
-  const heavySelfPlan = buildDeterministicVoicePlan({
-    transcript: "帮我深入分析一下最近构建失败的根因并给出排查清单",
-    snapshot,
-  });
-  assert.equal(heavySelfPlan.intent, "subagent_hydrogen");
-  assert.equal(heavySelfPlan.executionTier, "subagent_hydrogen");
-
-  assert.equal(
-    classifyVoiceExecutionTier("让 粉丝站小屋 跑一下构建", { matchedProject: snapshot.projects[0] }).tier,
-    "external_thread",
-  );
-  const externalPlan = buildDeterministicVoicePlan({
-    transcript: "让 粉丝站小屋 跑一下构建",
-    snapshot,
-  });
-  assert.equal(externalPlan.intent, "send_turn");
-  assert.equal(externalPlan.executionTier, "external_thread");
 
   // 2. Service-level verification:
   //    - subagent_hydrogen returns immediate Stage 1 ACK, emits live progress SSE updates, and emits final conclusion.
@@ -1447,51 +1329,7 @@ test("voice execution tiers: self_simple vs subagent_hydrogen progress vs extern
   assert.ok(consultRes.spokenReply.includes(secretResult2));
 });
 
-test("Voice normalization, short-name/homophone routing, real-cwd subagent, unrelated milestone isolation, and anti-snowball compensation", async (t) => {
-  // 1. Traditional Chinese normalization & short-name / homophone matching.
-  assert.equal(normalizeSpokenChineseText("粉絲展現在什麼進度"), "粉丝展现在什么进度");
-  const snapshot = {
-    projects: [
-      {
-        cwd: "/dev/fans-home",
-        name: "粉丝站小屋",
-        alias: "粉丝站小屋",
-        pinned: true,
-        liveCount: 1,
-        pendingCount: 0,
-        threads: [{ id: "codex:default:t-fans", title: "家具重构", live: true, phase: "运行中" }],
-      },
-    ],
-    threads: [
-      { id: "codex:default:t-fans", cwd: "/dev/fans-home", title: "家具重构", live: true, updatedAt: Date.now() },
-    ],
-    pendingRequests: [],
-  };
-
-  const tradHomophonePlan = buildDeterministicVoicePlan({ transcript: "粉絲展現在什麼進度", snapshot });
-  assert.equal(Boolean(tradHomophonePlan.noSpeech), false);
-  assert.equal(tradHomophonePlan.intent, "summarize_progress");
-  assert.equal(tradHomophonePlan.targetProjectCwd, "/dev/fans-home");
-  assert.match(tradHomophonePlan.spokenReply, /粉丝站小屋/);
-
-  const shortSendPlan = buildDeterministicVoicePlan({ transcript: "让粉丝站跑一下测试", snapshot });
-  assert.equal(shortSendPlan.intent, "send_turn");
-  assert.equal(shortSendPlan.targetProjectCwd, "/dev/fans-home");
-  assert.equal(shortSendPlan.targetThreadId, "codex:default:t-fans");
-  assert.match(shortSendPlan.instruction, /跑一下测试/);
-
-  const colloquialStatus = buildDeterministicVoicePlan({ transcript: "现在怎么样了", snapshot });
-  assert.equal(Boolean(colloquialStatus.noSpeech), false);
-  assert.equal(colloquialStatus.intent, "summarize_progress");
-
-  const greetingWake = buildDeterministicVoicePlan({ transcript: "你好", snapshot });
-  assert.equal(greetingWake.intent, "wake_ping");
-  assert.match(greetingWake.spokenReply, /我在/);
-
-  const unrelatedChatter = buildDeterministicVoicePlan({ transcript: "今天中午吃什么啊", snapshot });
-  assert.equal(unrelatedChatter.noSpeech, true);
-  assert.equal(unrelatedChatter.silenceReason, "no_actionable_intent");
-
+test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and anti-snowball compensation", async (t) => {
   // 2. Real existing projectCwd does not throw ReferenceError: existsSync is not defined,
   //    unrelated threads do not trigger voice_external_milestone, and notice/pending do not snowball.
   const root = await mkdtemp(resolve(os.tmpdir(), "ac-voice-regressions-"));
@@ -1649,7 +1487,7 @@ test("Voice normalization, short-name/homophone routing, real-cwd subagent, unre
   assert.equal(compMatches.length, 1);
 });
 
-test("VoiceCallService supports optional lightweight models (Claude/Codex/local rules) without Gemini", async (t) => {
+test("VoiceCallService supports optional lightweight models (Claude/Codex) without Gemini", async (t) => {
   const dir = await mkdtemp(resolve(os.tmpdir(), "ac-voice-multi-model-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
 
@@ -1678,7 +1516,6 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex/local 
     [
       { key: "auto", label: "自动优选轻量模型" },
       { key: "codex:default:gpt-5.4-mini", label: "Codex · GPT-5.4 Mini (轻量)" },
-      { key: "local:local-rules", label: "仅本机规则（零模型）" },
     ],
     "codex:default:gpt-5.4-mini",
   );
@@ -1750,7 +1587,9 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex/local 
         void svc.handleHubEvent("provider_event", {
           type: "turn_completed",
           threadId,
-          lastAgentMessage: "测试发现是依赖版本不一致导致失败，建议锁定版本号。",
+          lastAgentMessage: args.text.includes("<LIVE_CONTROL_SNAPSHOT>")
+            ? JSON.stringify({ intent: "subagent_hydrogen", instruction: "帮我深入分析一下刚才为什么失败了", spokenReply: "我先分析已有记录。" })
+            : "测试发现是依赖版本不一致导致失败，建议锁定版本号。",
         });
       }, 25);
       return { thread: { id: threadId, model: args.model || "" } };
@@ -1775,7 +1614,7 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex/local 
   assert.equal(startedAuto.dispatchProvider, "claude");
   assert.equal(startedAuto.dispatchModel, "claude-haiku-4-5");
   assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "codex:default:gpt-5.4-mini"));
-  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "local:local-rules"));
+  assert.ok(!startedAuto.modelOptions.some((opt) => opt.key === "local:local-rules"));
 
   // 2. Switching explicitly to Codex lightweight model executes subagent via Codex without Gemini.
   const startedCodex = await svc.startCall({
@@ -1803,7 +1642,7 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex/local 
     }
     await new Promise((r) => setTimeout(r, 25));
   }
-  assert.equal(startedThreads.length, 1);
+  assert.equal(startedThreads.length, 2);
   assert.equal(startedThreads[0].provider, "codex");
   assert.equal(startedThreads[0].model, "gpt-5.4-mini");
   assert.match(startedThreads[0].text, /^\[AC_VOICE_CALL\]/);
@@ -1813,28 +1652,5 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex/local 
   );
   assert.match(doneEvt?.payload?.spokenFeedback || "", /依赖版本不一致导致失败/);
 
-  // 3. Selecting local-only rules works with zero LLM calls.
-  const localRes = await svc.handleTurn({
-    callId: "call-local-only",
-    voiceProvider: "local",
-    voiceModel: "local-rules",
-    transcriptText: "帮我分析一下当前各个项目的整体情况",
-    autoExecute: true,
-    asyncDispatch: false,
-    tts: false,
-  });
-  assert.equal(localRes.ok, true);
-  assert.equal(localRes.executed?.provider, "local");
-  for (let i = 0; i < 40; i += 1) {
-    if (events.some((e) => e.eventName === "voice_dispatch" && e.payload?.batchId === localRes.batchId && e.payload?.status === "dispatched")) {
-      break;
-    }
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  const localDoneEvt = events.find(
-    (e) => e.eventName === "voice_dispatch" && e.payload?.batchId === localRes.batchId && e.payload?.status === "dispatched",
-  );
-  assert.match(localDoneEvt?.payload?.spokenFeedback || "", /本机规则/);
-  assert.equal(localDoneEvt?.payload?.model, "local-rules");
-  assert.equal(startedThreads.length, 1);
+
 });

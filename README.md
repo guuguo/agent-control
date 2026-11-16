@@ -4,20 +4,33 @@
 > 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
 
 <p align="center">
-  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="680" />
+  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="760" />
 </p>
-
-<details>
-<summary>查看更多实拍效果（手机远程总控与对话界面）</summary>
 
 <table>
   <tr>
-    <td align="center"><strong>手机端项目总控</strong></td>
-    <td align="center"><strong>手机端远程对话详情</strong></td>
+    <td align="center" width="50%"><strong>手机端 · 项目总控与 4 家实时监控</strong></td>
+    <td align="center" width="50%"><strong>手机端 · 富文本对话、代码块与排队控制</strong></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/tutorial/05-mobile-paired-console.png" alt="手机端项目总控" width="260" /></td>
-    <td align="center"><img src="docs/tutorial/06-mobile-session-chat.png" alt="手机端远程对话详情" width="260" /></td>
+    <td align="center"><img src="docs/tutorial/05-mobile-paired-console.png" alt="手机端项目总控与多智能体实时监控" width="240" /></td>
+    <td align="center"><img src="docs/tutorial/06-mobile-session-chat.png" alt="手机端远程对话详情与排队发送" width="240" /></td>
+  </tr>
+</table>
+
+<details>
+<summary>展开更多特性界面（免提语音总控 · 手机扫码隧道 · 一键更新与桌面壳子同步）</summary>
+
+<table>
+  <tr>
+    <td align="center" width="33%"><strong>🚗 开车 / 免提语音总控</strong></td>
+    <td align="center" width="33%"><strong>📱 一键免费隧道与固定链接</strong></td>
+    <td align="center" width="33%"><strong>🔄 一键更新与桌面 App 同步</strong></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/tutorial/08-voice-copilot-modal.png" alt="开车免提语音通话总控弹窗" width="260" /></td>
+    <td align="center"><img src="docs/tutorial/03-tunnel-qr-ready.png" alt="手机远程配对与隧道方案弹窗" width="260" /></td>
+    <td align="center"><img src="docs/tutorial/09-update-modal.png" alt="版本与自动更新及桌面 App 壳子同步" width="260" /></td>
   </tr>
 </table>
 
@@ -49,8 +62,11 @@ irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1 | ie
 2. **电脑端统一管理**：左侧按项目查看所有正在跑或历史中的智能体任务，点进去即可续发消息、切换模型、设置自动推进或批量归档；同一智能体存在多个账号（如多 Codex 账号）时，列表与顶部栏自动标出具体账号归属。
 3. **手机扫码远程看**：点页面右上角 **「手机远程」** 生成二维码，手机扫一下就能随时看输出、发指令、批权限。👉 [查看手机扫码图文教程](教程.md) · [固定链接与容器部署全指南](docs/remote-deploy.md)
 4. **🚗 开车 / 免提语音总控（不强依赖 Gemini）**：点击顶部 **「通话」** 按钮即可开启免提语音通话（支持屏幕常亮、VAD 自动断句、说话打断、后台任务完成/待审批自动语音提醒与口头批准/拒绝）。
-   - **可选轻量模型**：不是所有人都有 Gemini/Antigravity，语音弹窗顶部支持直接切换后端轻量模型——自动优选或手动选用 **Claude Haiku**、**Codex Mini / Spark**、**Antigravity Hydrogen / Flash**、**Grok**，或切换为 **「仅本机规则（零模型）」** 零 Token 运行。
-   - **跨平台语音收发**：macOS 优先使用本地 `mlx-whisper` 离线识别与 `edge-tts` / `say` 播报；其他系统或未装本地 Whisper 时自动回退为浏览器原生语音识别与语音合成（也可随时点击键盘图标打字调度）。
+   - **可选轻量模型**：不是所有人都有 Gemini/Antigravity，语音弹窗顶部支持直接切换后端轻量模型——自动优选或手动选用 **Claude Haiku**、**Codex Mini / Spark**、**Antigravity Hydrogen / Flash**、**Grok**。所有非空语音内容均交由所选模型理解意图、定位目标并决定操作；模型不可用时明确报错，不回退到关键词规则。
+   - **跨平台语音收发**：macOS 优先使用本地 `mlx-whisper` 离线识别与 `edge-tts` / `say` 播报；未装本地 Whisper 时可回退为浏览器语音识别。播放只使用服务端生成的音频，不再调用手机或浏览器本机 TTS；没有可播放音频时保留文字并标记未播报（也可随时点击键盘图标打字调度）。
+5. **🔄 自动检测与跨端一键更新**：左上/左下角与手机端菜单实时展示版本状态，支持定期检查远端提交、闲时自动平滑重启，并在更新时按源码指纹自动联动重编 macOS **Agent Control.app** 桌面外壳（也可执行 `npm run version:bump` 统一维护服务与 UI 版本）。
+
+展开 **Agent 实时监控** 可查看执行统计：按 Agent、模型、思考强度汇总成功轮次的中位/P90耗时、首输出、协议 Token 均值和工具次数，并查看最近30轮明细。支持24小时、7天、30天及全部记录筛选。数据从启用后的新轮次开始记录，最多保留5000轮，独立保存在数据目录的 `execution-stats.json`，不保存指令或回复正文。耗时含工具和审批等待，不含排队；`/goal` 续跑按轮记录。估算、部分上报、未上报分别标注，不混入协议 Token 均值；跨服务重启未收到终态的轮次标为“结束状态未记录”，不计入成功耗时。
 
 ### 手机远程方案怎么选？（装完随时可换）
 

@@ -1,6 +1,6 @@
 {
   "name": "agent-control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
   "private": true,
   "license": "AGPL-3.0-only",
@@ -15,6 +15,7 @@
     "invite": "node scripts/create-invite.mjs",
     "test": "node --test \"tests/*.test.mjs\"",
     "check": "node scripts/check-syntax.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
     "desktop:build": "bash desktop/macos/build-app.sh",
     "desktop:install": "bash desktop/macos/build-app.sh --install"
   },

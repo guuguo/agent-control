@@ -145,7 +145,7 @@ def main():
     sys.stdout.write(json.dumps({"ready": True, "modelDir": model_dir}, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
-    default_prompt = "以下是普通话简体中文语音指令：打开项目，查看现在什么进度，跑一下测试，批准请求，拒绝，停止运行，再说一遍。"
+    default_prompt = "请忠实转写用户说出的普通话和英文，保留疑问、否定和原意。"
     while True:
         raw_line = sys.stdin.readline()
         if not raw_line:

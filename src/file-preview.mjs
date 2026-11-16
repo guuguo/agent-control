@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 
 const SIPS_BIN = "/usr/bin/sips";
 const IMAGE_CACHE_DIR = resolve(os.tmpdir(), "agent-control-img-cache");
-const IMAGE_CACHE_MAX_FILES = 120;
+const IMAGE_CACHE_MAX_FILES = 300;
 const COMPRESS_MIN_BYTES = 160 * 1024;
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
 

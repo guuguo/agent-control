@@ -496,12 +496,14 @@ test("Codex image wrappers, Files mentioned headers, question replies, and /api/
   const okRes = await fetch(imgUrl);
   assert.equal(okRes.status, 200);
   assert.equal(okRes.headers.get("content-type"), "image/png");
+  assert.equal(okRes.headers.get("cache-control"), "private, max-age=600, stale-while-revalidate=3600");
   const etag = okRes.headers.get("etag");
   assert.ok(etag);
   assert.deepEqual(Buffer.from(await okRes.arrayBuffer()), pngBytes);
 
   const notModRes = await fetch(imgUrl, { headers: { "If-None-Match": etag } });
   assert.equal(notModRes.status, 304);
+  assert.equal(notModRes.headers.get("cache-control"), "private, max-age=600, stale-while-revalidate=3600");
 
   const traversalRes = await fetch(`${srv.url}/api/thread/image?threadId=${encodeURIComponent("codex:default:thr-img-1")}&path=${encodeURIComponent("../outside.png")}`);
   assert.equal(traversalRes.status, 403);

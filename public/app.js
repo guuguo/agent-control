@@ -1,16 +1,23 @@
-import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116p";
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116quota";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261116quota";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
   submitComposerRequest,
-} from "./composer-mode.js?v=20261116p";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116p";
+} from "./composer-mode.js?v=20261116quota";
+import {
+  closeCustomSelectMenu,
+  initComposerCustomSelects,
+  syncAllCustomSelects,
+} from "./custom-select.js?v=20261116quota";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116quota";
 import {
   compressImageFileForUpload,
+  estimateDataUrlBytes,
   formatByteSize,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261116p";
+} from "./image-attachment.js?v=20261116quota";
 import {
   abbreviateMiddleText,
   buildSelectableTelemetryItems,
@@ -35,12 +42,13 @@ import {
   renderProfilePillsHtml,
   renderProviderPillsHtml,
   renderQuotaOverviewHtml,
+  resolveDistinctProfileChipText,
   resolveModelsForProvider,
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261116p";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116p";
+} from "./instance-switcher.js?v=20261116quota";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116quota";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
@@ -49,10 +57,13 @@ import {
   formatTurnModelBadge,
   isRecoverableToolErrorText,
   isStreamingTextAlreadyPersisted,
+  isThreadImageFailed,
+  markThreadImageFailed,
   renderMarkdown,
+  renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261116p";
+} from "./markdown.js?v=20261116quota";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   buildProjectGroups,
@@ -65,11 +76,10 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261116p";
-import { collectUserInputAnswers, renderServerRequestCard } from "./server-request-ui.js?v=20261116p";
+} from "./project-board.js?v=20261116quota";
+import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261116quota";
 import {
   base64ToUint8Array,
-  buildLocalProgressBriefing,
   buildVoiceLiveProgressItems,
   computeRmsLevel,
   createVadTurnDetector,
@@ -83,7 +93,6 @@ import {
   loadVoiceConfig,
   normalizeVoiceTtsPayload,
   parseVoiceModelSelectionKey,
-  pickPreferredChineseSpeechVoice,
   renderVoiceCallTranscriptHtml,
   renderVoiceLiveProgressHtml,
   renderVoiceModelSelectOptionsHtml,
@@ -91,7 +100,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261116p";
+} from "./voice-copilot.js?v=20261116quota";
 
 const $ = (id) => document.getElementById(id);
 
@@ -102,6 +111,10 @@ const THREADS_CACHE_KEY = "agentControl.threadsCache.v1";
 const SIDEBAR_FOLD_PREFS_KEY = "agentControl.sidebarFold.v1";
 const TELEMETRY_VISIBLE_PREFS_KEY = "agentControl.telemetryVisibleKeys.v1";
 const THREAD_READ_STATE_KEY = "agentControl.threadReadState.v1";
+const SIDEBAR_WIDTH_PREF_KEY = "agentControl.sidebarWidth.v1";
+const DEFAULT_SIDEBAR_WIDTH = 312;
+const MIN_SIDEBAR_WIDTH = 220;
+const MAX_SIDEBAR_WIDTH = 560;
 
 function loadThreadReadState() {
   try {
@@ -423,6 +436,11 @@ const state = {
   quotaExpanded: false,
   quotaRefreshing: false,
   telemetry: null,
+  executionStats: null,
+  executionStatsDays: 7,
+  executionStatsProvider: "all",
+  executionStatsLoading: false,
+  executionStatsError: "",
   telemetryExpanded: false,
   telemetryVisiblePrefs: loadTelemetryVisiblePrefs(),
   telemetryPickerOpen: false,
@@ -450,6 +468,7 @@ const state = {
   pendingRequestsSynced: false,
   queuedTurns: [],
   queuedPanelCollapsed: false,
+  editingQueueItem: null,
   images: [],
   imageProcessingCount: 0,
   composerGoal: false,
@@ -476,6 +495,10 @@ const state = {
   tunnelBusy: false,
   fixedTunnelStatus: null,
   fixedTunnelBusy: false,
+  updateStatus: null,
+  updateChecking: false,
+  updateApplying: false,
+  desktopUpdating: false,
   localApps: [],
   batchSelect: {
     active: false,
@@ -506,7 +529,6 @@ const state = {
     audioObjectUrl: "",
     activePlaybackAbort: null,
     activeBufferSource: null,
-    activeUtterance: null,
     webAudioUnlocked: false,
     audioElUnlocked: false,
     wakeLock: null,
@@ -528,6 +550,7 @@ const state = {
     asrAvailable: true,
     asrEngine: "mlx-whisper",
     speechRecognition: null,
+    pendingVoiceTurns: [],
     backendMissing: false,
   },
   dictation: {
@@ -713,6 +736,7 @@ function setComposerConfigOpen(open) {
   const next = Boolean(open);
   state.composerConfigOpen = next;
   if (next) state.topbarMenuOpen = false;
+  if (!next) closeCustomSelectMenu();
   $("composerConfigPopover")?.classList.toggle("is-open", next);
   $("composerConfigBtn")?.setAttribute("aria-expanded", next ? "true" : "false");
   $("topbarMoreMenu")?.classList.toggle("is-open", state.topbarMenuOpen);
@@ -868,6 +892,7 @@ function syncProfileSelectors() {
   syncCfgFieldVisibility();
   renderComposerConfigChip();
   renderQuotaStrip();
+  syncAllCustomSelects();
 }
 
 const CLIENT_TELEMETRY_WINDOW_MS = 6000;
@@ -1080,6 +1105,24 @@ function scheduleTelemetryRefresh(delayMs = 150) {
   }, Math.max(50, Number(delayMs) || 150));
 }
 
+async function refreshExecutionStats() {
+  if (state.executionStatsLoading) return;
+  state.executionStatsLoading = true;
+  state.executionStatsError = "";
+  renderAgentTelemetryBar();
+  try {
+    const params = new URLSearchParams({ days: String(state.executionStatsDays), provider: state.executionStatsProvider });
+    state.executionStats = await apiGet(`api/executions?${params}`);
+  } catch (error) {
+    state.executionStatsError = Number(error?.status) === 404
+      ? "当前后台尚未启用执行统计，重启服务后开始采样。"
+      : `读取统计失败：${formatActionError(error)}`;
+  } finally {
+    state.executionStatsLoading = false;
+    renderAgentTelemetryBar();
+  }
+}
+
 function renderAgentTelemetryBar() {
   const el = $("agentTelemetryBar");
   const desktopSlot = $("topbarTelemetrySlot");
@@ -1090,6 +1133,7 @@ function renderAgentTelemetryBar() {
 
   const topbarBtn = $("telemetryTopbarBtn");
   const isDetailOpen = Boolean(state.telemetryExpanded || state.telemetryPickerOpen);
+  if (isDetailOpen && !state.executionStats && !state.executionStatsError && !state.executionStatsLoading) void refreshExecutionStats();
   if (topbarBtn) {
     topbarBtn.hidden = true;
     topbarBtn.setAttribute("aria-hidden", "true");
@@ -1099,7 +1143,7 @@ function renderAgentTelemetryBar() {
 
   const activeProvider = state.activeThread?.provider || $("composerProviderSelect")?.value || "";
   const activeProfileId = state.activeThread?.profileId || $("composerProfileSelect")?.value || "";
-  const html = renderAgentTelemetryBarHtml(state.profiles, merged, {
+  let html = renderAgentTelemetryBarHtml(state.profiles, merged, {
     providerFilter: state.providerFilter,
     expanded: state.telemetryExpanded,
     refreshing: state.quotaRefreshing,
@@ -1108,15 +1152,25 @@ function renderAgentTelemetryBar() {
     activeProvider,
     activeProfileId,
   });
+  if (isDetailOpen) html += renderExecutionStatsHtml(state.executionStats, {
+    days: state.executionStatsDays, provider: state.executionStatsProvider,
+    loading: state.executionStatsLoading, error: state.executionStatsError,
+  });
 
   if (desktopSlot) {
     const compactSlotHtml = !isDetailOpen ? html : "";
-    desktopSlot.innerHTML = compactSlotHtml;
+    if (desktopSlot._acLastHtml !== compactSlotHtml) {
+      desktopSlot._acLastHtml = compactSlotHtml;
+      desktopSlot.innerHTML = compactSlotHtml;
+    }
     desktopSlot.hidden = !compactSlotHtml;
   }
 
   if (!el) return;
-  el.innerHTML = html;
+  if (el._acLastHtml !== html) {
+    el._acLastHtml = html;
+    el.innerHTML = html;
+  }
   el.hidden = !html;
   el.classList.toggle("is-expanded", Boolean(html && isDetailOpen));
   el.classList.toggle("is-mobile-open", Boolean(html && (state.mobileTelemetryOpen || isDetailOpen)));
@@ -1166,7 +1220,7 @@ function syncComposerProfileSelect() {
   const list = sortProfilesByAvailability(rawList);
   const prev = select.value;
   select.innerHTML = (list.length ? list : [{ id: defaultProfileForProvider(provider), label: "默认" }])
-    .map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(profileOptionLabel(p))}</option>`)
+    .map((p) => `<option value="${escapeHtml(p.id)}" data-compact-label="${escapeHtml(resolveDistinctProfileChipText(p, list))}">${escapeHtml(profileOptionLabel(p))}</option>`)
     .join("");
   if (state.activeThread?.profileId) {
     select.value = state.activeThread.profileId;
@@ -1190,6 +1244,7 @@ function syncComposerProfileSelect() {
 
   syncCfgFieldVisibility();
   renderComposerConfigChip();
+  syncAllCustomSelects();
 }
 
 function syncNewProviderPills() {
@@ -1291,6 +1346,7 @@ function syncPermissionSelectors() {
     newPermSelect.value = normalizeUiPermissionMode(state.defaultPermissionMode || "turbo", "turbo");
   }
   renderComposerConfigChip();
+  syncAllCustomSelects();
 }
 
 function syncModelAndEffortSelectors() {
@@ -1316,6 +1372,7 @@ function syncModelAndEffortSelectors() {
     effortSelect.disabled = true;
     syncCfgFieldVisibility();
     renderComposerConfigChip();
+    syncAllCustomSelects();
     return;
   }
 
@@ -1327,6 +1384,7 @@ function syncModelAndEffortSelectors() {
   syncEffortSelectForModel(selected);
   syncCfgFieldVisibility();
   renderComposerConfigChip();
+  syncAllCustomSelects();
 }
 
 function syncEffortSelectForModel(selected) {
@@ -1342,6 +1400,7 @@ function syncEffortSelectForModel(selected) {
     effortSelect.hidden = true;
     syncCfgFieldVisibility();
     renderComposerConfigChip();
+    syncAllCustomSelects();
     return;
   }
   effortSelect.hidden = false;
@@ -1354,6 +1413,7 @@ function syncEffortSelectForModel(selected) {
   if (efforts.includes(preferredEffort)) effortSelect.value = preferredEffort;
   syncCfgFieldVisibility();
   renderComposerConfigChip();
+  syncAllCustomSelects();
 }
 
 function syncCfgFieldVisibility() {
@@ -1384,7 +1444,7 @@ function renderComposerConfigChip() {
   const showProfileTag = Boolean(
     activeProfile && (providerProfiles.length >= 2 || hasProfileIssue || String(activeProfile.health?.alias || "").trim()),
   );
-  const profileTag = showProfileTag ? compactProfileChipText(activeProfile) : "";
+  const profileTag = showProfileTag ? resolveDistinctProfileChipText(activeProfile, providerProfiles) : "";
 
   const modelSelect = $("modelSelect");
   const rawModel = modelSelect?.selectedOptions?.[0]?.textContent || modelSelect?.value || "";
@@ -1751,7 +1811,7 @@ function renderThreadList() {
   const nowMs = Date.now();
   pruneExpiredSidebarPrefs(nowMs);
   const groups = getProjectGroups({ includeSearch: false });
-  listEl.innerHTML = renderSidebarThreadListHtml(groups, {
+  const sidebarHtml = renderSidebarThreadListHtml(groups, {
     activeThreadId: state.activeThreadId,
     collapsedGroups: state.collapsedGroups,
     expandedSidebarGroups: state.expandedSidebarGroups,
@@ -1767,10 +1827,19 @@ function renderThreadList() {
     selectionMode: state.batchSelect.active,
     selectedThreadIds: state.batchSelect.selectedIds,
   });
+  if (listEl._acLastHtml !== sidebarHtml) {
+    listEl._acLastHtml = sidebarHtml;
+    listEl.innerHTML = sidebarHtml;
+  }
 
   // Populate recent CWDs datalist for modal.
   const cwds = groups.map((g) => g.cwd).filter(Boolean).slice(0, 24);
-  $("recentCwdsList").innerHTML = cwds.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
+  const cwdsHtml = cwds.map((c) => `<option value="${escapeHtml(c)}"></option>`).join("");
+  const datalistEl = $("recentCwdsList");
+  if (datalistEl && datalistEl._acLastHtml !== cwdsHtml) {
+    datalistEl._acLastHtml = cwdsHtml;
+    datalistEl.innerHTML = cwdsHtml;
+  }
   syncBoardAttentionDot();
   renderBatchActionBars();
 }
@@ -1851,6 +1920,7 @@ function renderTopbarAndControls() {
   const goalBtn = $("goalToggleBtn");
   const interruptBtn = $("interruptBtn");
   const renameBtn = $("renameThreadBtn");
+  const toggleImgBtn = $("toggleThreadImagesBtn");
   const archiveBtn = $("archiveThreadBtn");
   const boardBtn = $("boardToggleBtn");
   const moreDot = $("topbarMoreDot");
@@ -1867,8 +1937,9 @@ function renderTopbarAndControls() {
     goalBtn.hidden = true;
     interruptBtn.hidden = true;
     renameBtn.hidden = true;
+    if (toggleImgBtn) toggleImgBtn.hidden = true;
     archiveBtn.hidden = true;
-    if (moreDot) moreDot.hidden = true;
+    if (moreDot) moreDot.hidden = !state.updateStatus?.hasUpdate;
     if (moreProjCard) moreProjCard.hidden = true;
     renderActiveHeading("项目与多任务总控", "选择关注项目或点击语音说话直达对话");
     syncBoardAttentionDot();
@@ -1890,7 +1961,7 @@ function renderTopbarAndControls() {
     ? profileOptionLabel(activeProfile)
     : compactProfileDisplayLabel(thread.profileLabel || thread.profileId || "", thread.provider);
   const compactProfileText = activeProfile
-    ? compactProfileChipText(activeProfile)
+    ? resolveDistinctProfileChipText(activeProfile, scopedProfiles)
     : abbreviateMiddleText(
         String(thread.profileLabel || thread.profileId || "")
           .replace(/^(Antigravity|Codex|Claude\s*Code|Claude|Grok)\s*[·:/\-]?\s*/i, "")
@@ -1944,7 +2015,7 @@ function renderTopbarAndControls() {
     goalBadge.title = "Goal 已达成";
   }
 
-  if (moreDot) moreDot.hidden = !goalActive;
+  if (moreDot) moreDot.hidden = !(goalActive || state.updateStatus?.hasUpdate);
 
   if (moreProjCard) {
     moreProjCard.hidden = !thread.cwd;
@@ -1962,6 +2033,10 @@ function renderTopbarAndControls() {
 
   interruptBtn.hidden = !running;
   renameBtn.hidden = false;
+  if (toggleImgBtn) {
+    toggleImgBtn.hidden = false;
+    toggleImgBtn.textContent = isThreadImagesUnlocked(thread.id) ? "收起本会话预览图" : "加载本会话预览图";
+  }
   archiveBtn.hidden = false;
   archiveBtn.textContent = thread.archived ? "取消归档" : "归档";
 
@@ -2042,6 +2117,472 @@ function activeDisplayTurns() {
   return dedupeAdjacentTurns(Array.isArray(state.activeThread.turns) ? state.activeThread.turns : []);
 }
 
+let deferredImageObserver = null;
+let renderedTurnHtmlCache = [];
+let renderedThreadCacheId = "";
+let deferredObserveRafId = 0;
+const REVEALED_IMAGE_CACHE_LIMIT = 600;
+const revealedDeferredImageSrcs = new Set();
+const unlockedImageThreadIds = new Set();
+
+function rememberRevealedImageSrc(src = "") {
+  const clean = String(src || "").trim();
+  if (!clean) return;
+  if (revealedDeferredImageSrcs.has(clean)) {
+    revealedDeferredImageSrcs.delete(clean);
+  } else if (revealedDeferredImageSrcs.size >= REVEALED_IMAGE_CACHE_LIMIT) {
+    const oldest = revealedDeferredImageSrcs.values().next().value;
+    if (oldest !== undefined) revealedDeferredImageSrcs.delete(oldest);
+  }
+  revealedDeferredImageSrcs.add(clean);
+}
+
+function isThreadImagesUnlocked(threadId = state.activeThread?.id || state.activeThreadId || "") {
+  const clean = String(threadId || "").trim();
+  return Boolean(clean && unlockedImageThreadIds.has(clean));
+}
+
+function syncThreadImagesUnlockedClass() {
+  const unlocked = isThreadImagesUnlocked();
+  $("turnList")?.classList.toggle("is-images-unlocked", unlocked);
+  $("streamingTurn")?.classList.toggle("is-images-unlocked", unlocked);
+}
+
+function setThreadImagesUnlocked(threadId, unlocked) {
+  const cleanTid = String(threadId || "").trim();
+  if (!cleanTid) return;
+  if (unlocked) {
+    unlockedImageThreadIds.add(cleanTid);
+    syncThreadImagesUnlockedClass();
+    renderTopbarAndControls();
+    scheduleDeferredImagesObservation($("messagesViewport"));
+    return;
+  }
+  unlockedImageThreadIds.delete(cleanTid);
+  const encodedTid = encodeURIComponent(cleanTid);
+  for (const src of [...revealedDeferredImageSrcs]) {
+    if (src.includes(`threadId=${encodedTid}`) || src.includes(cleanTid)) {
+      revealedDeferredImageSrcs.delete(src);
+    }
+  }
+  resetDeferredImageObserver({ resetRevealed: false });
+  resetTurnListRenderCache();
+  renderTopbarAndControls();
+  renderActiveMessages();
+}
+
+function resetTurnListRenderCache() {
+  renderedTurnHtmlCache = [];
+  renderedThreadCacheId = "";
+}
+
+function resetDeferredImageObserver({ resetRevealed = true } = {}) {
+  if (deferredObserveRafId) {
+    cancelAnimationFrame(deferredObserveRafId);
+    deferredObserveRafId = 0;
+  }
+  if (deferredImageObserver) {
+    deferredImageObserver.disconnect();
+    deferredImageObserver = null;
+  }
+  if (resetRevealed) {
+    revealedDeferredImageSrcs.clear();
+  }
+}
+
+function markCardImageDeferredState(img, { deferred = false } = {}) {
+  img.classList.toggle("is-deferred-image", deferred);
+  const card = img.closest(".msg-image-card");
+  if (card) {
+    card.classList.toggle("is-deferred", deferred);
+    if (!deferred) {
+      const btn = card.querySelector(".msg-image-btn");
+      if (btn?.dataset.previewCaption) {
+        btn.title = `点击放大预览：${btn.dataset.previewCaption}`;
+      }
+    }
+  }
+  const inlineWrap = img.closest(".md-inline-img-wrap");
+  if (inlineWrap) {
+    inlineWrap.classList.toggle("is-deferred", deferred);
+  }
+}
+
+function markCardImageBroken(img) {
+  markCardImageDeferredState(img, { deferred: false });
+  const inlineWrap = img.closest(".md-inline-img-wrap");
+  const targetInline = inlineWrap || (img.classList.contains("md-inline-img") ? img : null);
+  if (targetInline) {
+    const replacement = document.createElement("span");
+    replacement.className = "msg-file-chip";
+    replacement.title = img.dataset.previewCaption || img.getAttribute("alt") || "";
+    replacement.innerHTML = `${iconSvg("image", { size: 12 })}<span>${escapeHtml(img.getAttribute("alt") || "图片")}</span>`;
+    targetInline.replaceWith(replacement);
+    return;
+  }
+  const card = img.closest(".msg-image-card");
+  if (!card) return;
+  card.classList.add("is-broken");
+  const fallback = card.querySelector(".msg-file-chip.is-fallback");
+  if (fallback) fallback.hidden = false;
+}
+
+function hydrateRevealedDeferredImages(containerEl) {
+  if (!containerEl) return;
+  const imgs = containerEl.querySelectorAll("img[data-lazy-src]");
+  for (const img of imgs) {
+    const lazySrc = img.dataset.lazySrc || "";
+    if (!lazySrc) continue;
+    if (isThreadImageFailed(lazySrc)) {
+      delete img.dataset.lazySrc;
+      revealedDeferredImageSrcs.delete(lazySrc);
+      markCardImageBroken(img);
+      continue;
+    }
+    if (!revealedDeferredImageSrcs.has(lazySrc)) continue;
+    delete img.dataset.lazySrc;
+    img.src = lazySrc;
+    markCardImageDeferredState(img, { deferred: false });
+  }
+}
+
+function activateDeferredImage(img) {
+  if (!(img instanceof HTMLImageElement)) return;
+  const lazySrc = img.dataset.lazySrc || "";
+  if (!lazySrc) return;
+  delete img.dataset.lazySrc;
+  deferredImageObserver?.unobserve(img);
+  if (isThreadImageFailed(lazySrc)) {
+    revealedDeferredImageSrcs.delete(lazySrc);
+    markCardImageBroken(img);
+    return;
+  }
+  rememberRevealedImageSrc(lazySrc);
+
+  const vp = $("messagesViewport");
+  const beforeRect = vp ? img.getBoundingClientRect() : null;
+  const finishLoad = () => {
+    img.removeEventListener("load", onLoad);
+    img.removeEventListener("error", onError);
+    markCardImageDeferredState(img, { deferred: false });
+    if (!vp) return;
+    if (state.autoFollow) {
+      scrollViewportIfFollowing();
+    } else if (beforeRect) {
+      const vpRect = vp.getBoundingClientRect();
+      if (beforeRect.bottom <= vpRect.top + 8) {
+        const afterHeight = img.getBoundingClientRect().height;
+        const delta = afterHeight - beforeRect.height;
+        if (Math.abs(delta) >= 1) {
+          vp.scrollTop += delta;
+        }
+      }
+    }
+  };
+  const onLoad = () => finishLoad();
+  const onError = () => {
+    img.removeEventListener("load", onLoad);
+    img.removeEventListener("error", onError);
+    markThreadImageFailed(lazySrc);
+    revealedDeferredImageSrcs.delete(lazySrc);
+    markCardImageBroken(img);
+  };
+  img.addEventListener("load", onLoad, { once: true });
+  img.addEventListener("error", onError, { once: true });
+  img.src = lazySrc;
+  if (img.complete && img.naturalWidth > 0) {
+    finishLoad();
+  }
+}
+
+function isImageWithinViewport(img, vp) {
+  if (!img || !vp) return false;
+  const vpRect = vp.getBoundingClientRect();
+  const rect = img.getBoundingClientRect();
+  if (vpRect.width <= 0 || vpRect.height <= 0 || (rect.width <= 0 && rect.height <= 0)) {
+    return false;
+  }
+  return rect.bottom > vpRect.top && rect.top < vpRect.bottom && rect.right > vpRect.left && rect.left < vpRect.right;
+}
+
+function ensureDeferredImageObserver() {
+  const vp = $("messagesViewport");
+  if (!vp || typeof IntersectionObserver !== "function") return null;
+  if (!deferredImageObserver) {
+    deferredImageObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting && entry.intersectionRatio <= 0) continue;
+          activateDeferredImage(entry.target);
+        }
+      },
+      {
+        root: vp,
+        rootMargin: "0px",
+        threshold: 0.01,
+      },
+    );
+  }
+  return deferredImageObserver;
+}
+
+function scheduleDeferredImagesObservation(rootEl = $("messagesViewport")) {
+  if (!rootEl) return;
+  syncThreadImagesUnlockedClass();
+  hydrateRevealedDeferredImages(rootEl);
+  if (!isThreadImagesUnlocked()) return;
+  if (deferredObserveRafId) {
+    cancelAnimationFrame(deferredObserveRafId);
+  }
+  deferredObserveRafId = requestAnimationFrame(() => {
+    deferredObserveRafId = 0;
+    if (!isThreadImagesUnlocked()) return;
+    const vp = $("messagesViewport");
+    const imgs = rootEl.querySelectorAll("img[data-lazy-src]");
+    if (!imgs.length) return;
+    const observer = ensureDeferredImageObserver();
+    if (!observer) {
+      for (const img of imgs) {
+        if (isImageWithinViewport(img, vp)) {
+          activateDeferredImage(img);
+        }
+      }
+      return;
+    }
+    for (const img of imgs) {
+      if (revealedDeferredImageSrcs.has(img.dataset.lazySrc || "")) {
+        activateDeferredImage(img);
+        continue;
+      }
+      if (img.dataset.lazyObserved === "1") continue;
+      img.dataset.lazyObserved = "1";
+      observer.observe(img);
+    }
+  });
+}
+
+function captureViewportAnchor(vp) {
+  if (!vp || state.autoFollow) return null;
+  const turnListEl = $("turnList");
+  if (!turnListEl || turnListEl.hidden || !turnListEl.children.length) return null;
+  const vpRect = vp.getBoundingClientRect();
+  if (vpRect.height <= 0) return null;
+  const blocks = turnListEl.children;
+  for (let i = 0; i < blocks.length; i += 1) {
+    const el = blocks[i];
+    const rect = el.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    const turnId = el.getAttribute("data-turn-id") || "";
+    if (!turnId || rect.bottom <= vpRect.top + 4) continue;
+    let childIdx = -1;
+    let offsetTop = rect.top - vpRect.top;
+    if (rect.top < vpRect.top - 24 && el.children.length > 0) {
+      for (let c = 0; c < el.children.length; c += 1) {
+        const cRect = el.children[c].getBoundingClientRect();
+        if (cRect.height > 0 && cRect.bottom > vpRect.top + 4) {
+          childIdx = c;
+          offsetTop = cRect.top - vpRect.top;
+          break;
+        }
+      }
+    }
+    return { turnId, childIdx, offsetTop };
+  }
+  return null;
+}
+
+function restoreViewportAnchor(vp, anchor) {
+  if (!vp || !anchor || state.autoFollow) return;
+  const turnListEl = $("turnList");
+  if (!turnListEl || turnListEl.hidden) return;
+  const vpRect = vp.getBoundingClientRect();
+  let target = null;
+  for (const el of turnListEl.children) {
+    if ((el.getAttribute("data-turn-id") || "") === anchor.turnId) {
+      target = el;
+      break;
+    }
+  }
+  if (!target) return;
+  const anchorEl = (anchor.childIdx >= 0 && target.children[anchor.childIdx]) ? target.children[anchor.childIdx] : target;
+  const nextOffsetTop = anchorEl.getBoundingClientRect().top - vpRect.top;
+  const delta = nextOffsetTop - anchor.offsetTop;
+  if (Math.abs(delta) >= 1) {
+    vp.scrollTop += delta;
+  }
+}
+
+function parseTurnBlockElement(html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = String(html || "").trim();
+  const block = tpl.content.firstElementChild;
+  if (block) {
+    for (const child of block.children) {
+      child._acRawHtml = child.outerHTML;
+    }
+    hydrateRevealedDeferredImages(block);
+  }
+  return block;
+}
+
+function stampRawChildHtmls(containerEl) {
+  if (!containerEl) return;
+  for (const child of containerEl.children) {
+    child._acRawHtml = child.outerHTML;
+  }
+}
+
+function patchNodeWithSameClassOrTag(existingNode, nextNode) {
+  const rawNext = nextNode._acRawHtml || nextNode.outerHTML;
+  if (existingNode._acRawHtml === rawNext) return false;
+  if (
+    existingNode.classList.contains("process-card")
+    && nextNode.classList.contains("process-card")
+  ) {
+    existingNode.className = nextNode.className;
+    const prevSummary = existingNode.querySelector(":scope > .process-summary-box");
+    const nextSummary = nextNode.querySelector(":scope > .process-summary-box");
+    const prevFeed = existingNode.querySelector(":scope > .live-progress-feed");
+    const nextFeed = nextNode.querySelector(":scope > .live-progress-feed");
+    if (prevSummary && nextSummary) {
+      const nextSumRaw = nextSummary.outerHTML;
+      if (prevSummary._acRawHtml !== nextSumRaw) {
+        const wasOpen = prevSummary.open;
+        nextSummary._acRawHtml = nextSumRaw;
+        hydrateRevealedDeferredImages(nextSummary);
+        prevSummary.replaceWith(nextSummary);
+        if (wasOpen) nextSummary.open = true;
+      }
+      if (prevFeed && nextFeed) {
+        const nextFeedRaw = nextFeed.outerHTML;
+        if (prevFeed._acRawHtml !== nextFeedRaw) {
+          nextFeed._acRawHtml = nextFeedRaw;
+          prevFeed.replaceWith(nextFeed);
+        }
+      } else if (!prevFeed && nextFeed) {
+        nextFeed._acRawHtml = nextFeed.outerHTML;
+        existingNode.appendChild(nextFeed);
+      } else if (prevFeed && !nextFeed) {
+        prevFeed.remove();
+      }
+      existingNode._acRawHtml = rawNext;
+      return true;
+    }
+  }
+  nextNode._acRawHtml = rawNext;
+  hydrateRevealedDeferredImages(nextNode);
+  existingNode.replaceWith(nextNode);
+  return true;
+}
+
+function patchTurnBlockInPlace(existingBlock, nextHtml, turnIndex = 0) {
+  const nextBlock = parseTurnBlockElement(nextHtml);
+  if (!existingBlock || !nextBlock) return false;
+  existingBlock.className = nextBlock.className;
+  const nextTurnId = nextBlock.getAttribute("data-turn-id") || "";
+  if (nextTurnId) existingBlock.setAttribute("data-turn-id", nextTurnId);
+
+  const openKeys = captureTurnListOpenKeys([existingBlock], turnIndex);
+  const existingChildren = Array.from(existingBlock.children);
+  const nextChildren = Array.from(nextBlock.children);
+  const common = Math.min(existingChildren.length, nextChildren.length);
+  for (let i = 0; i < common; i += 1) {
+    patchNodeWithSameClassOrTag(existingChildren[i], nextChildren[i]);
+  }
+  for (let i = common; i < nextChildren.length; i += 1) {
+    hydrateRevealedDeferredImages(nextChildren[i]);
+    existingBlock.appendChild(nextChildren[i]);
+  }
+  for (let i = existingChildren.length - 1; i >= nextChildren.length; i -= 1) {
+    existingChildren[i].remove();
+  }
+  restoreTurnListOpenKeys([existingBlock], openKeys, turnIndex);
+  return true;
+}
+
+function syncTurnListIncremental(turnListEl, threadId, turns) {
+  const nextHtmls = turns.map((turn, idx) => renderTurnHtml(turn, buildTurnRenderOptions(turns, idx)));
+  const sameThread = renderedThreadCacheId === threadId;
+  const prevLen = renderedTurnHtmlCache.length;
+  const nextLen = nextHtmls.length;
+
+  // 头部加载更早历史时，若现有尾部序列与新列表末尾一致，仅在顶部前置新增回合，不重建下方可见节点与图片。
+  if (
+    sameThread
+    && prevLen > 0
+    && nextLen > prevLen
+    && turnListEl.children.length === prevLen
+  ) {
+    const prependCount = nextLen - prevLen;
+    let suffixMatches = true;
+    for (let i = 0; i < prevLen; i += 1) {
+      if (renderedTurnHtmlCache[i] !== nextHtmls[prependCount + i]) {
+        suffixMatches = false;
+        break;
+      }
+    }
+    if (suffixMatches) {
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < prependCount; i += 1) {
+        const el = parseTurnBlockElement(nextHtmls[i]);
+        if (el) frag.appendChild(el);
+      }
+      turnListEl.insertBefore(frag, turnListEl.firstChild);
+      renderedTurnHtmlCache = nextHtmls;
+      return;
+    }
+  }
+
+  if (
+    !sameThread
+    || prevLen === 0
+    || turnListEl.children.length !== prevLen
+  ) {
+    const openKeys = sameThread ? captureTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), 0) : null;
+    turnListEl.innerHTML = nextHtmls.join("");
+    for (const block of turnListEl.children) {
+      stampRawChildHtmls(block);
+    }
+    hydrateRevealedDeferredImages(turnListEl);
+    if (openKeys && openKeys.size) {
+      restoreTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), openKeys, 0);
+    }
+    renderedThreadCacheId = threadId;
+    renderedTurnHtmlCache = nextHtmls;
+    return;
+  }
+
+  const commonLen = Math.min(prevLen, nextLen);
+  for (let i = 0; i < commonLen; i += 1) {
+    if (renderedTurnHtmlCache[i] === nextHtmls[i]) continue;
+    const existingEl = turnListEl.children[i];
+    if (!patchTurnBlockInPlace(existingEl, nextHtmls[i], i)) {
+      const openKeys = captureTurnListOpenKeys([existingEl], i);
+      const replacement = parseTurnBlockElement(nextHtmls[i]);
+      if (existingEl && replacement) {
+        existingEl.replaceWith(replacement);
+        restoreTurnListOpenKeys([replacement], openKeys, i);
+      }
+    }
+  }
+
+  if (nextLen > prevLen) {
+    const frag = document.createDocumentFragment();
+    for (let i = prevLen; i < nextLen; i += 1) {
+      const el = parseTurnBlockElement(nextHtmls[i]);
+      if (el) frag.appendChild(el);
+    }
+    turnListEl.appendChild(frag);
+  } else if (prevLen > nextLen) {
+    while (turnListEl.children.length > nextLen) {
+      turnListEl.lastElementChild?.remove();
+    }
+  }
+
+  renderedThreadCacheId = threadId;
+  renderedTurnHtmlCache = nextHtmls;
+}
+
 function buildTurnRenderOptions(turns, idx) {
   const agentLabel = providerDisplayName(state.activeThread?.provider);
   const running = isActiveThreadRunning();
@@ -2070,6 +2611,7 @@ function buildTurnRenderOptions(turns, idx) {
     fallbackModel: state.activeThread?.model || "",
     fallbackEffort: state.activeThread?.reasoningEffort || "",
     goalSuspended: Boolean(isLastTurn && state.activeThread?.goalState?.active),
+    deferImages: true,
   };
 }
 
@@ -2088,32 +2630,59 @@ function syncLiveTurnFrontier() {
     }
     return;
   }
+  const vp = $("messagesViewport");
+  const anchor = captureViewportAnchor(vp);
   const lastIdx = turns.length - 1;
   const lastBlock = turnListEl.lastElementChild;
   if (!lastBlock) {
     renderActiveMessages();
     return;
   }
-  const openKeys = captureTurnListOpenKeys([lastBlock], lastIdx);
-  lastBlock.outerHTML = renderTurnHtml(turns[lastIdx], buildTurnRenderOptions(turns, lastIdx));
-  if (turnListEl.lastElementChild) {
-    restoreTurnListOpenKeys([turnListEl.lastElementChild], openKeys, lastIdx);
+  const nextLastHtml = renderTurnHtml(turns[lastIdx], buildTurnRenderOptions(turns, lastIdx));
+  if (renderedTurnHtmlCache[lastIdx] !== nextLastHtml) {
+    if (!patchTurnBlockInPlace(lastBlock, nextLastHtml, lastIdx)) {
+      const openKeys = captureTurnListOpenKeys([lastBlock], lastIdx);
+      const replacement = parseTurnBlockElement(nextLastHtml);
+      if (replacement) {
+        lastBlock.replaceWith(replacement);
+        restoreTurnListOpenKeys([replacement], openKeys, lastIdx);
+      } else {
+        lastBlock.outerHTML = nextLastHtml;
+        if (turnListEl.lastElementChild) {
+          restoreTurnListOpenKeys([turnListEl.lastElementChild], openKeys, lastIdx);
+        }
+      }
+    }
+    if (renderedTurnHtmlCache.length === turns.length) {
+      renderedTurnHtmlCache[lastIdx] = nextLastHtml;
+    }
   }
-  renderStreamingTurn();
-  scrollViewportIfFollowing();
+  renderStreamingTurn({ preserveAnchor: false });
+  if (state.autoFollow) {
+    scrollViewportIfFollowing();
+  } else {
+    restoreViewportAnchor(vp, anchor);
+  }
+  scheduleDeferredImagesObservation(vp);
 }
 
-function renderStreamingTurn() {
+function renderStreamingTurn({ preserveAnchor = true } = {}) {
   const el = $("streamingTurn");
+  const vp = $("messagesViewport");
+  const anchor = preserveAnchor ? captureViewportAnchor(vp) : null;
   const turns = activeDisplayTurns();
   if (!state.streamingText && turns.length > 0 && isActiveThreadRunning()) {
     el.hidden = true;
+    el._acLastHtml = "";
     el.innerHTML = "";
+    if (anchor) restoreViewportAnchor(vp, anchor);
     return;
   }
   if (!state.streamingText && !state.streamingThought) {
     el.hidden = true;
+    el._acLastHtml = "";
     el.innerHTML = "";
+    if (anchor) restoreViewportAnchor(vp, anchor);
     return;
   }
   el.hidden = false;
@@ -2148,7 +2717,7 @@ function renderStreamingTurn() {
               <span class="process-summary-hint">查看推理</span>
             </summary>
             <div class="process-summary-body">
-              <div class="tool-body md-body">${renderMarkdown(state.streamingThought)}</div>
+              <div class="tool-body md-body">${renderMarkdown(state.streamingThought, { deferImages: true })}</div>
             </div>
           </details>
         </div>
@@ -2167,7 +2736,7 @@ function renderStreamingTurn() {
               <span class="process-summary-hint">查看推理</span>
             </summary>
             <div class="process-summary-body">
-              <div class="tool-body md-body">${renderMarkdown(state.streamingThought)}</div>
+              <div class="tool-body md-body">${renderMarkdown(state.streamingThought, { deferImages: true })}</div>
             </div>
           </details>
           ${liveThoughtPreviewHtml}
@@ -2184,19 +2753,31 @@ function renderStreamingTurn() {
           <span class="msg-role">${escapeHtml(agentLabel)}</span>
           ${streamBadge?.label ? `<span class="turn-model-tag" title="${escapeHtml(streamBadge.title || streamBadge.label)}">${escapeHtml(streamBadge.label)}</span>` : ""}
           <span class="phase-tag is-streaming"><span class="live-frontier-dot" aria-hidden="true"></span>正在回复…</span>
+          ${renderMessageCopyButton(cleanStreamText)}
         </div>
-        <div class="msg-bubble agent-bubble md-body">${renderMarkdown(cleanStreamText, { threadId: streamThreadId })}</div>
+        <div class="msg-bubble agent-bubble md-body">${renderMarkdown(cleanStreamText, { threadId: streamThreadId, deferImages: true })}</div>
       </div>
     `);
   }
-  el.innerHTML = parts.join("");
-  scrollViewportIfFollowing();
+  const streamHtml = parts.join("");
+  if (el._acLastHtml !== streamHtml) {
+    el._acLastHtml = streamHtml;
+    el.innerHTML = streamHtml;
+    hydrateRevealedDeferredImages(el);
+  }
+  if (state.autoFollow) {
+    scrollViewportIfFollowing();
+  } else if (anchor) {
+    restoreViewportAnchor(vp, anchor);
+  }
+  scheduleDeferredImagesObservation(el);
 }
 
 function renderActiveMessages() {
   const thread = state.activeThread;
   const turnListEl = $("turnList");
   const loadOlderWrap = $("loadOlderWrap");
+  const vp = $("messagesViewport");
 
   syncWorkspaceVisibility();
   renderProjectBoard();
@@ -2212,22 +2793,29 @@ function renderActiveMessages() {
   if (!thread || state.boardOpen) {
     turnListEl.hidden = true;
     turnListEl.innerHTML = "";
+    resetTurnListRenderCache();
+    resetDeferredImageObserver({ resetRevealed: false });
     loadOlderWrap.hidden = true;
     $("streamingTurn").hidden = true;
+    $("streamingTurn")._acLastHtml = "";
     if (!state.boardOpen && !thread) {
       renderStreamingTurn();
     }
     return;
   }
 
+  const anchor = captureViewportAnchor(vp);
   turnListEl.hidden = false;
   loadOlderWrap.hidden = !state.nextCursor;
-  const openKeys = captureTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), 0);
   const turns = dedupeAdjacentTurns(Array.isArray(thread.turns) ? thread.turns : []);
-  turnListEl.innerHTML = turns.map((turn, idx) => renderTurnHtml(turn, buildTurnRenderOptions(turns, idx))).join("");
-  restoreTurnListOpenKeys(turnListEl.querySelectorAll(":scope > .turn-block"), openKeys, 0);
-  renderStreamingTurn();
-  scrollViewportIfFollowing();
+  syncTurnListIncremental(turnListEl, thread.id || state.activeThreadId || "", turns);
+  renderStreamingTurn({ preserveAnchor: false });
+  if (state.autoFollow) {
+    scrollViewportIfFollowing();
+  } else {
+    restoreViewportAnchor(vp, anchor);
+  }
+  scheduleDeferredImagesObservation(vp);
 }
 
 function renderPendingRequests() {
@@ -2240,7 +2828,46 @@ function renderPendingRequests() {
     return;
   }
   dock.hidden = false;
-  dock.innerHTML = list.map((req) => renderServerRequestCard(req)).join("");
+  syncServerRequestCards(dock, list);
+}
+
+function activeEditingQueueItem() {
+  const edit = state.editingQueueItem;
+  if (!edit || !state.activeThreadId || edit.threadId !== state.activeThreadId) return null;
+  return edit;
+}
+
+function renderComposerEditBanner() {
+  const banner = $("composerEditBanner");
+  if (!banner) return;
+  const edit = activeEditingQueueItem();
+  if (!edit) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+    return;
+  }
+  const pos = Math.max(1, Number(edit.position) || 1);
+  banner.hidden = false;
+  banner.innerHTML = `
+    <span class="composer-edit-banner-label">正在编辑排队 #${pos}</span>
+    <span class="composer-edit-banner-tip">保存后保留原排位</span>
+    <button type="button" class="composer-edit-banner-cancel" data-cancel-queue-edit="1">取消编辑</button>
+  `;
+}
+
+function clearQueueEditState({ restoreDraft = false } = {}) {
+  const prev = state.editingQueueItem;
+  state.editingQueueItem = null;
+  if (restoreDraft && prev && prev.threadId === state.activeThreadId) {
+    const input = $("promptInput");
+    if (input) input.value = String(prev.prevDraftText || "");
+    state.images = Array.isArray(prev.prevImages) ? [...prev.prevImages] : [];
+    state.composerGoal = Boolean(prev.prevGoal);
+    renderComposerImages();
+  }
+  renderComposerEditBanner();
+  renderQueuedTurns();
+  renderComposerControls();
 }
 
 function renderQueuedTurns() {
@@ -2248,13 +2875,19 @@ function renderQueuedTurns() {
   const items = state.queuedTurns || [];
   if (isBoardViewActive() || !items.length) {
     bar.hidden = true;
+    bar._acLastHtml = "";
     bar.innerHTML = "";
     return;
   }
   bar.hidden = false;
-  bar.innerHTML = renderQueuedTurnsPanelHtml(items, {
+  const queuedHtml = renderQueuedTurnsPanelHtml(items, {
     collapsed: state.queuedPanelCollapsed,
+    editingId: activeEditingQueueItem()?.id || "",
   });
+  if (bar._acLastHtml !== queuedHtml) {
+    bar._acLastHtml = queuedHtml;
+    bar.innerHTML = queuedHtml;
+  }
 }
 
 function applyActiveQueuedTurns(threadId, items = []) {
@@ -2265,12 +2898,25 @@ function applyActiveQueuedTurns(threadId, items = []) {
   syncThreadSummaryIntoList({ id: threadId, queuedCount: next.length });
 
   if (threadId === state.activeThreadId) {
+    const activeEdit = activeEditingQueueItem();
+    const matchedEditEntry = activeEdit ? next.find((q) => q.id === activeEdit.id) : null;
+    if (activeEdit && !matchedEditEntry) {
+      state.editingQueueItem = null;
+      renderComposerEditBanner();
+      renderComposerControls();
+      setComposerStatus("info", "原排队消息已自动发送或取消，当前编辑内容保留在输入框", { autoClearMs: 4500 });
+    } else if (activeEdit && matchedEditEntry && matchedEditEntry.position && matchedEditEntry.position !== activeEdit.position) {
+      activeEdit.position = matchedEditEntry.position;
+      renderComposerEditBanner();
+    }
+
+    const editingIdNow = activeEditingQueueItem()?.id || "";
     const prevSig = (state.queuedTurns || [])
-      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}`)
-      .join("|");
+      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}:${q.updatedAt || ""}`)
+      .join("|") + `#${editingIdNow}`;
     const nextSig = next
-      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}`)
-      .join("|");
+      .map((q) => `${q.id}:${q.text || ""}:${q.imageCount || 0}:${q.source || ""}:${q.goalMode ? 1 : 0}:${q.updatedAt || ""}`)
+      .join("|") + `#${editingIdNow}`;
     if (state.activeThread) {
       state.activeThread.queuedCount = next.length;
     }
@@ -2492,6 +3138,7 @@ function renderComposerControls() {
     hasActiveThread: Boolean(state.activeThreadId),
     isRunning: running,
     isSubmitting: state.isSubmitting,
+    isEditingQueue: Boolean(activeEditingQueueItem()),
     mode: modeSelect.value,
     text: $("promptInput").value,
     imageCount: state.images.length,
@@ -2515,6 +3162,7 @@ function renderComposerControls() {
   }
   renderComposerConfigChip();
   autoResizePromptInput();
+  syncAllCustomSelects();
 }
 
 function scrollViewportIfFollowing() {
@@ -3018,6 +3666,7 @@ async function reloadActiveThreadAfterTurnCompletion({
 }
 
 async function selectThread(compositeId, { focusScroll = true, preserveStatus = false } = {}) {
+  closeCustomSelectMenu();
   if (!preserveStatus) {
     clearComposerStatus();
   }
@@ -3026,6 +3675,9 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
     activeThreadReloadTimer = null;
   }
   const prevThreadId = state.activeThreadId;
+  if (compositeId !== prevThreadId && state.editingQueueItem) {
+    clearQueueEditState({ restoreDraft: state.editingQueueItem.threadId === prevThreadId });
+  }
   state.activeThreadId = compositeId;
   if (compositeId !== prevThreadId) {
     state.queuedPanelCollapsed = false;
@@ -3069,6 +3721,8 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
 
   const isSwitchingThread = compositeId !== prevThreadId || !state.activeThread;
   if (isSwitchingThread) {
+    resetTurnListRenderCache();
+    resetDeferredImageObserver({ resetRevealed: false });
     state.activeThread = null;
     state.nextCursor = null;
     state.queuedTurns = [];
@@ -3199,10 +3853,12 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
   const text = hasDirective && cleanedText ? rawText : rawText;
 
   const running = isActiveThreadRunning();
+  const editingQueue = !isOverride ? activeEditingQueueItem() : null;
   const sub = resolveComposerSubmission({
     hasActiveThread: Boolean(state.activeThreadId),
     isRunning: running,
     isSubmitting: false,
+    isEditingQueue: Boolean(editingQueue),
     mode: $("runningSubmitMode").value,
     text,
     imageCount: isOverride ? 0 : state.images.length,
@@ -3237,7 +3893,12 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
   state.autoFollow = true;
   setComposerConfigOpen(false);
   setTopbarMenuOpen(false);
-  setComposerStatus("pending", sub.action === "new" ? "正在创建会话并发送指令…" : "正在发送指令…");
+  setComposerStatus(
+    "pending",
+    sub.action === "new"
+      ? "正在创建会话并发送指令…"
+      : (sub.action === "update_queue" ? "正在保存排队消息…" : "正在发送指令…"),
+  );
   renderComposerControls();
 
   try {
@@ -3261,6 +3922,29 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
         await selectThread(created.thread.id);
       }
       setComposerStatus("success", "会话已创建并发送指令", { autoClearMs: 3000 });
+      return;
+    }
+
+    if (sub.action === "update_queue" && editingQueue) {
+      const updated = await apiPost("api/thread/queue/update", {
+        threadId: state.activeThreadId,
+        id: editingQueue.id,
+        text,
+        images: cleanImages,
+        model,
+        effort,
+        permissionMode,
+        goalMode,
+      }, { timeoutMs: requestTimeoutMs });
+      state.editingQueueItem = null;
+      resetDraftIfNeeded();
+      state.composerGoal = false;
+      renderComposerEditBanner();
+      applyActiveQueuedTurns(state.activeThreadId, updated.items || state.queuedTurns);
+      renderQueuedTurns();
+      renderComposerControls();
+      setComposerStatus("success", "已更新排队消息（保留原排位）", { autoClearMs: 3000 });
+      showToastBanner("已更新排队消息", { detail: text ? text.slice(0, 60) : `${cleanImages.length} 张图片` });
       return;
     }
 
@@ -3348,10 +4032,18 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     const errMsg = formatActionError(error, "请求发送失败");
     const errStatus = Number(error?.status || 0);
     const errCode = String(error?.code || "");
+    if (sub.action === "update_queue" && (errStatus === 404 || errCode === "queued_turn_not_found")) {
+      state.editingQueueItem = null;
+      renderComposerEditBanner();
+      renderQueuedTurns();
+      setComposerStatus("info", "原排队消息已自动发送或取消，当前编辑内容已保留在输入框", { autoClearMs: 5000 });
+      return;
+    }
     const isBusyConflict = errStatus === 409
       || errCode === "thread_busy"
       || errCode === "writer_conflict"
-      || /正在运行|占用/.test(errMsg);
+      || errCode === "codex_app_running"
+      || /already has an active writer|\bactive writer\b|正在运行|占用/.test(errMsg);
     const failedProvider = state.activeThread?.provider || currentComposerProvider();
     const failedProfileId = state.activeThread?.profileId || currentComposerProfileId();
     const altProfile = !isBusyConflict ? findFailoverCandidateProfile(state.profiles, failedProvider, failedProfileId) : null;
@@ -3692,7 +4384,15 @@ function connectEvents() {
     if (data.telemetry) applyTelemetrySnapshot(data.telemetry);
     if (data.remote) state.remoteStatus = data.remote;
     if (data.tunnel) state.tunnelStatus = data.tunnel;
+    if (data.update) applyUpdateStatusSnapshot(data.update, { fromReconnectReady: true });
     syncRemoteButtonIndicator();
+  });
+
+  es.addEventListener("update_status", (ev) => {
+    try {
+      const snap = JSON.parse(ev.data || "{}");
+      applyUpdateStatusSnapshot(snap);
+    } catch {}
   });
 
   es.addEventListener("remote_status", (ev) => {
@@ -4174,6 +4874,450 @@ function connectEvents() {
   });
 }
 
+const UPDATE_RESTART_FLAG_KEY = "agentControl.restartingForUpdate";
+
+function formatUpdateTimestamp(msOrSec) {
+  const num = Number(msOrSec);
+  if (!Number.isFinite(num) || num <= 0) return "尚未检查";
+  const ms = num > 1e12 ? num : num * 1000;
+  try {
+    return new Date(ms).toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "刚刚";
+  }
+}
+
+function updateStateLabel(snap) {
+  if (!snap) return "待检查";
+  if (snap.updating || snap.restartPending || snap.phase === "pulling" || snap.phase === "installing" || snap.phase === "building_desktop" || snap.phase === "restarting") {
+    if (snap.phase === "restarting") return "重启中";
+    if (snap.phase === "building_desktop") return "编桌面";
+    if (snap.phase === "installing") return "装依赖";
+    return "更新中";
+  }
+  if (snap.desktopUpdating || state.desktopUpdating) return "更新壳子";
+  if (snap.checking || snap.phase === "checking") return "检查中";
+  if (snap.updateState === "available") return `有 ${snap.behindCount || 1} 个更新`;
+  if (snap.updateState === "diverged") return "分支分叉";
+  if (snap.desktopApp?.installed && snap.desktopApp?.needsUpdate) return "壳子待更新";
+  if (snap.updateState === "up_to_date") return "已是最新";
+  return "本地模式";
+}
+
+function renderUpdateIndicators() {
+  const snap = state.updateStatus;
+  const desktopNeedsUpdate = Boolean(snap?.desktopApp?.installed && snap?.desktopApp?.needsUpdate);
+  const hasRepoUpdate = Boolean(snap?.hasUpdate);
+  const hasUpdate = hasRepoUpdate || desktopNeedsUpdate;
+  const isBusy = Boolean(
+    state.updateChecking
+    || state.updateApplying
+    || state.desktopUpdating
+    || snap?.checking
+    || snap?.updating
+    || snap?.desktopUpdating
+    || snap?.restartPending,
+  );
+  const verText = snap
+    ? `v${snap.packageVersion || "0.1.0"}${snap.localShortSha ? ` · ${snap.localShortSha}` : ""}`
+    : "v0.1.0";
+
+  const sidebarBtn = $("sidebarUpdateBtn");
+  const sidebarDot = $("sidebarUpdateDot");
+  const sidebarVer = $("sidebarUpdateVersion");
+  const sidebarBadge = $("sidebarUpdateBadge");
+  const sidebarAuto = $("sidebarAutoUpdateTag");
+  const menuBadge = $("topbarMenuUpdateBadge");
+  const moreDot = $("topbarMoreDot");
+
+  if (sidebarVer) sidebarVer.textContent = verText;
+  if (sidebarBtn) {
+    sidebarBtn.classList.toggle("has-update", hasUpdate);
+    if (hasRepoUpdate) {
+      sidebarBtn.title = `发现新版本 (${snap.behindCount || 1} 个提交)，点击查看详情并一键更新`;
+    } else if (desktopNeedsUpdate) {
+      sidebarBtn.title = snap.desktopApp?.reason || "检测到桌面 App 壳子待更新，点击查看并同步";
+    } else {
+      sidebarBtn.title = `当前版本 ${verText}，点击检查或配置自动更新`;
+    }
+  }
+  if (sidebarDot) {
+    const dotState = desktopNeedsUpdate && !hasRepoUpdate ? "available" : (snap?.updateState || "unknown");
+    const stateCls = isBusy ? "is-busy" : `is-${dotState}`;
+    sidebarDot.className = `update-indicator-dot ${stateCls}`;
+  }
+  if (sidebarBadge) {
+    sidebarBadge.hidden = !hasUpdate && !isBusy;
+    if (isBusy) {
+      sidebarBadge.textContent = state.desktopUpdating || snap?.desktopUpdating ? "编桌面" : "更新中";
+    } else if (hasRepoUpdate) {
+      sidebarBadge.textContent = snap?.behindCount > 1 ? `更新 ${snap.behindCount}` : "有更新";
+    } else if (desktopNeedsUpdate) {
+      sidebarBadge.textContent = "壳待更";
+    }
+  }
+  if (sidebarAuto) {
+    sidebarAuto.hidden = !snap?.autoUpdateEnabled;
+  }
+  if (menuBadge) {
+    menuBadge.hidden = !hasUpdate;
+    menuBadge.textContent = hasRepoUpdate ? (snap?.behindCount > 1 ? String(snap.behindCount) : "新") : "壳";
+  }
+  if (moreDot) {
+    const goalActive = Boolean(!state.boardOpen && state.activeThread?.goalState?.active);
+    moreDot.hidden = !(goalActive || hasUpdate);
+  }
+}
+
+function renderUpdateModal() {
+  const snap = state.updateStatus;
+  const pill = $("updateStatePill");
+  const currentEl = $("updateCurrentInfo");
+  const remoteEl = $("updateRemoteInfo");
+  const desktopEl = $("updateDesktopInfo");
+  const statusEl = $("updateActionStatus");
+  const dirtyEl = $("updateDirtyWarning");
+  const autoCheckEl = $("autoCheckUpdateToggle");
+  const autoUpdateEl = $("autoUpdateToggle");
+  const autoDesktopEl = $("autoUpdateDesktopToggle");
+  const pendingSec = $("updatePendingSection");
+  const pendingCountEl = $("updatePendingCount");
+  const pendingListEl = $("updatePendingList");
+  const desktopBtn = $("applyDesktopUpdateBtn");
+  const checkBtn = $("checkUpdateBtn");
+  const applyBtn = $("applyUpdateBtn");
+
+  const desktopInfo = snap?.desktopApp || null;
+  const desktopNeedsUpdate = Boolean(desktopInfo?.installed && desktopInfo?.needsUpdate);
+  const label = updateStateLabel(snap);
+  const isBusy = Boolean(
+    state.updateChecking
+    || state.updateApplying
+    || state.desktopUpdating
+    || snap?.checking
+    || snap?.updating
+    || snap?.desktopUpdating
+    || snap?.restartPending,
+  );
+  if (pill) {
+    pill.textContent = label;
+    pill.className = `tunnel-state-pill${(snap?.hasUpdate || desktopNeedsUpdate) ? " is-warn" : (snap?.updateState === "up_to_date" ? " is-ok" : "")}`;
+  }
+
+  if (currentEl) {
+    if (!snap) {
+      currentEl.innerHTML = `<span>正在读取本地版本与仓库状态…</span>`;
+    } else {
+      const shaPart = snap.localShortSha ? `${escapeHtml(snap.branch || "main")} @ <code>${escapeHtml(snap.localShortSha)}</code>` : "非 Git 部署";
+      const timePart = snap.lastCheckedAt ? formatUpdateTimestamp(snap.lastCheckedAt) : "尚未检查";
+      currentEl.innerHTML = `
+        <div class="update-meta-row">
+          <span>服务版本 <strong>v${escapeHtml(snap.packageVersion || "0.1.0")}</strong>${snap.uiVersion ? ` · UI ${escapeHtml(snap.uiVersion)}` : ""}</span>
+          <span>${shaPart}</span>
+        </div>
+        ${snap.localCommitSubject ? `<div class="update-meta-row"><span>最近提交：${escapeHtml(snap.localCommitSubject)}</span></div>` : ""}
+        <div class="update-meta-row">
+          <span>上次检查：${escapeHtml(timePart)}</span>
+          <span>${snap.managedService ? "后台常驻服务已托管（支持重启自恢复）" : "命令行直启模式"}</span>
+        </div>
+      `;
+    }
+  }
+
+  if (remoteEl) {
+    if (snap?.isGitRepo && snap?.remoteUrl) {
+      remoteEl.hidden = false;
+      const remoteVer = snap.remoteVersion ? `v${escapeHtml(snap.remoteVersion)} · ` : "";
+      const remoteSha = snap.remoteShortSha ? `<code>${escapeHtml(snap.remoteShortSha)}</code>` : "待同步";
+      remoteEl.innerHTML = `
+        <div class="update-meta-row">
+          <span>远端最新：${remoteVer}${remoteSha}</span>
+          <span>${snap.hasUpdate ? `落后 ${snap.behindCount} 个提交` : (snap.updateState === "up_to_date" ? "已与远端同步" : "")}</span>
+        </div>
+        ${snap.remoteCommitSubject ? `<div class="update-meta-row"><span>${escapeHtml(snap.remoteCommitSubject)}</span></div>` : ""}
+      `;
+    } else {
+      remoteEl.hidden = true;
+      remoteEl.innerHTML = "";
+    }
+  }
+
+  if (desktopEl) {
+    if (desktopInfo?.supported) {
+      desktopEl.hidden = false;
+      if (desktopInfo.installed) {
+        const tagClass = desktopInfo.needsUpdate ? "is-warn" : "is-ok";
+        const tagText = desktopInfo.needsUpdate ? "壳子待更新" : "壳子已同步";
+        const verStr = `v${escapeHtml(desktopInfo.installedVersion || "未知")}${desktopInfo.installedBuildNumber ? ` (#${escapeHtml(desktopInfo.installedBuildNumber)})` : ""}`;
+        const hashStr = desktopInfo.installedHash
+          ? `<code>${escapeHtml(desktopInfo.installedHash)}</code>${desktopInfo.expectedHash && desktopInfo.installedHash !== desktopInfo.expectedHash ? ` → <code>${escapeHtml(desktopInfo.expectedHash)}</code>` : ""}`
+          : "无指纹（旧壳）";
+        desktopEl.innerHTML = `
+          <div class="update-meta-row">
+            <span>桌面 App <strong>${verStr}</strong> · ${hashStr}</span>
+            <span class="update-desktop-tag ${tagClass}">${tagText}</span>
+          </div>
+          ${desktopInfo.reason ? `<div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason)}</span></div>` : ""}
+        `;
+      } else {
+        desktopEl.innerHTML = `
+          <div class="update-meta-row">
+            <span>桌面 App <strong>尚未安装</strong></span>
+            <span class="update-desktop-tag">未安装</span>
+          </div>
+          <div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason || "可在 Mac 上点击“构建桌面 App”或运行 agent-control desktop 安装")}</span></div>
+        `;
+      }
+    } else {
+      desktopEl.hidden = true;
+      desktopEl.innerHTML = "";
+    }
+  }
+
+  if (autoCheckEl && snap) autoCheckEl.checked = Boolean(snap.autoCheckEnabled);
+  if (autoUpdateEl && snap) autoUpdateEl.checked = Boolean(snap.autoUpdateEnabled);
+  if (autoDesktopEl && snap) {
+    autoDesktopEl.checked = snap.autoUpdateDesktopApp !== false;
+    autoDesktopEl.disabled = Boolean(desktopInfo && !desktopInfo.supported);
+  }
+
+  if (statusEl) {
+    const desktopActive = Boolean(state.desktopUpdating || snap?.desktopUpdating || snap?.desktopPhase === "error");
+    const msg = (desktopActive && snap?.desktopMessage)
+      ? snap.desktopMessage
+      : (snap?.phaseMessage || snap?.lastError || (snap?.desktopPhase === "done" ? snap?.desktopMessage : "") || "");
+    if (msg) {
+      const isErr = (desktopActive && snap?.desktopPhase === "error")
+        || snap?.phase === "error"
+        || (snap?.lastError && !snap?.hasUpdate);
+      statusEl.hidden = false;
+      statusEl.className = `composer-status ${isErr ? "is-error" : (snap?.restartPending || snap?.desktopPhase === "done" ? "is-success" : "is-pending")}`;
+      statusEl.textContent = msg;
+    } else {
+      statusEl.hidden = true;
+      statusEl.textContent = "";
+    }
+  }
+
+  if (dirtyEl) {
+    if (snap?.dirty) {
+      dirtyEl.hidden = false;
+      const sample = Array.isArray(snap.dirtySample) && snap.dirtySample.length
+        ? `（例如：<code>${escapeHtml(snap.dirtySample.slice(0, 3).join("、"))}</code>）`
+        : "";
+      dirtyEl.innerHTML = `检测到本地有 ${snap.dirtyCount || 1} 项未提交修改${sample}。为保护你的修改不被覆盖，在线拉取更新已锁定；请在本机提交或暂存修改后再更新。`;
+    } else if (snap?.desktopRebuildSuggested && !desktopInfo?.needsUpdate) {
+      dirtyEl.hidden = false;
+      dirtyEl.innerHTML = `本次更新包含 macOS 桌面外壳改动，可点击下方「更新桌面 App」同步重建。`;
+    } else {
+      dirtyEl.hidden = true;
+      dirtyEl.innerHTML = "";
+    }
+  }
+
+  if (pendingSec && pendingCountEl && pendingListEl) {
+    const commits = Array.isArray(snap?.pendingCommits) ? snap.pendingCommits : [];
+    pendingSec.hidden = commits.length === 0;
+    pendingCountEl.textContent = `${commits.length} 条提交`;
+    pendingListEl.innerHTML = commits.map((c) => `
+      <li class="update-pending-item">
+        <span class="update-pending-sha">${escapeHtml(c.sha || "")}</span>
+        <span class="update-pending-subject">${escapeHtml(c.subject || "")}</span>
+      </li>
+    `).join("");
+  }
+
+  if (desktopBtn) {
+    const showDesktopBtn = Boolean(desktopInfo?.supported && (desktopInfo?.installed || desktopInfo?.canBuild));
+    desktopBtn.hidden = !showDesktopBtn;
+    desktopBtn.disabled = !showDesktopBtn || !desktopInfo?.canBuild || isBusy;
+    if (state.desktopUpdating || snap?.desktopUpdating) desktopBtn.textContent = "编译 App 中…";
+    else if (!desktopInfo?.installed) desktopBtn.textContent = "构建桌面 App";
+    else if (desktopInfo?.needsUpdate) desktopBtn.textContent = "更新桌面 App";
+    else desktopBtn.textContent = "重编桌面 App";
+  }
+
+  if (checkBtn) {
+    checkBtn.disabled = isBusy;
+    checkBtn.textContent = state.updateChecking || snap?.checking ? "检查中…" : "立即检查";
+  }
+  if (applyBtn) {
+    const canApply = Boolean(snap?.canApply) && !isBusy;
+    applyBtn.disabled = !canApply;
+    if (snap?.updating || state.updateApplying) applyBtn.textContent = "正在更新…";
+    else if (snap?.restartPending) applyBtn.textContent = "重启服务中…";
+    else if (snap?.hasUpdate) applyBtn.textContent = `一键更新并重启 (${snap.behindCount || 1})`;
+    else applyBtn.textContent = "已是最新";
+  }
+}
+
+function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
+  if (!snap || typeof snap !== "object") return;
+  const prevHasUpdate = Boolean(state.updateStatus?.hasUpdate);
+  state.updateStatus = snap;
+  renderUpdateIndicators();
+  if ($("updateModal")?.open) {
+    renderUpdateModal();
+  }
+
+  if (fromReconnectReady) {
+    try {
+      const rawPending = sessionStorage.getItem(UPDATE_RESTART_FLAG_KEY);
+      if (rawPending) {
+        const parsed = JSON.parse(rawPending);
+        const currentMeta = document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "";
+        const shaChanged = parsed?.prevSha && snap.localSha && parsed.prevSha !== snap.localSha;
+        const uiChanged = snap.uiVersion && currentMeta && snap.uiVersion !== currentMeta;
+        if (!snap.updating && !snap.restartPending && (shaChanged || uiChanged)) {
+          sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY);
+          if (uiChanged && !($("promptInput")?.value || "").trim()) {
+            location.reload();
+            return;
+          }
+          showToastBanner("Agent Control 已更新完成", {
+            detail: snap.localShortSha ? `当前版本 ${snap.localShortSha}` : "服务已重新启动",
+          });
+        }
+      }
+    } catch {
+      try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
+    }
+  } else if (!prevHasUpdate && snap.hasUpdate && snap.behindCount > 0) {
+    showToastBanner("发现 Agent Control 新版本", {
+      detail: `领先 ${snap.behindCount} 个提交，点击右上角菜单或侧栏底部即可一键更新`,
+    });
+  } else if (!state.updateStatus?.desktopApp?.needsUpdate && snap.desktopApp?.installed && snap.desktopApp?.needsUpdate) {
+    showToastBanner("检测到桌面 App 壳子待更新", {
+      detail: snap.desktopApp?.reason || "点击侧栏版本或右上角菜单可一键同步编译",
+    });
+  }
+}
+
+async function refreshUpdateStatus() {
+  const snap = await apiGet("api/update");
+  applyUpdateStatusSnapshot(snap);
+  return snap;
+}
+
+async function triggerCheckUpdates() {
+  if (state.updateChecking || state.updateApplying) return;
+  state.updateChecking = true;
+  renderUpdateIndicators();
+  if ($("updateModal")?.open) renderUpdateModal();
+  try {
+    const snap = await apiPost("api/update/check", {}, { timeoutMs: 30_000 });
+    applyUpdateStatusSnapshot(snap);
+    if (snap.hasUpdate) {
+      showToastBanner("检测到新版本", { detail: `共 ${snap.behindCount || 1} 条更新可用` });
+    } else if (snap.updateState === "up_to_date") {
+      showToastBanner("当前已是最新版本", { detail: snap.localShortSha ? `Commit ${snap.localShortSha}` : "" });
+    }
+  } catch (error) {
+    const errMsg = formatActionError(error, "检查更新失败");
+    showToastBanner("检查更新失败", { detail: errMsg, error: true });
+    if (state.updateStatus) {
+      state.updateStatus = { ...state.updateStatus, lastError: errMsg, phase: "error", phaseMessage: errMsg };
+    }
+  } finally {
+    state.updateChecking = false;
+    renderUpdateIndicators();
+    if ($("updateModal")?.open) renderUpdateModal();
+  }
+}
+
+async function saveUpdateConfig(patch) {
+  try {
+    const snap = await apiPost("api/update/config", patch);
+    applyUpdateStatusSnapshot(snap);
+    showToastBanner("更新设置已保存", {
+      detail: snap.autoUpdateEnabled ? "已开启闲时自动更新" : (snap.autoCheckEnabled ? "已开启定期自动检测" : "已关闭自动检查"),
+    });
+  } catch (error) {
+    showToastBanner("保存更新设置失败", { detail: formatActionError(error), error: true });
+    renderUpdateModal();
+  }
+}
+
+async function triggerApplyUpdate() {
+  if (state.updateApplying || state.desktopUpdating || state.updateStatus?.restartPending) return;
+  const anyRunning = Number(state.telemetry?.totals?.runningCount || 0) > 0;
+  if (anyRunning && !window.confirm("当前仍有智能体正在运行，立即更新并重启服务会中断活跃流式输出。确定现在更新吗？")) {
+    return;
+  }
+  state.updateApplying = true;
+  if (state.updateStatus) {
+    try {
+      sessionStorage.setItem(UPDATE_RESTART_FLAG_KEY, JSON.stringify({
+        prevSha: state.updateStatus.localSha || "",
+        prevUiVersion: document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "",
+      }));
+    } catch {}
+  }
+  renderUpdateIndicators();
+  renderUpdateModal();
+  try {
+    const res = await apiPost("api/update/apply", { reason: "manual" }, { timeoutMs: 240_000 });
+    if (res?.status) applyUpdateStatusSnapshot(res.status);
+    showToastBanner(res?.updated ? "正在更新并重启服务" : "当前已是最新版本", {
+      detail: res?.message || "",
+    });
+  } catch (error) {
+    try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
+    const errMsg = formatActionError(error, "一键更新失败");
+    showToastBanner("更新失败", { detail: errMsg, error: true });
+    if (state.updateStatus) {
+      state.updateStatus = { ...state.updateStatus, phase: "error", phaseMessage: errMsg, lastError: errMsg };
+    }
+  } finally {
+    state.updateApplying = false;
+    renderUpdateIndicators();
+    if ($("updateModal")?.open) renderUpdateModal();
+  }
+}
+
+async function triggerDesktopAppUpdate() {
+  if (state.desktopUpdating || state.updateApplying || state.updateStatus?.restartPending) return;
+  state.desktopUpdating = true;
+  renderUpdateIndicators();
+  if ($("updateModal")?.open) renderUpdateModal();
+  try {
+    const res = await apiPost("api/update/desktop", { reason: "manual", relaunchIfRunning: true }, { timeoutMs: 240_000 });
+    if (res?.status) applyUpdateStatusSnapshot(res.status);
+    showToastBanner("桌面 App 壳子已更新", {
+      detail: res?.message || "Agent Control.app 已重新编译安装",
+    });
+  } catch (error) {
+    const errMsg = formatActionError(error, "更新桌面 App 失败");
+    showToastBanner("桌面 App 更新失败", { detail: errMsg, error: true });
+    if (state.updateStatus) {
+      state.updateStatus = { ...state.updateStatus, desktopPhase: "error", desktopMessage: errMsg };
+    }
+  } finally {
+    state.desktopUpdating = false;
+    renderUpdateIndicators();
+    if ($("updateModal")?.open) renderUpdateModal();
+  }
+}
+
+async function openUpdateModal() {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  const modal = $("updateModal");
+  if (!modal) return;
+  renderUpdateModal();
+  if (!modal.open) modal.showModal();
+  try {
+    await refreshUpdateStatus();
+  } catch {
+    // Keep existing modal content when status check is transient.
+  }
+}
+
 function localAppLaunchUrl(app) {
   const id = String(app?.id || "").trim();
   if (!id) return "#";
@@ -4192,10 +5336,10 @@ function renderLocalApps() {
         const href = escapeHtml(localAppLaunchUrl(app));
         const name = escapeHtml(app.name || app.id);
         const desc = escapeHtml(app.description || "");
-        return `<a class="local-app-chip" href="${href}" title="${desc}">`
-          + `<span class="btn-icon-glyph" data-icon="film" data-icon-size="13" aria-hidden="true"></span>`
+        const tip = desc ? `${name} · ${desc}` : name;
+        return `<a class="local-app-chip" href="${href}" title="${tip}">`
           + `<span class="local-app-chip-name">${name}</span>`
-          + `<span class="btn-icon-glyph local-app-chip-arrow" data-icon="external-link" data-icon-size="11" aria-hidden="true"></span>`
+          + `<span class="local-app-open-mark" aria-hidden="true">↗</span>`
           + `</a>`;
       }).join("")
       : "";
@@ -4607,9 +5751,6 @@ function ensureVoiceAudioUnlocked() {
       state.voice.audioElUnlocked = false;
     }
   }
-  try {
-    window.speechSynthesis?.getVoices?.();
-  } catch {}
 }
 
 function clearVoiceResumeTimer() {
@@ -4635,7 +5776,11 @@ function scheduleVoiceListenResume() {
     state.voice.resumeListenTimer = null;
     if (!state.voice.callActive) return;
     resumeVoiceAudioContextIfNeeded();
-    state.voice.vadDetector?.reset?.();
+    if (!state.voice.isProcessing && !state.voice.isSpeaking && !state.voice.isRecording && state.voice.pendingVoiceTurns.length) {
+      void sendVoiceTurnToMac();
+      return;
+    }
+    if (!state.voice.isRecording) state.voice.vadDetector?.reset?.();
     renderVoiceCallUi();
   }, 240);
 }
@@ -4655,7 +5800,6 @@ function stopVoicePlayback({ scheduleResume = false, abortReason = "superseded" 
     } catch {}
     state.voice.activeBufferSource = null;
   }
-  state.voice.activeUtterance = null;
   state.voice.isSpeaking = false;
   if (state.voice.audioEl) {
     try {
@@ -4674,9 +5818,6 @@ function stopVoicePlayback({ scheduleResume = false, abortReason = "superseded" 
     } catch {}
     state.voice.audioObjectUrl = "";
   }
-  try {
-    window.speechSynthesis?.cancel?.();
-  } catch {}
   if (scheduleResume) {
     scheduleVoiceListenResume();
   } else {
@@ -4793,7 +5934,9 @@ function renderVoiceCallUi() {
   } else if (v.isProcessing) {
     phaseClass = "is-busy";
     statusText = v.processingPhaseText || "正在理解刚才的话…";
-    hintText = "快速语音识别后立即开口回复，后台并行执行任务";
+    hintText = v.pendingVoiceTurns.length
+      ? `已收到后续 ${v.pendingVoiceTurns.length} 段语音，会依次处理`
+      : "仍在聆听，后续语音会保留并依次处理";
   } else if (v.isSpeaking) {
     phaseClass = "is-speaking";
     statusText = "正在语音回复";
@@ -4836,12 +5979,11 @@ function renderVoiceCallUi() {
   if (modelBadge) {
     const shortModel = String(v.modelName || "").includes("hydrogen")
       ? "Hydrogen"
-      : (v.modelName === "local-rules"
-          ? "本机规则"
-          : (compactModelBadgeLabel(v.modelName) || v.modelName || "自动轻量"));
+      : (compactModelBadgeLabel(v.modelName) || v.modelName || "自动轻量");
     const lockText = v.wakeLock ? " · 常亮" : "";
     const statusLabel = `${v.isMuted ? "已静音" : "免提"}${lockText}`;
-    modelBadge.textContent = v.modelOptions?.length ? statusLabel : `${shortModel} · ${statusLabel}`;
+    modelBadge.textContent = `${shortModel} · ${statusLabel}`;
+    modelBadge.title = `本轮处理：${v.modelName || "尚未处理"} · 语音识别：${v.asrEngine}`;
   }
   if (muteBtn && muteLabel) {
     muteBtn.classList.toggle("is-muted", v.isMuted);
@@ -4982,7 +6124,7 @@ function startBrowserSpeechRecognitionPipeline() {
   rec.continuous = true;
   rec.interimResults = true;
   rec.onresult = (event) => {
-    if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking || state.voice.isProcessing) return;
+    if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking) return;
     let finalText = "";
     let hasInterim = false;
     for (let i = event.resultIndex || 0; i < event.results.length; i += 1) {
@@ -5000,8 +6142,19 @@ function startBrowserSpeechRecognitionPipeline() {
       void sendVoiceTurnToMac({ transcriptText: finalText.trim() });
     }
   };
-  rec.onerror = () => {
+  rec.onerror = (event) => {
     state.voice.isRecording = false;
+    const code = event?.error || "unknown";
+    if (code === "no-speech" || code === "aborted") return;
+    state.voice.isMuted = true;
+    renderVoiceCallUi();
+    const reasons = {
+      "not-allowed": "麦克风或语音识别权限被拒绝，请检查浏览器权限",
+      "service-not-allowed": "浏览器不允许使用语音识别服务",
+      "audio-capture": "无法读取麦克风，请检查设备是否被占用",
+      network: "浏览器语音识别服务连接失败，可改用主机 Whisper",
+    };
+    $("voiceStateText").textContent = reasons[code] || `语音识别失败（${code}）`;
   };
   rec.onend = () => {
     if (state.voice.callActive && !state.voice.isMuted && !state.voice.asrAvailable && state.voice.speechRecognition === rec) {
@@ -5079,7 +6232,7 @@ async function startVoiceCallMicPipeline() {
     });
 
     processor.onaudioprocess = (ev) => {
-      if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking || state.voice.isProcessing) {
+      if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking) {
         state.voice.currentRms = 0;
         return;
       }
@@ -5282,129 +6435,6 @@ async function fetchVoiceTtsAudio({ text = "", utteranceId = "", preferOffline =
   } catch {
     return null;
   }
-}
-
-function speakWithBrowserFallback(text, { expectedMs = 0 } = {}) {
-  return new Promise((resolve) => {
-    const clean = stripMarkdownForSpeech(text, 360);
-    const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(clean));
-    if (!clean || typeof window.speechSynthesis === "undefined") {
-      state.voice.isSpeaking = false;
-      renderVoiceCallUi();
-      resolve({
-        engine: "browser",
-        outcome: "error",
-        reason: "speech_unavailable",
-        started: false,
-        playedMs: 0,
-        expectedMs: effExpected,
-        muted: false,
-        volume: 1,
-      });
-      return;
-    }
-
-    let settled = false;
-    let started = false;
-    let startAt = 0;
-    let startTimer = null;
-    let totalTimer = null;
-    let speakDelayTimer = null;
-    let abortHandler = null;
-
-    const finish = ({ outcome = "ended", reason = "" } = {}) => {
-      if (settled) return;
-      settled = true;
-      if (speakDelayTimer) clearTimeout(speakDelayTimer);
-      if (startTimer) clearTimeout(startTimer);
-      if (totalTimer) clearTimeout(totalTimer);
-      if (state.voice.activePlaybackAbort === abortHandler) {
-        state.voice.activePlaybackAbort = null;
-      }
-      state.voice.activeUtterance = null;
-      state.voice.isSpeaking = false;
-      const playedMs = started && startAt > 0 ? Math.max(0, Date.now() - startAt) : 0;
-      resolve({
-        engine: "browser",
-        outcome,
-        reason,
-        started,
-        playedMs,
-        expectedMs: effExpected,
-        muted: false,
-        volume: 1,
-      });
-    };
-
-    try {
-      const needsCancel = Boolean(window.speechSynthesis.speaking || window.speechSynthesis.pending);
-      if (needsCancel) {
-        window.speechSynthesis.cancel();
-      }
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume?.();
-      }
-      const utter = new SpeechSynthesisUtterance(clean);
-      utter.lang = "zh-CN";
-      utter.rate = 1.06;
-      const preferred = pickPreferredChineseSpeechVoice(window.speechSynthesis.getVoices());
-      if (preferred) utter.voice = preferred;
-      state.voice.activeUtterance = utter;
-      state.voice.isSpeaking = true;
-      renderVoiceCallUi();
-
-      abortHandler = (abortReason = "superseded") => {
-        try { window.speechSynthesis.cancel(); } catch {}
-        finish({ outcome: "interrupted", reason: abortReason });
-      };
-      state.voice.activePlaybackAbort = abortHandler;
-
-      const markStarted = () => {
-        if (!started) {
-          started = true;
-          startAt = Date.now();
-        }
-        if (startTimer) {
-          clearTimeout(startTimer);
-          startTimer = null;
-        }
-      };
-
-      utter.onstart = markStarted;
-      utter.onboundary = markStarted;
-      utter.onend = () => finish({ outcome: "ended", reason: "" });
-      utter.onerror = (ev) => finish({ outcome: "error", reason: String(ev?.error || "playback_failed") });
-
-      startTimer = setTimeout(() => {
-        if (!started && !settled) {
-          try { window.speechSynthesis.cancel(); } catch {}
-          finish({ outcome: "error", reason: "stalled" });
-        }
-      }, 2200);
-      totalTimer = setTimeout(() => {
-        if (!settled) {
-          try { window.speechSynthesis.cancel(); } catch {}
-          finish({ outcome: "error", reason: "speech_timeout" });
-        }
-      }, Math.max(4500, effExpected + 4500));
-
-      if (needsCancel) {
-        speakDelayTimer = setTimeout(() => {
-          speakDelayTimer = null;
-          if (settled) return;
-          try {
-            window.speechSynthesis.speak(utter);
-          } catch {
-            finish({ outcome: "error", reason: "speech_unavailable" });
-          }
-        }, 40);
-      } else {
-        window.speechSynthesis.speak(utter);
-      }
-    } catch {
-      finish({ outcome: "error", reason: "speech_unavailable" });
-    }
-  });
 }
 
 async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
@@ -5640,7 +6670,6 @@ async function playVoiceTtsResult({
   actionTag = "",
   priority = "normal",
   allowOfflineRetry = true,
-  allowBrowserFallback = true,
   resumeAfter = true,
 } = {}) {
   const clean = stripMarkdownForSpeech(spokenReply, 360);
@@ -5649,7 +6678,7 @@ async function playVoiceTtsResult({
     return { status: "played", heard: true, reason: "", playedMs: 0, expectedMs: 0, skipped: true };
   }
 
-  if (state.voice.activePlaybackAbort || state.voice.activeBufferSource || state.voice.activeUtterance) {
+  if (state.voice.activePlaybackAbort || state.voice.activeBufferSource) {
     stopVoicePlayback({ scheduleResume: false, abortReason: "superseded" });
   }
   const norm = normalizeVoiceTtsPayload(tts ? { ...tts, utteranceId: utteranceId || tts.utteranceId, text: tts.text || clean } : { utteranceId, text: clean });
@@ -5721,34 +6750,11 @@ async function playVoiceTtsResult({
     }
   }
 
-  let browserEval = null;
-  if (allowBrowserFallback && state.voice.callActive && primaryReason !== "muted_output") {
-    const rawBrowser = await speakWithBrowserFallback(clean, { expectedMs: norm.expectedMs });
-    lastProvider = rawBrowser.outcome === "error" && norm.hasAudio ? lastProvider : "browser";
-    browserEval = evaluateVoicePlaybackOutcome({ ...rawBrowser, text: clean, expectedMs: norm.expectedMs, priority });
-    if (browserEval.heard) {
-      markUtteranceHeard(effUtteranceId, { status: browserEval.status });
-      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...browserEval, provider: "browser", text: clean });
-      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
-      else renderVoiceCallUi();
-      return { ...browserEval, utteranceId: effUtteranceId };
-    }
-    if (rawBrowser.outcome === "interrupted") {
-      if (browserEval.reason !== "hangup" && browserEval.reason !== "superseded") {
-        markUtteranceUnheard({ id: effUtteranceId, text: clean, actionTag, reason: browserEval.reason, status: "interrupted", priority, expectedMs: norm.expectedMs, ttsCache: norm });
-      }
-      void reportVoicePlaybackAck({ utteranceId: effUtteranceId, ...browserEval, provider: "browser", text: clean });
-      if (resumeAfter && state.voice.callActive) scheduleVoiceListenResume();
-      else renderVoiceCallUi();
-      return { ...browserEval, utteranceId: effUtteranceId };
-    }
-  }
-
   state.voice.isSpeaking = false;
   const preservedReason = (primaryReason === "autoplay_blocked" || primaryReason === "muted_output" || primaryReason === "fake_short_end")
     ? primaryReason
-    : (browserEval?.reason || primaryReason || "speech_unavailable");
-  const finalPlayedMs = Math.max(primaryEval?.playedMs || 0, browserEval?.playedMs || 0);
+    : (primaryReason || "speech_unavailable");
+  const finalPlayedMs = primaryEval?.playedMs || 0;
   markUtteranceUnheard({
     id: effUtteranceId,
     text: clean,
@@ -6053,25 +7059,22 @@ async function applyVoiceExecutionEffect(executed = {}) {
 
 async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", mode = "turn" } = {}) {
   if (!state.voice.callActive) return;
+  if (wavUint8Array?.length || String(transcriptText || "").trim() || mode === "briefing") {
+    state.voice.pendingVoiceTurns.push({ wavUint8Array, transcriptText, mode });
+  }
+  if (state.voice.isProcessing || state.voice.isSpeaking || !state.voice.pendingVoiceTurns.length) return;
+  ({ wavUint8Array, transcriptText, mode } = state.voice.pendingVoiceTurns.shift());
   if (mode === "briefing" || String(transcriptText || "").trim()) {
     state.voice.lastUserActivityAt = Date.now();
     clearApprovalVoiceReminder();
   }
   if (state.voice.backendMissing) {
-    const fallbackText = buildLocalProgressBriefing({
-      groups: getProjectGroups({ ignoreFilters: true }),
-      activeThread: state.activeThread,
-      pendingRequests: state.pendingRequests,
-    });
-    const fallbackId = nextVoiceUtteranceId("local");
     appendVoiceTranscriptEntry({
-      id: fallbackId,
-      heardText: transcriptText || "播报进度",
-      spokenReply: fallbackText,
-      actionTag: "需检查本机热扩展",
-      deliveryStatus: "queued",
+      id: nextVoiceUtteranceId("unavailable"),
+      heardText: transcriptText,
+      spokenReply: "语音理解服务暂不可用，未执行任何操作，请检查本机服务。",
+      actionTag: "模型未处理",
     });
-    await playVoiceTtsResult({ utteranceId: fallbackId, spokenReply: fallbackText, actionTag: "需检查本机热扩展" });
     return;
   }
 
@@ -6103,17 +7106,27 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
       tts: true,
     });
     clearVoiceProcessingStageTimer();
+    if (res?.asrEngine) state.voice.asrEngine = res.asrEngine;
+    if (res?.noSpeech) {
+      state.voice.isProcessing = false;
+      if (res.ignoredText) {
+        if (res.model) state.voice.modelName = res.model;
+        appendVoiceTranscriptEntry({
+          id: nextVoiceUtteranceId("unmatched"),
+          heardText: res.ignoredText,
+          spokenReply: "",
+          actionTag: "模型判定无需操作",
+        });
+      }
+      renderVoiceCallUi();
+      scheduleVoiceListenResume();
+      return;
+    }
     if (res?.executed?.model || res?.dispatchModel || res?.model) {
       state.voice.modelName = res?.executed?.model || res?.dispatchModel || res.model;
     }
     if (res?.executed?.provider) {
       state.voice.dispatchProvider = res.executed.provider;
-    }
-    if (res?.noSpeech) {
-      state.voice.isProcessing = false;
-      renderVoiceCallUi();
-      scheduleVoiceListenResume();
-      return;
     }
     state.voice.lastUserActivityAt = Date.now();
     clearApprovalVoiceReminder();
@@ -6122,7 +7135,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
     const actionTag = res?.executed?.summaryTag || "";
     const normTurnTts = normalizeVoiceTtsPayload(res);
 
-    if (spokenReply && state.voice.callActive) {
+    if (spokenReply && state.voice.callActive && !state.voice.isRecording) {
       state.voice.isSpeaking = true;
     }
     state.voice.isProcessing = false;
@@ -6157,7 +7170,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
 
     if (spokenReply && state.voice.callActive) {
       let ttsPayload = normTurnTts.hasAudio ? normTurnTts : null;
-      if (!ttsPayload) {
+      if (!ttsPayload && state.voice.isSpeaking) {
         ttsPayload = await fetchVoiceTtsAudio({ text: spokenReply, utteranceId, register: false });
         if (ttsPayload) updateVoiceTranscriptEntry(utteranceId, { ttsCache: ttsPayload });
       }
@@ -6443,6 +7456,7 @@ async function openVoiceModal() {
   state.voice.isProcessing = false;
   state.voice.isSpeaking = false;
   state.voice.isRecording = false;
+  state.voice.pendingVoiceTurns = [];
   state.voice.broadcastQueue = [];
   state.voice.unheardQueue = [];
   state.voice.remindedRequestIds.clear();
@@ -6504,6 +7518,7 @@ function hangupVoiceCall({ closeModal = true } = {}) {
   state.voice.callActive = false;
   state.voice.minimized = false;
   state.voice.callId = "";
+  state.voice.pendingVoiceTurns = [];
   state.voice.broadcastQueue = [];
   state.voice.unheardQueue = [];
   state.voice.remindedRequestIds.clear();
@@ -6526,7 +7541,144 @@ function hangupVoiceCall({ closeModal = true } = {}) {
   }
 }
 
+function clampSidebarWidth(width, viewportWidth = window.innerWidth) {
+  const numeric = Number(width);
+  if (!Number.isFinite(numeric)) return DEFAULT_SIDEBAR_WIDTH;
+  const viewportMax =
+    Number.isFinite(viewportWidth) && viewportWidth > 0
+      ? Math.max(MIN_SIDEBAR_WIDTH, Math.floor(viewportWidth * 0.48))
+      : MAX_SIDEBAR_WIDTH;
+  const maxAllowed = Math.min(MAX_SIDEBAR_WIDTH, viewportMax);
+  return Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxAllowed, Math.round(numeric)));
+}
+
+function loadSavedSidebarWidth() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_PREF_KEY);
+    if (!raw) return DEFAULT_SIDEBAR_WIDTH;
+    return clampSidebarWidth(Number(raw));
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+}
+
+function saveSidebarWidth(width) {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_PREF_KEY, String(clampSidebarWidth(width)));
+  } catch {
+    // Ignore storage write errors in restricted webviews.
+  }
+}
+
+function applySidebarWidth(width, { persist = false } = {}) {
+  const clamped = clampSidebarWidth(width);
+  document.documentElement.style.setProperty("--sidebar-width", `${clamped}px`);
+  const resizer = $("sidebarResizer");
+  if (resizer) {
+    resizer.setAttribute("aria-valuenow", String(clamped));
+    resizer.setAttribute("aria-valuemin", String(MIN_SIDEBAR_WIDTH));
+    resizer.setAttribute("aria-valuemax", String(clampSidebarWidth(MAX_SIDEBAR_WIDTH)));
+  }
+  if (persist) {
+    saveSidebarWidth(clamped);
+  }
+  return clamped;
+}
+
+function bindSidebarResizer() {
+  const resizer = $("sidebarResizer");
+  const sidebar = $("sidebar");
+  if (!resizer || !sidebar) return;
+
+  applySidebarWidth(loadSavedSidebarWidth());
+
+  let activePointerId = null;
+  let startX = 0;
+  let startWidth = DEFAULT_SIDEBAR_WIDTH;
+  let currentWidth = loadSavedSidebarWidth();
+
+  const finishDrag = ({ persist = true } = {}) => {
+    if (activePointerId === null) return;
+    activePointerId = null;
+    resizer.classList.remove("is-resizing");
+    document.body.classList.remove("is-resizing-sidebar");
+    if (persist) {
+      applySidebarWidth(currentWidth, { persist: true });
+    }
+  };
+
+  resizer.addEventListener("pointerdown", (e) => {
+    if (window.matchMedia?.("(max-width: 960px)")?.matches) return;
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    e.preventDefault();
+    activePointerId = e.pointerId;
+    startX = e.clientX;
+    startWidth = sidebar.getBoundingClientRect().width || loadSavedSidebarWidth();
+    currentWidth = clampSidebarWidth(startWidth);
+    resizer.classList.add("is-resizing");
+    document.body.classList.add("is-resizing-sidebar");
+    try {
+      resizer.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Ignore unsupported capture errors.
+    }
+  });
+
+  resizer.addEventListener("pointermove", (e) => {
+    if (activePointerId === null || e.pointerId !== activePointerId) return;
+    const delta = e.clientX - startX;
+    currentWidth = applySidebarWidth(startWidth + delta);
+  });
+
+  resizer.addEventListener("pointerup", (e) => {
+    if (e.pointerId !== activePointerId) return;
+    finishDrag({ persist: true });
+  });
+
+  resizer.addEventListener("pointercancel", (e) => {
+    if (e.pointerId !== activePointerId) return;
+    finishDrag({ persist: false });
+  });
+
+  resizer.addEventListener("lostpointercapture", () => {
+    finishDrag({ persist: true });
+  });
+
+  resizer.addEventListener("dblclick", () => {
+    if (window.matchMedia?.("(max-width: 960px)")?.matches) return;
+    currentWidth = applySidebarWidth(DEFAULT_SIDEBAR_WIDTH, { persist: true });
+  });
+
+  resizer.addEventListener("keydown", (e) => {
+    if (window.matchMedia?.("(max-width: 960px)")?.matches) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home") return;
+    e.preventDefault();
+    const step = e.shiftKey ? 24 : 12;
+    if (e.key === "Home") {
+      currentWidth = applySidebarWidth(DEFAULT_SIDEBAR_WIDTH, { persist: true });
+      return;
+    }
+    const base = sidebar.getBoundingClientRect().width || loadSavedSidebarWidth();
+    const next = e.key === "ArrowLeft" ? base - step : base + step;
+    currentWidth = applySidebarWidth(next, { persist: true });
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.matchMedia?.("(max-width: 960px)")?.matches) return;
+    currentWidth = applySidebarWidth(loadSavedSidebarWidth());
+  });
+}
+
 function bindEvents() {
+  bindSidebarResizer();
+  initComposerCustomSelects([
+    "composerProviderSelect",
+    "composerProfileSelect",
+    "modelSelect",
+    "effortSelect",
+    "permissionSelect",
+    "runningSubmitMode",
+  ]);
   $("menuBtn").addEventListener("click", () => setSidebarOpen(true));
   $("sidebarBackdrop").addEventListener("click", () => setSidebarOpen(false));
 
@@ -6560,6 +7712,15 @@ function bindEvents() {
   });
 
   const handleTelemetryBarClick = (e) => {
+    if (e.target.closest("[data-execution-refresh]")) {
+      void refreshExecutionStats();
+      return;
+    }
+    const executionThread = e.target.closest("[data-execution-thread]");
+    if (executionThread) {
+      void selectThread(executionThread.dataset.executionThread, { focusScroll: true }).catch((error) => showToastBanner("打开会话失败", { detail: formatActionError(error), error: true }));
+      return;
+    }
     if (e.target.closest("[data-telemetry-mobile-close]")) {
       e.stopPropagation();
       state.mobileTelemetryOpen = false;
@@ -6653,6 +7814,13 @@ function bindEvents() {
   };
   $("topbarTelemetrySlot")?.addEventListener("click", handleTelemetryBarClick);
   $("agentTelemetryBar")?.addEventListener("click", handleTelemetryBarClick);
+  $("agentTelemetryBar")?.addEventListener("change", (e) => {
+    if (e.target.matches("[data-execution-days]")) state.executionStatsDays = Number(e.target.value);
+    else if (e.target.matches("[data-execution-provider]")) state.executionStatsProvider = e.target.value;
+    else return;
+    state.executionStats = null;
+    void refreshExecutionStats();
+  });
 
   $("sidebarBatchSelectBtn")?.addEventListener("click", () => {
     if (state.batchSelect.active) exitBatchSelectMode();
@@ -6717,7 +7885,12 @@ function bindEvents() {
     if (state.topbarMenuOpen && !e.target.closest(".topbar-more-wrap")) {
       setTopbarMenuOpen(false);
     }
-    if (state.composerConfigOpen && !e.target.closest("#composerConfigPopover") && !e.target.closest("#composerConfigBtn")) {
+    if (
+      state.composerConfigOpen
+      && !e.target.closest("#composerConfigPopover")
+      && !e.target.closest("#composerConfigBtn")
+      && !e.target.closest("#acCustomSelectPopover")
+    ) {
       setComposerConfigOpen(false);
     }
     if (
@@ -7198,12 +8371,14 @@ function bindEvents() {
 
   $("messagesViewport")?.addEventListener("error", (e) => {
     const img = e.target;
-    if (!(img instanceof HTMLImageElement) || !img.classList.contains("msg-image")) return;
-    const card = img.closest(".msg-image-card");
-    if (!card) return;
-    card.classList.add("is-broken");
-    const fallback = card.querySelector(".msg-file-chip.is-fallback");
-    if (fallback) fallback.hidden = false;
+    if (!(img instanceof HTMLImageElement)) return;
+    if (!img.classList.contains("msg-image") && !img.classList.contains("md-inline-img")) return;
+    const failedSrc = img.getAttribute("src") || img.currentSrc || img.src || "";
+    if (failedSrc) {
+      markThreadImageFailed(failedSrc);
+      revealedDeferredImageSrcs.delete(failedSrc);
+    }
+    markCardImageBroken(img);
   }, true);
 
   document.addEventListener("click", (e) => {
@@ -7218,8 +8393,30 @@ function bindEvents() {
         return;
       }
     }
+    const revealAllTrigger = e.target.closest("[data-reveal-thread-images]");
+    if (revealAllTrigger) {
+      const activeTid = state.activeThread?.id || state.activeThreadId || "";
+      if (activeTid) {
+        setThreadImagesUnlocked(activeTid, true);
+      }
+      return;
+    }
+    const revealInlineTrigger = e.target.closest("[data-reveal-inline-img]");
+    if (revealInlineTrigger) {
+      const wrap = revealInlineTrigger.closest(".md-inline-img-wrap");
+      const lazyImg = wrap?.querySelector("img[data-lazy-src]");
+      if (lazyImg) {
+        activateDeferredImage(lazyImg);
+      }
+      return;
+    }
     const previewTrigger = e.target.closest("[data-preview-src]");
     if (previewTrigger && !e.target.closest("[data-remove-img]")) {
+      const deferredImg = previewTrigger.querySelector("img[data-lazy-src]");
+      if (deferredImg) {
+        activateDeferredImage(deferredImg);
+        return;
+      }
       const src = previewTrigger.dataset.previewSrc || "";
       const rawSrc = previewTrigger.dataset.previewRaw || "";
       const caption = previewTrigger.dataset.previewCaption || "";
@@ -7230,6 +8427,10 @@ function bindEvents() {
     }
     const inlineImg = e.target.closest(".md-inline-img");
     if (inlineImg) {
+      if (inlineImg.dataset.lazySrc) {
+        activateDeferredImage(inlineImg);
+        return;
+      }
       const src = inlineImg.dataset.previewSrc || inlineImg.getAttribute("src") || "";
       const rawSrc = inlineImg.dataset.previewRaw || "";
       const caption = inlineImg.dataset.previewCaption || inlineImg.getAttribute("alt") || "图片预览";
@@ -7341,20 +8542,26 @@ function bindEvents() {
       }
       return;
     }
-    const copyBtn = e.target.closest("[data-copy-code]");
+    const messageCopyBtn = e.target.closest("[data-copy-message]");
+    const copyBtn = messageCopyBtn || e.target.closest("[data-copy-code]");
     if (!copyBtn) return;
     const block = copyBtn.closest(".md-code-block");
-    const codeText = block?.querySelector("pre > code")?.textContent ?? "";
+    const codeText = messageCopyBtn
+      ? messageCopyBtn.dataset.copyMessage
+      : (block?.querySelector("pre > code")?.textContent ?? "");
     if (!codeText) return;
+    const copyLabel = messageCopyBtn?.querySelector("span") || copyBtn;
     const copied = await copyTextToClipboard(codeText);
     if (copied) {
-      copyBtn.textContent = "已复制";
+      copyLabel.textContent = "已复制";
       copyBtn.classList.add("is-copied");
       clearTimeout(copyBtn._copyTimer);
       copyBtn._copyTimer = setTimeout(() => {
-        copyBtn.textContent = "复制";
+        copyLabel.textContent = "复制";
         copyBtn.classList.remove("is-copied");
       }, 1500);
+    } else if (messageCopyBtn) {
+      showToastBanner("复制失败", { detail: "请重试或选中文字后复制", error: true });
     }
   });
   $("loadOlderBtn").addEventListener("click", async () => {
@@ -7429,6 +8636,13 @@ function bindEvents() {
     }
   });
 
+  $("toggleThreadImagesBtn")?.addEventListener("click", () => {
+    const tid = state.activeThread?.id || state.activeThreadId || "";
+    if (!tid) return;
+    setThreadImagesUnlocked(tid, !isThreadImagesUnlocked(tid));
+    setTopbarMenuOpen(false);
+  });
+
   $("archiveThreadBtn").addEventListener("click", async () => {
     if (!state.activeThreadId || !state.activeThread) return;
     try {
@@ -7455,31 +8669,136 @@ function bindEvents() {
       return;
     }
 
+    const steerBtn = e.target.closest("[data-queue-steer]");
+    if (steerBtn && state.activeThreadId) {
+      if (steerBtn.disabled) return;
+      const steerId = steerBtn.dataset.queueSteer;
+      const entry = (state.queuedTurns || []).find((item) => item.id === steerId);
+      steerBtn.disabled = true;
+      setComposerStatus("pending", "正在直接引导进当前会话…");
+      try {
+        const res = await apiPost("api/thread/queue/steer", {
+          threadId: state.activeThreadId,
+          id: steerId,
+          expectedTurnId: state.liveActivity?.turnId || "",
+        });
+        applyActiveQueuedTurns(state.activeThreadId, res.items || []);
+        if (state.activeThread) {
+          const entryText = String(entry?.text || res.entry?.text || "").trim();
+          const imageCount = Number(entry?.imageCount ?? res.entry?.imageCount ?? 0);
+          const userContent = [
+            ...(entryText ? [{ type: "text", text: entryText }] : []),
+            ...(imageCount > 0 ? [{ type: "text", text: `[图片附件 x${imageCount}]` }] : []),
+          ];
+          if (userContent.length) {
+            if (!Array.isArray(state.activeThread.turns)) state.activeThread.turns = [];
+            const tailTurn = state.activeThread.turns[state.activeThread.turns.length - 1];
+            if (tailTurn && (tailTurn.status === "inProgress" || tailTurn.status === "running")) {
+              tailTurn.items = [
+                ...(Array.isArray(tailTurn.items) ? tailTurn.items : []),
+                { type: "userMessage", id: `user-steer-${Date.now()}`, content: userContent },
+              ];
+            } else {
+              const turnId = res.result?.turn?.id || `optimistic-turn-${Date.now()}`;
+              state.activeThread.turns.push({
+                id: turnId,
+                status: "inProgress",
+                startedAt: Math.floor(Date.now() / 1000),
+                items: [{ type: "userMessage", id: `user-${turnId}`, content: userContent }],
+              });
+            }
+          }
+          state.activeThread.live = true;
+          syncThreadSummaryIntoList({ id: state.activeThreadId, live: true });
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            turnId: res.result?.turn?.id || state.liveActivity?.turnId || "",
+            status: "running",
+            phase: `${providerDisplayName(state.activeThread.provider)} 执行中`,
+          });
+          renderThreadList();
+          renderTopbarAndControls();
+          renderActiveMessages();
+          scheduleActiveThreadReload(state.activeThreadId, 350);
+        }
+        setComposerStatus("success", "已将排队消息直接引导进当前会话", { autoClearMs: 2600 });
+      } catch (error) {
+        const errMsg = formatActionError(error, "引导失败");
+        setComposerStatus("error", `引导排队消息失败：${errMsg}`);
+        showToastBanner("引导失败", { detail: errMsg, error: true });
+      } finally {
+        if (steerBtn.isConnected) steerBtn.disabled = false;
+      }
+      return;
+    }
+
     const editBtn = e.target.closest("[data-queue-edit]");
     if (editBtn && state.activeThreadId) {
       const editId = editBtn.dataset.queueEdit;
       const entry = (state.queuedTurns || []).find((item) => item.id === editId);
+      const targetThreadId = state.activeThreadId;
       try {
-        const res = await apiPost("api/thread/queue/cancel", {
-          threadId: state.activeThreadId,
-          id: editId,
-        });
-        applyActiveQueuedTurns(state.activeThreadId, res.items || []);
+        editBtn.disabled = true;
+        const res = await apiGet(
+          `api/thread/queue/entry?threadId=${encodeURIComponent(targetThreadId)}&id=${encodeURIComponent(editId)}`,
+        );
+        if (state.activeThreadId !== targetThreadId) return;
+        const fullEntry = res?.entry || entry;
+        if (!fullEntry) {
+          throw new Error("未找到该排队消息");
+        }
         const input = $("promptInput");
-        const entryText = String(entry?.text || "");
-        if (input && entryText) {
-          input.value = input.value.trim() ? `${entryText}\n${input.value}` : entryText;
+        const existingEdit = activeEditingQueueItem();
+        const prevDraftText = existingEdit ? existingEdit.prevDraftText : String(input?.value || "");
+        const prevImages = existingEdit ? existingEdit.prevImages : [...(state.images || [])];
+        const prevGoal = existingEdit ? existingEdit.prevGoal : Boolean(state.composerGoal);
+
+        const restoredImages = (Array.isArray(fullEntry.images) ? fullEntry.images : [])
+          .filter((img) => img && img.dataUrl)
+          .map((img, idx) => ({
+            id: `queue-edit-${editId}-${idx}-${Date.now()}`,
+            name: img.name || `image-${idx + 1}.jpg`,
+            dataUrl: img.dataUrl,
+            byteLength: estimateDataUrlBytes(img.dataUrl),
+            compressed: true,
+          }));
+
+        const listIndex = (state.queuedTurns || []).findIndex((q) => q.id === editId);
+        state.editingQueueItem = {
+          id: editId,
+          threadId: targetThreadId,
+          position: Number(fullEntry.position) || (listIndex >= 0 ? listIndex + 1 : 1),
+          prevDraftText,
+          prevImages,
+          prevGoal,
+        };
+        if (input) {
+          input.value = String(fullEntry.text || "");
         }
-        if (entry?.goalMode && !state.composerGoal) {
-          state.composerGoal = true;
-        }
+        state.images = restoredImages;
+        state.composerGoal = Boolean(fullEntry.goalMode);
+        renderComposerImages();
+        renderComposerEditBanner();
+        renderQueuedTurns();
         renderComposerControls();
         input?.focus();
-        if ((entry?.imageCount || 0) > 0) {
-          setComposerStatus("info", "文本已撤回到输入框（原排队图片未回填，请按需重新添加）", { autoClearMs: 4500 });
-        }
+        setComposerStatus(
+          "info",
+          restoredImages.length
+            ? `已载入排队 #${state.editingQueueItem.position}（含 ${restoredImages.length} 张图片），修改后点击“保存更新”`
+            : `已载入排队 #${state.editingQueueItem.position}，修改后点击“保存更新”`,
+          { autoClearMs: 4000 },
+        );
       } catch (error) {
-        setComposerStatus("error", `撤回排队失败：${formatActionError(error)}`);
+        if (Number(error?.status || 0) === 404 || error?.code === "queued_turn_not_found") {
+          setComposerStatus("info", "该排队消息已自动发送或取消", { autoClearMs: 4000 });
+          void apiGet(`api/thread/queue?id=${encodeURIComponent(targetThreadId)}`)
+            .then((qRes) => applyActiveQueuedTurns(targetThreadId, qRes?.items || []))
+            .catch(() => {});
+        } else {
+          setComposerStatus("error", `载入排队消息失败：${formatActionError(error)}`);
+        }
+      } finally {
+        if (editBtn.isConnected) editBtn.disabled = false;
       }
       return;
     }
@@ -7492,10 +8811,20 @@ function bindEvents() {
         threadId: state.activeThreadId,
         id: cancelId,
       });
+      if (state.editingQueueItem?.id === cancelId) {
+        clearQueueEditState({ restoreDraft: true });
+      }
       applyActiveQueuedTurns(state.activeThreadId, res.items || []);
     } catch (error) {
       setComposerStatus("error", `取消排队失败：${formatActionError(error)}`);
     }
+  });
+
+  $("composerEditBanner")?.addEventListener("click", (e) => {
+    const cancelEditBtn = e.target.closest("[data-cancel-queue-edit]");
+    if (!cancelEditBtn) return;
+    clearQueueEditState({ restoreDraft: true });
+    $("promptInput")?.focus();
   });
 
   $("pendingRequestsDock").addEventListener("click", async (e) => {
@@ -7542,14 +8871,21 @@ function bindEvents() {
     }
   });
 
+  $("pendingRequestsDock").addEventListener("change", (e) => syncUserInputQuestion(e.target));
+
   $("pendingRequestsDock").addEventListener("submit", async (e) => {
     const form = e.target.closest("form[data-kind='userInput']");
     if (!form) return;
     e.preventDefault();
+    if (form.dataset.submitting === "1" || !form.reportValidity()) return;
     const requestId = form.dataset.requestId || "";
+    const submitBtn = form.querySelector("[type='submit']");
     try {
       const req = state.pendingRequests.find((r) => r.id === requestId);
       const answers = collectUserInputAnswers(req, form);
+      form.dataset.submitting = "1";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "提交中…";
       await apiPost("api/server-request", { requestId, decision: "accept", answers });
       removePendingRequestById(requestId);
     } catch (error) {
@@ -7561,6 +8897,10 @@ function bindEvents() {
       const errMsg = formatActionError(error, "提交回答失败");
       setComposerStatus("error", errMsg);
       showToastBanner("提交回答失败", { detail: errMsg, error: true });
+    } finally {
+      delete form.dataset.submitting;
+      submitBtn.disabled = false;
+      submitBtn.textContent = "提交回答";
     }
   });
 
@@ -7782,6 +9122,27 @@ function bindEvents() {
       return;
     }
     hangupVoiceCall({ closeModal: false });
+  });
+
+  $("sidebarUpdateBtn")?.addEventListener("click", () => {
+    setSidebarOpen(false);
+    void openUpdateModal();
+  });
+  $("openUpdateModalBtn")?.addEventListener("click", () => void openUpdateModal());
+  $("applyDesktopUpdateBtn")?.addEventListener("click", () => void triggerDesktopAppUpdate());
+  $("checkUpdateBtn")?.addEventListener("click", () => void triggerCheckUpdates());
+  $("applyUpdateBtn")?.addEventListener("click", () => void triggerApplyUpdate());
+  $("autoCheckUpdateToggle")?.addEventListener("change", (e) => {
+    void saveUpdateConfig({ autoCheckEnabled: Boolean(e.target.checked) });
+  });
+  $("autoUpdateToggle")?.addEventListener("change", (e) => {
+    void saveUpdateConfig({ autoUpdateEnabled: Boolean(e.target.checked) });
+  });
+  $("autoUpdateDesktopToggle")?.addEventListener("change", (e) => {
+    void saveUpdateConfig({ autoUpdateDesktopApp: Boolean(e.target.checked) });
+  });
+  $("updateModal")?.addEventListener("click", (e) => {
+    if (e.target === $("updateModal")) $("updateModal").close();
   });
 
   $("remoteModalBtn").addEventListener("click", () => void openRemoteModal());
@@ -8018,7 +9379,7 @@ function bindEvents() {
     pause: () => { state.autoFollow = false; },
     settle: () => {
       const distance = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
-      if (distance < 48) state.autoFollow = true;
+      if (distance < 24) state.autoFollow = true;
     },
   });
 }
@@ -8247,6 +9608,7 @@ async function init() {
   const modelsPromise = refreshModels().catch(() => {});
   const telemetryPromise = refreshTelemetry().catch(() => {});
   void refreshLocalApps().catch(() => {});
+  void refreshUpdateStatus().catch(() => {});
 
   try {
     if (initialThread) {
@@ -8310,6 +9672,8 @@ async function init() {
     if (pruneExpiredSidebarPrefs(Date.now())) {
       renderThreadList();
     }
+    renderAgentTelemetryBar();
+    if (state.telemetryExpanded) void refreshExecutionStats();
   }, 60_000);
 }
 

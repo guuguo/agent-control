@@ -13,7 +13,8 @@ export const DEFAULT_VOICE_CONFIG = Object.freeze({
 
 export function normalizeVoiceConfig(raw = {}) {
   const src = raw && typeof raw === "object" ? raw : {};
-  const preferredModelKey = String(src.preferredModelKey || "").trim() || "auto";
+  const savedKey = String(src.preferredModelKey || "").trim();
+  const preferredModelKey = savedKey === "local" || savedKey === "local:local-rules" ? "auto" : (savedKey || "auto");
   return {
     autoBroadcastEvents: src.autoBroadcastEvents !== false,
     handsFreeVad: src.handsFreeVad !== false,
@@ -23,11 +24,8 @@ export function normalizeVoiceConfig(raw = {}) {
 
 export function parseVoiceModelSelectionKey(selectionKey = "auto") {
   const key = String(selectionKey || "").trim();
-  if (!key || key === "auto") {
+  if (!key || ["auto", "local", "local:local-rules"].includes(key)) {
     return { key: "auto", voiceProvider: "auto", voiceProfileId: "", voiceModel: "" };
-  }
-  if (key === "local:local-rules" || key === "local") {
-    return { key: "local:local-rules", voiceProvider: "local", voiceProfileId: "", voiceModel: "local-rules" };
   }
   const firstColon = key.indexOf(":");
   if (firstColon < 0) {
@@ -52,7 +50,6 @@ export function renderVoiceModelSelectOptionsHtml(options = [], selectedKey = "a
     ? options
     : [
         { key: "auto", label: "自动优选轻量模型" },
-        { key: "local:local-rules", label: "仅本机规则（零模型）" },
       ];
   const hasSelected = list.some((opt) => opt.key === selectedKey);
   const effectiveKey = hasSelected ? selectedKey : list[0].key;
@@ -179,195 +176,6 @@ export function buildLocalProgressBriefing({
     return "目前没有检测到活跃或待确认的智能体任务，你可以随时说项目名称来打开对话或新建任务。";
   }
   return parts.join(" ");
-}
-
-function normalizeForMatch(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractBigrams(compact) {
-  const set = new Set();
-  if (!compact) return set;
-  if (compact.length === 1) {
-    set.add(compact);
-    return set;
-  }
-  for (let i = 0; i < compact.length - 1; i += 1) {
-    set.add(compact.slice(i, i + 2));
-  }
-  return set;
-}
-
-export function scoreTextMatch(query, candidate) {
-  const qNorm = normalizeForMatch(query);
-  const cNorm = normalizeForMatch(candidate);
-  if (!qNorm || !cNorm) return 0;
-
-  const qCompact = qNorm.replace(/\s+/g, "");
-  const cCompact = cNorm.replace(/\s+/g, "");
-  if (!qCompact || !cCompact) return 0;
-
-  let score = 0;
-  if (cCompact === qCompact) return 1.0;
-  if (qCompact.includes(cCompact) && cCompact.length >= 2) {
-    score = Math.max(score, 0.72 + Math.min(0.24, cCompact.length / 40));
-  }
-  if (cCompact.includes(qCompact) && qCompact.length >= 2) {
-    score = Math.max(score, 0.65 + Math.min(0.2, qCompact.length / 40));
-  }
-
-  const cWords = cNorm.split(" ").filter((w) => w.length >= 2);
-  let wordHits = 0;
-  for (const w of cWords) {
-    if (qNorm.includes(w)) wordHits += 1;
-  }
-  if (cWords.length && wordHits > 0) {
-    score = Math.max(score, 0.48 + 0.35 * (wordHits / cWords.length));
-  }
-
-  const cBigrams = extractBigrams(cCompact);
-  const qBigrams = extractBigrams(qCompact);
-  let bgHits = 0;
-  for (const bg of cBigrams) {
-    if (qBigrams.has(bg)) bgHits += 1;
-  }
-  if (cBigrams.size && bgHits > 0) {
-    const ratio = bgHits / cBigrams.size;
-    score = Math.max(score, ratio * 0.7);
-  }
-
-  const cHan = cCompact.replace(/[^\p{Script=Han}]/gu, "");
-  if (cHan.length >= 2) {
-    let charHits = 0;
-    for (const ch of cHan) {
-      if (qCompact.includes(ch)) charHits += 1;
-    }
-    const charRatio = charHits / cHan.length;
-    if (charRatio >= 0.5) {
-      score = Math.max(score, charRatio * 0.52);
-    }
-  }
-
-  return Math.min(1, Number(score.toFixed(4)));
-}
-
-function detectVoiceProviderPreference(utterance) {
-  const low = String(utterance || "").toLowerCase();
-  if (/(协调者|orchestrator|carbon)/i.test(low) && !/hydrogen/i.test(low)) {
-    return { provider: "antigravity", model: "gemini-pro-orchestrator" };
-  }
-  if (/(hydrogen|氢模型|快速模型|极速模型|低延迟|antigravity|agy|反重力)/i.test(low)) {
-    return { provider: "antigravity", model: "gemini-4-hydrogen-low" };
-  }
-  if (/(claude|克劳德)/i.test(low)) {
-    return { provider: "claude", model: "" };
-  }
-  if (/codex/i.test(low)) {
-    return { provider: "codex", model: "" };
-  }
-  if (/(grok|格罗克|老马)/i.test(low)) {
-    return { provider: "grok", model: "" };
-  }
-  return { provider: "", model: "" };
-}
-
-function detectLocalIntent(utterance, { bestProject, bestThread } = {}) {
-  const text = String(utterance || "").trim();
-  if (/^(?:批准|同意|允许|通过)|(?:帮我|直接)?(?:批准|允许|确认)这个?(?:请求|审批|权限)/.test(text)) {
-    return "approve_request";
-  }
-  if (/^(?:拒绝|驳回|不同意)|(?:帮我)?拒绝(?:请求|审批)/.test(text)) {
-    return "approve_request";
-  }
-  if (/^(?:中断|停止|暂停|取消任务)|(?:让|把).*(?:停下|停止|中断)/.test(text)) {
-    return "interrupt_thread";
-  }
-  if (/(播报|朗读|汇报|进度|进展|怎么样了|跑完了吗|卡住了吗|待确认)/.test(text)
-    && !/(新开|新建|创建|发给|告诉|让他|帮我修|帮我改|帮我写|帮我查)/.test(text)) {
-    return "summarize_progress";
-  }
-  if (/(新开|新建|创建|开一个|开个|起一个).*(?:任务|会话|对话|线程)|在.+(?:开个|新建)/.test(text)) {
-    return "create_thread";
-  }
-  if (/(发给|告诉|让|请|跟.+说|指令|帮我修|帮我改|帮我写|帮我查|帮我跑|继续推进|处理一下)/.test(text)) {
-    if (bestThread && !/(新开|新建|创建)/.test(text)) return "send_turn";
-    if (bestProject) return "create_thread";
-  }
-  if (bestThread && bestThread.score >= 0.35) return "open_thread";
-  if (bestProject && bestProject.score >= 0.3) return "open_project";
-  return "summarize_progress";
-}
-
-export function matchVoiceTarget(utterance = "", {
-  groups = [],
-  threads = [],
-  activeThreadId = "",
-} = {}) {
-  const text = String(utterance || "").trim();
-  const groupByCwd = new Map((groups || []).map((g) => [g.cwd, g]));
-
-  const scoredProjects = (groups || []).map((group) => {
-    const aliasScore = group.alias ? scoreTextMatch(text, group.alias) * 1.25 : 0;
-    const nameScore = scoreTextMatch(text, group.name);
-    const rawNameScore = group.rawName !== group.name ? scoreTextMatch(text, group.rawName) : 0;
-    const pathTail = group.cwd.split("/").slice(-2).join(" ");
-    const pathScore = scoreTextMatch(text, pathTail) * 0.85;
-    let base = Math.max(aliasScore, nameScore, rawNameScore, pathScore);
-    if (base > 0.08) {
-      if (group.pinned) base += 0.22;
-      if (group.pendingCount > 0) base += 0.14;
-      if (group.liveCount > 0) base += 0.1;
-    } else if (group.pinned) {
-      base = 0.05;
-    }
-    return { group, score: Number(base.toFixed(4)) };
-  }).sort((a, b) => b.score - a.score);
-
-  const bestProject = scoredProjects[0]?.score >= 0.2 ? scoredProjects[0] : null;
-  const projectScoreMap = new Map(scoredProjects.map((item) => [item.group.cwd, item.score]));
-
-  const allThreads = threads?.length
-    ? threads
-    : (groups || []).flatMap((g) => g.threads || []);
-
-  const scoredThreads = allThreads.map((thread) => {
-    const projScore = projectScoreMap.get(thread.cwd) || 0;
-    const titleScore = scoreTextMatch(text, thread.title || "");
-    const previewScore = scoreTextMatch(text, thread.preview || "") * 0.72;
-    let score = Math.max(titleScore, previewScore) + projScore * 0.55;
-    if (titleScore > 0.15 || previewScore > 0.15 || projScore >= 0.25) {
-      if (thread.id === activeThreadId) score += 0.08;
-      if (thread.pendingCount > 0) score += 0.12;
-      if (thread.live) score += 0.1;
-      const g = groupByCwd.get(thread.cwd);
-      if (g?.pinned) score += 0.08;
-    }
-    return { thread, score: Number(score.toFixed(4)) };
-  }).sort((a, b) => b.score - a.score);
-
-  const bestThread = scoredThreads[0]?.score >= 0.28 ? scoredThreads[0] : null;
-  const { provider: preferredProvider, model: preferredModel } = detectVoiceProviderPreference(text);
-  const detectedIntent = detectLocalIntent(text, { bestProject, bestThread });
-
-  let cleanedInstruction = text
-    .replace(/^(?:请|麻烦|帮我|我想|我要|现在)?(?:打开|切到|切换到|找到|进入|定位到)?/u, "")
-    .trim();
-  if (!cleanedInstruction) cleanedInstruction = text;
-
-  return {
-    bestProject,
-    bestThread,
-    candidateProjects: scoredProjects.slice(0, 5),
-    candidateThreads: scoredThreads.slice(0, 6),
-    detectedIntent,
-    cleanedInstruction,
-    preferredProvider,
-    preferredModel,
-  };
 }
 
 export function base64ToUint8Array(base64) {

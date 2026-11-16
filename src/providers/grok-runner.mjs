@@ -569,6 +569,8 @@ export class GrokTurnManager extends EventEmitter {
 
     if (type === "usage") {
       run.needsParagraphBreak = Boolean(run.lastText);
+      this.emit("event", { type: "token_usage", rawId: run.rawId, turnId: run.turnId,
+        usage: event.data && typeof event.data === "object" ? event.data : event });
       return;
     }
 

@@ -15,16 +15,25 @@ import {
   PERMISSION_MODES,
 } from "../src/permissions.mjs";
 import { createGoalController } from "../src/goal-controller.mjs";
+import { resolveAutoProfileAliases, suggestFallbackDistinctAliases } from "../src/profile-auto-alias.mjs";
 import { classifyProfileError, normalizeProfileHealth, sortProfilesByHealth } from "../src/profile-health.mjs";
 import { mergeActiveTurnIntoHistory } from "../src/thread-display.mjs";
+import { ProviderHub } from "../src/provider-hub.mjs";
+import { createThreadMetaStore } from "../src/thread-meta-store.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
 import {
-  buildDeterministicVoicePlan,
-  resolveFuzzyVoiceTarget,
+  DEFAULT_VOICE_HYDROGEN_MODEL,
+  resolveVoicePlanTarget,
 } from "../src/voice-call-service.mjs";
 import { createHotExtensionServer, mergeUpstreamLiveThreadState } from "../src/hot-extension.mjs";
 import { apiGet, apiUrl, clearApiEtagCache, isHostOfflineError } from "../public/api-client.js";
 import { extractGoalDirective, renderQueuedTurnsPanelHtml, resolveComposerSubmission } from "../public/composer-mode.js";
+import { bindFollowIntent } from "../public/live-state.js";
+import {
+  extractSelectDescriptor,
+  renderCustomSelectMenuHtml,
+  renderCustomSelectTriggerInnerHtml,
+} from "../public/custom-select.js";
 import {
   computeScaledDimensions,
   estimateDataUrlBytes,
@@ -61,6 +70,7 @@ import {
   renderProfilePillsHtml,
   renderProviderPillsHtml,
   renderQuotaOverviewHtml,
+  resolveDistinctProfileChipText,
   resolveModelsForProvider,
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
@@ -69,12 +79,15 @@ import {
 } from "../public/instance-switcher.js";
 import { humanizeLiveActivity, mergeLiveActivity } from "../public/live-state.js";
 import {
+  clearFailedThreadImages,
   dedupeAdjacentTurns,
   formatCompactPath,
   formatToolExecutionError,
   isRawToolEchoItem,
   isRecoverableToolErrorText,
   isStreamingTextAlreadyPersisted,
+  isThreadImageFailed,
+  markThreadImageFailed,
   normalizeTurnForRender,
   renderMarkdown,
   renderTurnHtml,
@@ -104,7 +117,6 @@ import {
   createVadTurnDetector,
   downsampleFloat32ToInt16,
   encodePcm16SamplesToWav,
-  matchVoiceTarget,
   pcm16Base64ToWavBytes,
   renderVoiceCallTranscriptHtml,
   renderVoiceLiveProgressHtml,
@@ -493,16 +505,6 @@ test("project-board and voice-copilot modules prioritize pinned projects, match 
   assert.match(briefing, /等待你确认/);
   assert.match(briefing, /示例小屋/);
 
-  // Local fuzzy voice matching.
-  const matched = matchVoiceTarget("帮我看看示例小屋家具透视怎么样了", { groups, threads });
-  assert.equal(matched.bestProject?.group?.cwd, "/workspace/demo/demo-app");
-  assert.equal(matched.bestThread?.thread?.id, "antigravity:cli:t-demo-1");
-
-  const carbonPref = matchVoiceTarget("在控制台新开一个协调者 carbon 任务排查连接", { groups, threads });
-  assert.equal(carbonPref.preferredProvider, "antigravity");
-  assert.equal(carbonPref.preferredModel, "gemini-pro-orchestrator");
-  assert.equal(carbonPref.detectedIntent, "create_thread");
-
   // PCM16 -> WAV encapsulation & VAD turn detection.
   const pcmSample = Buffer.from([0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40]).toString("base64");
   const wav = pcm16Base64ToWavBytes(pcmSample, 24000);
@@ -566,13 +568,14 @@ test("project-board and voice-copilot modules prioritize pinned projects, match 
       threads: g.threads.map((t) => ({ id: t.id, title: t.title, provider: t.provider })),
     })),
   };
-  const fuzzyByAlias = resolveFuzzyVoiceTarget({
+  const exactTarget = resolveVoicePlanTarget({
     intent: "open_thread",
-    targetProjectCwd: "demo-app",
+    targetProjectCwd: "/workspace/demo/demo-app",
+    targetThreadId: "antigravity:cli:t-demo-1",
     heardText: "打开示例小屋透视检查对话",
   }, voiceSnapshot);
-  assert.equal(fuzzyByAlias.cwd, "/workspace/demo/demo-app");
-  assert.equal(fuzzyByAlias.threadId, "antigravity:cli:t-demo-1");
+  assert.equal(exactTarget.cwd, "/workspace/demo/demo-app");
+  assert.equal(exactTarget.threadId, "antigravity:cli:t-demo-1");
 });
 
 test("model fallback selector and turbo permission helpers never leave UI selectors empty or locked", () => {
@@ -859,8 +862,9 @@ test("formatTokensPerSec and renderAgentTelemetryBarHtml render 4-agent HUD, 5h/
   assert.match(compactHtml, /1 排队/);
   assert.match(compactHtml, /5h/);
   assert.match(compactHtml, /周/);
-  assert.match(compactHtml, /67%/);
-  assert.match(compactHtml, /84%/);
+  assert.match(compactHtml, /telemetry-weekly-fill" style="width:67%"/);
+  assert.doesNotMatch(compactHtml, /5h 84%/);
+  assert.doesNotMatch(compactHtml, /积分|38591/);
   assert.doesNotMatch(compactHtml, /仅有本地历史/);
   assert.doesNotMatch(compactHtml, /data-telemetry-jump-thread/);
 
@@ -1170,8 +1174,9 @@ test("telemetry bar deduplicates cloned quota buckets and keeps default view ult
   assert.match(compactBar, /data-telemetry-item-key="codex:default"/);
   assert.doesNotMatch(compactBar, /data-telemetry-item-key="claude:default"/);
   assert.doesNotMatch(compactBar, /data-telemetry-item-key="grok:work"/);
-  assert.match(compactBar, /5h 98%/);
-  assert.match(compactBar, /周 67%/);
+  assert.doesNotMatch(compactBar, /5h 98%/);
+  assert.match(compactBar, /telemetry-weekly-fill" style="width:78%"/);
+  assert.match(compactBar, /telemetry-weekly-fill" style="width:67%"/);
 
   // Expanded bar renders full grid and drawer with ZERO duplicate 周限额 / 5h 窗口 chips.
   const expandedBar = renderAgentTelemetryBarHtml(clonedProfiles, telemetry, {
@@ -1185,8 +1190,8 @@ test("telemetry bar deduplicates cloned quota buckets and keeps default view ult
   assert.doesNotMatch(expandedBar, /telemetry-chip-k">5h 窗口<\/span>/);
   assert.match(expandedBar, /充足/);
   assert.doesNotMatch(expandedBar, />5h<\/span><span class="telemetry-chip-v">0%/);
-  assert.equal((expandedBar.match(/telemetry-db-label">周限额</g) || []).length, 2);
-  assert.equal((expandedBar.match(/telemetry-db-label">5h 窗口</g) || []).length, 1);
+  assert.doesNotMatch(expandedBar, /telemetry-drawer-grid|telemetry-drawer-card/);
+  assert.match(expandedBar, /telemetry-card-filter/);
 });
 
 test("compact mobile visual helpers and index.html preserve all existing IDs and asset version alignment", async () => {
@@ -1229,6 +1234,9 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
   assert.ok(html.includes(`href="./app.css?v=${uiVersion}"`));
   assert.ok(html.includes(`href="./project-workspace.css?v=${uiVersion}"`));
   assert.ok(html.includes(`src="./app.js?v=${uiVersion}"`));
+  const workspaceCss = await readFile(fileURLToPath(new URL("../public/project-workspace.css", import.meta.url)), "utf8");
+  assert.match(workspaceCss, /\.thread-status-dot\.is-agent-marker\.is-done\s*\{[^}]*border:\s*0;/);
+  assert.match(workspaceCss, /\.thread-status-dot\.is-agent-marker\.is-done\.is-recent\s*\{[^}]*border:\s*1\.5px solid #4c8dff;/);
   assert.doesNotMatch(html, /id="composerProbeProfilesBtn"/);
   assert.match(html, /id="telemetryTopbarBtn"[^>]*hidden/);
   assert.match(html, /id="activeProjectCrumb"[^>]*hidden/);
@@ -1264,6 +1272,7 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "topbarMoreMenu",
     "goalToggleBtn",
     "renameThreadBtn",
+    "toggleThreadImagesBtn",
     "archiveThreadBtn",
     "refreshThreadBtn",
     "liveBanner",
@@ -1300,6 +1309,18 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "tunnelMissingBox",
     "tunnelInstallCmdCode",
     "relayAdvancedSection",
+    "sidebarFooterBar",
+    "sidebarUpdateBtn",
+    "openUpdateModalBtn",
+    "updateModal",
+    "updateStatePill",
+    "updateDesktopInfo",
+    "autoCheckUpdateToggle",
+    "autoUpdateToggle",
+    "autoUpdateDesktopToggle",
+    "applyDesktopUpdateBtn",
+    "checkUpdateBtn",
+    "applyUpdateBtn",
   ]) {
     assert.match(html, new RegExp(`id="${requiredId}"`), `missing required DOM id: ${requiredId}`);
   }
@@ -2410,7 +2431,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     "",
   );
 
-  // 2. compactThreadSourceChip outputs at most one compact chip on 'all', drops provider prefix under tab, and hides under profileFilter.
+  // 2. compactThreadSourceChip shows full account attribution only when multi-profile attribution is needed, and drops it on single-profile or profileFilter.
   const profiles = [
     { provider: "antigravity", id: "desktop", label: "Antigravity 桌面", installed: true },
     { provider: "antigravity", id: "cli", label: "Antigravity CLI", installed: true },
@@ -2421,7 +2442,6 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     { providerFilter: "all", profiles },
   );
   assert.equal(agyDesktopAllChip?.glyph, "");
-  assert.match(agyDesktopAllChip?.iconSvg || "", /<svg[^>]*is-antigravity/);
   assert.equal(agyDesktopAllChip?.text, "桌面");
   assert.equal(agyDesktopAllChip?.tone, "antigravity");
   assert.equal(agyDesktopAllChip?.title, "Antigravity · Antigravity 桌面");
@@ -2430,25 +2450,20 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     { provider: "codex", profileId: "codex", profileLabel: "Codex · codex" },
     { providerFilter: "all", profiles },
   );
-  assert.equal(codexAllChip?.glyph, "");
-  assert.match(codexAllChip?.iconSvg || "", /<svg[^>]*is-codex/);
-  assert.equal(codexAllChip?.text, "");
-  assert.equal(codexAllChip?.tone, "codex");
-  assert.equal(codexAllChip?.title, "Codex · Codex · codex");
+  assert.equal(codexAllChip, null);
 
   assert.deepEqual(
     compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profiles }),
     { glyph: "", text: "桌面", tone: "antigravity", title: "Antigravity · Antigravity 桌面" },
   );
   const codexFilteredChip = compactThreadSourceChip({ provider: "codex", profileId: "codex", profileLabel: "Codex · codex" }, { providerFilter: "codex", profiles });
-  assert.equal(codexFilteredChip?.text, "");
-  assert.match(codexFilteredChip?.iconSvg || "", /<svg[^>]*is-codex/);
+  assert.equal(codexFilteredChip, null);
   assert.equal(
     compactThreadSourceChip({ provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity 桌面" }, { providerFilter: "antigravity", profileFilter: "antigravity:desktop", profiles }),
     null,
   );
 
-  // 2b. Multi-account Codex profiles show explicit account attribution on both default and secondary accounts.
+  // 2b. Multi-account Codex profiles show full account attribution on both default and secondary accounts.
   const dualCodexProfiles = [
     {
       provider: "codex",
@@ -2465,14 +2480,14 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
       account: { signedIn: true, email: "guuguo@qq.com" },
     },
   ];
-  assert.equal(compactProfileChipText(dualCodexProfiles[0]), "fpf...417");
+  assert.equal(compactProfileChipText(dualCodexProfiles[0]), "fpf19910417");
   assert.equal(compactProfileChipText(dualCodexProfiles[1]), "guuguo");
 
   const dualDefaultCodexTabChip = compactThreadSourceChip(
     { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
     { providerFilter: "codex", profiles: dualCodexProfiles },
   );
-  assert.equal(dualDefaultCodexTabChip?.text, "fpf...417");
+  assert.equal(dualDefaultCodexTabChip?.text, "fpf·Gmail");
   assert.equal(dualDefaultCodexTabChip?.tone, "codex");
   assert.match(dualDefaultCodexTabChip?.title || "", /fpf19910417@gmail\.com/);
 
@@ -2480,13 +2495,13 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     { provider: "codex", profileId: "guuguo", profileLabel: "Codex · guuguo" },
     { providerFilter: "codex", profiles: dualCodexProfiles },
   );
-  assert.equal(dualWorkCodexTabChip?.text, "guuguo");
+  assert.equal(dualWorkCodexTabChip?.text, "guuguo·QQ");
 
   const dualDefaultAllChip = compactThreadSourceChip(
     { provider: "codex", profileId: "default", profileLabel: "Codex 默认" },
     { providerFilter: "all", profiles: dualCodexProfiles },
   );
-  assert.equal(dualDefaultAllChip?.text, "fpf...417");
+  assert.equal(dualDefaultAllChip?.text, "fpf·Gmail");
 
   const dualBoardHtml = renderProjectBoardHtml({
     groups: [
@@ -2505,7 +2520,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     ],
     profiles: dualCodexProfiles,
   });
-  assert.match(dualBoardHtml, /fpf\.\.\.417/);
+  assert.match(dualBoardHtml, /fpf19910417/);
   assert.match(dualBoardHtml, /guuguo/);
 
   // 3. renderSidebarThreadListHtml distinguishes project headers & child tree rail, hides duplicate preview,
@@ -2563,18 +2578,22 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
 
   assert.match(sidebarHtml, /class="project-group-head"/);
   assert.match(sidebarHtml, /class="project-group-items"/);
-  assert.match(sidebarHtml, /class="thread-status-dot is-live(?: [^"]*)?"/);
-  assert.match(sidebarHtml, /class="thread-status-dot is-done is-recent"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-live is-agent-live is-agent-marker is-antigravity"[^>]*><svg class="ac-icon ac-provider-icon is-antigravity"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-done is-recent is-agent-marker is-codex"[^>]*><svg class="ac-icon ac-provider-icon is-codex"/);
   assert.match(sidebarHtml, /class="thread-item[^"]*is-recent-done" data-thread-id="codex:codex:done-2"/);
-  assert.match(sidebarHtml, /class="thread-status-dot is-done"/);
+  assert.match(sidebarHtml, /class="thread-status-dot is-done is-agent-marker is-(?:antigravity|codex)"/);
   assert.match(sidebarHtml, /class="thread-item-sub is-live-sub"[^>]*>正在执行命令 · npm test</);
+  const idleRowWithTags = sidebarHtml.match(/<button[^>]*data-thread-id="antigravity:desktop:done-1"[^>]*>([\s\S]*?)<\/button>/)?.[1] || "";
+  assert.ok(idleRowWithTags);
+  assert.doesNotMatch(idleRowWithTags, /thread-item-secondary/);
+  assert.match(idleRowWithTags, /thread-item-right[\s\S]*thread-micro-tag is-text-only is-antigravity"[^>]*>桌面<\/span>[\s\S]*thread-item-time/);
   const liveRow = sidebarHtml.match(/<button[^>]*data-thread-id="antigravity:desktop:live-1"[^>]*>([\s\S]*?)<\/button>/)?.[1] || "";
   assert.ok(liveRow);
-  assert.match(liveRow, /class="thread-status-dot is-live is-agent-live is-antigravity"[^>]*><svg class="ac-icon ac-provider-icon is-antigravity"/);
+  assert.match(liveRow, /class="thread-status-dot is-live is-agent-live is-agent-marker is-antigravity"[^>]*><svg class="ac-icon ac-provider-icon is-antigravity"/);
   assert.doesNotMatch(liveRow, /thread-item-time|刚刚/);
   assert.ok(liveRow.indexOf("thread-item-tags") > liveRow.indexOf("thread-item-sub"));
   assert.match(liveRow, /class="thread-item-secondary">\s*<span class="thread-item-sub[^>]*>[^<]*<\/span>\s*<span class="thread-item-tags">/);
-  assert.match(liveRow.slice(liveRow.indexOf("thread-item-tags")), /thread-queued-pill[\s\S]*thread-micro-tag is-antigravity is-text-only"[^>]*>桌面<\/span>/);
+  assert.match(liveRow.slice(liveRow.indexOf("thread-item-tags")), /thread-queued-pill[\s\S]*thread-micro-tag is-text-only is-antigravity"[^>]*>桌面<\/span>/);
 
   // Single-account live Codex thread shows animated Codex glyph at left and omits redundant right-side agent chip.
   const singleCodexLiveGroups = buildProjectGroups([
@@ -2596,7 +2615,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     autoFoldProjects: false,
     nowMs: nowSec * 1000,
   });
-  assert.match(singleCodexLiveHtml, /class="thread-status-dot is-live is-agent-live is-codex"[^>]*><svg class="ac-icon ac-provider-icon is-codex"/);
+  assert.match(singleCodexLiveHtml, /class="thread-status-dot is-live is-agent-live is-agent-marker is-codex"[^>]*><svg class="ac-icon ac-provider-icon is-codex"/);
   assert.doesNotMatch(singleCodexLiveHtml, /class="thread-micro-tag/);
   const readSidebarHtml = renderSidebarThreadListHtml(groups, {
     activeThreadId: "codex:codex:done-2",
@@ -2604,7 +2623,7 @@ test("sidebar hierarchy, preview deduplication, completed blue dots, and minimal
     recentCompletedByThread: new Map(),
   });
   const readRow = readSidebarHtml.match(/<button[^>]*data-thread-id="codex:codex:done-2"[^>]*>([\s\S]*?)<\/button>/)?.[1] || "";
-  assert.match(readRow, /class="thread-status-dot is-done"/);
+  assert.match(readRow, /class="thread-status-dot is-done is-agent-marker is-codex"/);
   assert.doesNotMatch(readRow, /is-recent/);
   assert.match(readRow, /thread-item-time/);
   // Duplicate title "故事设定与数据整理" must appear once (only as title, not duplicated in .thread-item-sub).
@@ -2975,15 +2994,84 @@ test("provider-hub summarizes queued images, strips huge base64 from SSE broadca
   });
   assert.equal(smallEvt.delta, "hello");
 
-  // capOversizedThreadInlineImages preserves newest compact images and omits older/oversized ones.
+  // acp_tool_update strips large rawOutput/content/rawInput/locations and truncates oversized status.
+  const longStatus = `执行详情:${"Z".repeat(900)}`;
+  const acpUpdateEvt = sanitizeEventForSse("provider_event", {
+    type: "acp_tool_update",
+    threadId: "antigravity:desktop:t-acp-1",
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-99",
+      title: "读取截图文件",
+      kind: "read",
+      status: longStatus,
+      rawOutput: `data:image/png;base64,${"Q".repeat(60_000)}`,
+      rawInput: { huge: "W".repeat(50_000) },
+      content: [{ type: "image", data: "E".repeat(50_000) }],
+      locations: [{ path: "/tmp/a.png" }],
+    },
+  });
+  assert.equal(acpUpdateEvt.update.toolCallId, "tc-99");
+  assert.equal(acpUpdateEvt.update.title, "读取截图文件");
+  assert.equal(acpUpdateEvt.update.kind, "read");
+  assert.ok(acpUpdateEvt.update.status.length <= 601);
+  assert.equal(Object.hasOwn(acpUpdateEvt.update, "rawOutput"), false);
+  assert.equal(Object.hasOwn(acpUpdateEvt.update, "rawInput"), false);
+  assert.equal(Object.hasOwn(acpUpdateEvt.update, "content"), false);
+  assert.equal(Object.hasOwn(acpUpdateEvt.update, "locations"), false);
+
+  // Non-userMessage items (mcpToolCall / tool_result) strip base64 images and truncate huge tool outputs, while preserving agentMessage.
+  const toolItemEvt = sanitizeEventForSse("provider_event", {
+    type: "codex_notification",
+    threadId: "codex:default:t-tool",
+    method: "item/completed",
+    params: {
+      item: {
+        type: "mcpToolCall",
+        id: "mcp-1",
+        result: {
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: bigBase64 } },
+            { type: "text", text: "X".repeat(40_000) },
+          ],
+          output: `ok ${"Y".repeat(40_000)}`,
+        },
+        aggregatedOutput: `log ${"L".repeat(40_000)}`,
+      },
+    },
+  });
+  assert.equal(toolItemEvt.params.item.result.content[0].path, "[图片] 附件图片");
+  assert.match(toolItemEvt.params.item.result.content[1].text, /已省略/);
+  assert.match(toolItemEvt.params.item.result.output, /已省略/);
+  assert.match(toolItemEvt.params.item.aggregatedOutput, /已省略/);
+
+  const claudeToolResultEvt = sanitizeEventForSse("provider_event", {
+    type: "tool_result",
+    threadId: "claude:default:t-tr",
+    toolResult: {
+      type: "tool_result",
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: bigBase64 } },
+        { type: "text", text: "R".repeat(40_000) },
+      ],
+    },
+  });
+  assert.equal(claudeToolResultEvt.toolResult.content[0].path, "[图片] 附件图片");
+  assert.match(claudeToolResultEvt.toolResult.content[1].text, /已省略/);
+
+  // capOversizedThreadInlineImages preserves newest compact images and omits older/oversized ones across both userMessage and tool results.
   const compactDataUrl = `data:image/jpeg;base64,${"B".repeat(300_000)}`;
   const hugeLegacyUrl = `data:image/png;base64,${"C".repeat(2_500_000)}`;
+  const toolBigUrl = `data:image/png;base64,${"D".repeat(250_000)}`;
   const rawThread = {
     id: "claude:default:t-hist",
     turns: [
       {
         id: "t-old",
-        items: [{ type: "userMessage", content: [{ type: "image", url: compactDataUrl }] }],
+        items: [
+          { type: "userMessage", content: [{ type: "image", url: compactDataUrl }] },
+          { type: "mcpToolCall", result: { content: [{ type: "image", url: toolBigUrl }] } },
+        ],
       },
       {
         id: "t-huge",
@@ -2999,12 +3087,14 @@ test("provider-hub summarizes queued images, strips huge base64 from SSE broadca
     maxSingleDataUrlChars: 1_000_000,
     maxTotalDataUrlChars: 450_000,
   });
-  // Newest compact image stays intact; oversized single image and over-budget older image are omitted.
+  // Newest compact image stays intact; oversized single image and over-budget older/tool images are omitted.
   assert.equal(capped.turns[2].items[0].content[0].url, compactDataUrl);
   assert.match(capped.turns[1].items[0].content[0].path, /已省略原图/);
+  assert.match(capped.turns[0].items[1].result.content[0].path, /已省略原图/);
   assert.match(capped.turns[0].items[0].content[0].path, /已省略原图/);
   // Original thread object was not mutated.
   assert.equal(rawThread.turns[1].items[0].content[0].url, hugeLegacyUrl);
+  assert.equal(rawThread.turns[0].items[1].result.content[0].url, toolBigUrl);
 });
 
 test("renderQueuedTurnsPanelHtml renders multi-line items, source tags, media badges, readonly native hints, and collapsible header", () => {
@@ -3041,10 +3131,12 @@ test("renderQueuedTurnsPanelHtml renders multi-line items, source tags, media ba
   assert.match(expandedHtml, /桌面端队列/);
   assert.match(expandedHtml, /ac-icon-image[^>]*>[\s\S]*?<\/svg>\s*2/);
   assert.match(expandedHtml, />只读</);
+  assert.doesNotMatch(expandedHtml, /data-queue-steer="native-1"/);
   assert.doesNotMatch(expandedHtml, /data-queue-edit="native-1"/);
   assert.doesNotMatch(expandedHtml, /data-queue-cancel="native-1"/);
   assert.match(expandedHtml, /控制端队列/);
   assert.match(expandedHtml, /ac-icon-target[^>]*>[\s\S]*?<\/svg>\s*Goal/);
+  assert.match(expandedHtml, /data-queue-steer="ctrl-2"[\s\S]*?ac-icon-steer[^>]*>[\s\S]*?<\/svg>\s*<span>引导<\/span>/);
   assert.match(expandedHtml, /data-queue-edit="ctrl-2"/);
   assert.match(expandedHtml, /data-queue-cancel="ctrl-2"/);
 
@@ -3275,7 +3367,7 @@ test("zero pictographic UI emojis, hidden redundant topbar chrome, and overflow 
   }
 });
 
-test("adaptive VAD adapts threshold in quiet environment and buildDeterministicVoicePlan routes intents", () => {
+test("adaptive VAD adapts threshold in quiet environment", () => {
   const vad = createVadTurnDetector({
     sampleRate: 16000,
     preRollMs: 120,
@@ -3299,69 +3391,7 @@ test("adaptive VAD adapts threshold in quiet environment and buildDeterministicV
   assert.equal(vad.pushSamples(quiet, 0.001).type, "recording");
   assert.equal(vad.pushSamples(quiet, 0.001).type, "utterance");
 
-  const snapshot = {
-    activeThreadId: "antigravity:desktop:t-active",
-    pendingRequests: [
-      {
-        requestId: "req-fans",
-        threadId: "claude:default:t-fans",
-        projectCwd: "/tmp/fans-home",
-        projectName: "粉丝站小屋",
-        title: "允许写入 furniture.json",
-      },
-    ],
-    projects: [
-      {
-        cwd: "/tmp/fans-home",
-        name: "粉丝站小屋",
-        pinned: true,
-        liveCount: 1,
-        pendingCount: 1,
-        threads: [
-          { id: "claude:default:t-fans", title: "家具重构", live: true, phase: "等待确认" },
-        ],
-      },
-      {
-        cwd: "/tmp/agent-ctrl",
-        name: "Agent Control",
-        alias: "控制台",
-        pinned: true,
-        liveCount: 0,
-        pendingCount: 0,
-        threads: [
-          { id: "antigravity:desktop:t-active", title: "语音修补", live: false, preview: "已更新脚本" },
-        ],
-      },
-    ],
-  };
 
-  assert.equal(buildDeterministicVoicePlan({ mode: "briefing", snapshot }).intent, "summarize_progress");
-
-  const approvePlan = buildDeterministicVoicePlan({ transcript: "批准粉丝站小屋的请求", snapshot });
-  assert.equal(approvePlan.intent, "approve_request");
-  assert.equal(approvePlan.decision, "accept");
-  assert.equal(approvePlan.requestId, "req-fans");
-
-  const rejectPlan = buildDeterministicVoicePlan({ transcript: "拒绝刚才这个权限请求", snapshot });
-  assert.equal(rejectPlan.intent, "approve_request");
-  assert.equal(rejectPlan.decision, "decline");
-
-  const openPlan = buildDeterministicVoicePlan({ transcript: "打开控制台", snapshot });
-  assert.equal(openPlan.intent, "open_project");
-  assert.equal(openPlan.targetProjectCwd, "/tmp/agent-ctrl");
-
-  const statusPlan = buildDeterministicVoicePlan({ transcript: "粉丝站小屋现在什么进度", snapshot });
-  assert.equal(statusPlan.intent, "summarize_progress");
-  assert.match(statusPlan.spokenReply, /粉丝站小屋/);
-
-  const sendPlan = buildDeterministicVoicePlan({ transcript: "让 粉丝站小屋 跑一下单元测试", snapshot });
-  assert.equal(sendPlan.intent, "send_turn");
-  assert.equal(sendPlan.targetThreadId, "claude:default:t-fans");
-  assert.match(sendPlan.instruction, /跑一下单元测试/);
-
-  const interruptPlan = buildDeterministicVoicePlan({ transcript: "停止运行粉丝站小屋的任务", snapshot });
-  assert.equal(interruptPlan.intent, "interrupt_thread");
-  assert.equal(interruptPlan.targetThreadId, "claude:default:t-fans");
 });
 
 test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/call dispatch execute without tokens", async (t) => {
@@ -3476,7 +3506,8 @@ test("local Whisper ASR worker endpoint /api/voice/transcribe and fast voice/cal
   const callJson = await callRes.json();
   assert.equal(callJson.ok, true);
   assert.equal(callJson.usedFallback, false);
-  assert.equal(callJson.model, "mock-whisper");
+  assert.equal(callJson.model, DEFAULT_VOICE_HYDROGEN_MODEL);
+  assert.equal(callJson.asrEngine, "mock-whisper");
   assert.equal(callJson.heardText, "让 粉丝站小屋 跑一下检查");
   assert.equal(callJson.plan?.intent, "send_turn");
   assert.equal(callJson.executed?.ok, true);
@@ -3507,7 +3538,14 @@ test("telemetry toggle stops propagation across re-render and places desktop com
   assert.ok(actionsIdx > 0 && slotIdx > actionsIdx);
   assert.ok(boardBtnIdx > indexHtml.indexOf('id="sidebar"') && boardBtnIdx < indexHtml.indexOf('</aside>'));
   assert.equal((indexHtml.match(/id="boardToggleBtn"/g) || []).length, 1);
+  assert.match(indexHtml, /class="sidebar-actions">[\s\S]*?id="newThreadBtn"[\s\S]*?id="boardToggleBtn"[\s\S]*?id="remoteModalBtn"/);
   assert.match(indexHtml, /id="boardToggleBtn"[^>]*class="[^"]*sidebar-view-btn/);
+  assert.match(appCss, /\.local-apps-strip\s*\{[^}]*flex-direction:\s*row;/);
+  assert.match(appCss, /\.local-app-open-mark\s*\{/);
+  const localAppsStripCode = appJs.match(/const strip = \$\("localAppsStrip"\);[\s\S]*?const menuBox = \$\("topbarLocalAppsBox"\);/)?.[0] || "";
+  assert.ok(localAppsStripCode);
+  assert.doesNotMatch(localAppsStripCode, /data-icon="film"/);
+  assert.match(localAppsStripCode, /class="local-app-open-mark"/);
   assert.match(appJs, /\$\("boardToggleBtn"\)\.addEventListener\("click",\s*\(\) => openProjectBoardView\(\)\)/);
 
   assert.match(appCss, /@media\s*\(min-width:\s*961px\)[\s\S]*?\.agent-telemetry-bar:not\(\.is-expanded\)\s*\{\s*display:\s*none\s*!important;/);
@@ -3561,8 +3599,7 @@ test("image-only user turns strip Antigravity XML wrappers and single-profile ch
     { provider: "antigravity", profileId: "desktop", profileLabel: "Antigravity" },
     { providerFilter: "all", profiles: singleAgyProfiles },
   );
-  assert.equal(chip?.text, "");
-  assert.match(chip?.iconSvg || "", /<svg[^>]*is-antigravity/);
+  assert.equal(chip, null);
   assert.equal(compactProfileChipText({ provider: "antigravity", id: "desktop", label: "Antigravity" }), "桌面");
 
   const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
@@ -3819,6 +3856,41 @@ test("renderTurnHtml and renderMarkdown format Codex image tags, Files mentioned
   assert.match(agentOutputTurnHtml, /src="\.\/api\/thread\/image\?threadId=codex%3Acodex%3At-out-1&amp;path=%2Fworkspace%2Fdemo%2Fproj%2Fscene-01-%E5%88%86%E9%95%9C\.png&amp;w=480&amp;q=68"/);
 
   assert.match(renderMarkdown("查看 [脚本](file:///workspace/demo/a.js)"), /class="md-file-link"/);
+
+  // Negative cache skips re-emitting <img> tags for thread images that previously returned 404.
+  clearFailedThreadImages();
+  try {
+    const missingSrc = "./api/thread/image?threadId=codex%3Acodex%3At-out-1&path=missing-icon128.png&w=480&q=68";
+    assert.equal(isThreadImageFailed(missingSrc), false);
+    markThreadImageFailed("https://example.invalid/i/abc/api/thread/image?threadId=codex%3Acodex%3At-out-1&path=missing-icon128.png&w=480&q=68");
+    markThreadImageFailed("./api/thread/image?threadId=codex%3Acodex%3At-out-1&path=missing-inline.png&w=960&q=70");
+    markThreadImageFailed("./api/thread/image?threadId=codex%3Acodex%3At-out-1&path=missing-user.png&w=480&q=68");
+    assert.equal(isThreadImageFailed(missingSrc), true);
+    assert.equal(isThreadImageFailed("./api/thread/image?threadId=codex%3Acodex%3At-out-1&path=missing-icon128.png&w=960&q=70"), true);
+
+    const brokenTurnHtml = renderTurnHtml({
+      id: "turn-broken-img",
+      status: "completed",
+      items: [
+        {
+          type: "userMessage",
+          id: "u-broken-1",
+          content: [{ type: "text", text: '<image name=[Image #1] path="missing-user.png">\n</image>\n看图' }],
+        },
+        {
+          type: "agentMessage",
+          id: "a-broken-1",
+          text: "缺失缩略图 `missing-icon128.png` 以及 内联![图标](missing-inline.png)",
+        },
+      ],
+    }, { agentLabel: "Codex", threadId: "codex:codex:t-out-1" });
+    assert.doesNotMatch(brokenTurnHtml, /<img[^>]+(?:missing-icon128|missing-inline|missing-user)\.png/);
+    assert.match(brokenTurnHtml, /class="msg-file-chip"[^>]*>[\s\S]*?missing-user\.png/);
+    assert.match(brokenTurnHtml, /class="msg-file-chip"[^>]*>[\s\S]*?missing-icon128\.png/);
+    assert.match(brokenTurnHtml, /class="md-file-link"[^>]*missing-inline\.png/);
+  } finally {
+    clearFailedThreadImages();
+  }
 });
 
 test("renderTurnHtml, cleanStreamingAgentText, and markdown bare URLs handle heartbeats, pasted files, ambient context, and fullwidth punctuation", async () => {
@@ -4159,4 +4231,747 @@ test("renderTurnHtml renders per-turn model badges, inline interrupted resume bu
     },
   ]);
   assert.match(pillsHtml, /data-copy-login-cmd="CLAUDE_CONFIG_DIR=~\/\.claude-claude-hotmail claude auth login --email guodeqing@hotmail\.com"[^>]*>复制登录<\/button>/);
+});
+
+test("multi-profile colliding handles auto-disambiguate to distinct short aliases with lightweight AI and fallback", async (t) => {
+  const samePrefixProfiles = [
+    {
+      key: "claude:default",
+      provider: "claude",
+      id: "default",
+      label: "Claude 默认",
+      installed: true,
+      account: { signedIn: true, email: "guodeqing@icloud.com" },
+    },
+    {
+      key: "claude:claude-hotmail",
+      provider: "claude",
+      id: "claude-hotmail",
+      label: "Claude 默认",
+      installed: true,
+      account: { signedIn: true, email: "guodeqing@hotmail.com" },
+    },
+  ];
+  assert.equal(resolveDistinctProfileChipText(samePrefixProfiles[0], samePrefixProfiles), "iCloud");
+  assert.equal(resolveDistinctProfileChipText(samePrefixProfiles[1], samePrefixProfiles), "Hotmail");
+  const icloudChip = compactThreadSourceChip(
+    { provider: "claude", profileId: "default", profileLabel: "Claude 默认" },
+    { providerFilter: "all", profiles: samePrefixProfiles },
+  );
+  const hotmailChip = compactThreadSourceChip(
+    { provider: "claude", profileId: "claude-hotmail", profileLabel: "Claude 默认" },
+    { providerFilter: "all", profiles: samePrefixProfiles },
+  );
+  assert.equal(icloudChip?.text, "iCloud");
+  assert.equal(hotmailChip?.text, "Hotmail");
+
+  assert.deepEqual(suggestFallbackDistinctAliases(samePrefixProfiles), {
+    "claude:default": "iCloud",
+    "claude:claude-hotmail": "Hotmail",
+  });
+
+  // Explicit alias is preserved while colliding unnamed sibling still gets AI alias.
+  const aiResult = await resolveAutoProfileAliases({
+    providerId: "claude",
+    profiles: [
+      { ...samePrefixProfiles[0], health: { alias: "自用苹果" } },
+      samePrefixProfiles[1],
+    ],
+    callLightweightAi: async () => JSON.stringify({
+      "claude:claude-hotmail": "微软号",
+    }),
+  });
+  assert.equal(aiResult.source, "ai");
+  assert.deepEqual(aiResult.aliases, { "claude:claude-hotmail": "微软号" });
+
+  // ProviderHub schedules lightweight AI naming for colliding multi-profiles and persists aliases cleanly without overwriting user alias.
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-auto-alias-"));
+  t.after(async () => rm(dir, { recursive: true, force: true }).catch(() => {}));
+  const metaStore = createThreadMetaStore({ filePath: resolve(dir, "thread-meta.json") });
+  await metaStore.load();
+  await metaStore.setProfileMeta("codex:guuguo", { alias: "guuguo自用" });
+
+  const mockClaude = {
+    id: "claude",
+    label: "Claude Code",
+    setCallbacks() {},
+    async listProfiles() {
+      return samePrefixProfiles.map((p) => ({ ...p }));
+    },
+  };
+  const mockCodex = {
+    id: "codex",
+    label: "Codex",
+    setCallbacks() {},
+    async listProfiles() {
+      return [
+        { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "guodeqing@gmail.com" } },
+        { key: "codex:guuguo", provider: "codex", id: "guuguo", label: "Codex · guuguo", installed: true, account: { email: "guuguo@qq.com" } },
+      ];
+    },
+  };
+  const aiCalls = [];
+  const hub = new ProviderHub({
+    dataDir: dir,
+    metaStore,
+    providers: [mockClaude, mockCodex],
+    enableQueueDrain: false,
+    callLightweightProfileAi: async ({ providerId, profiles }) => {
+      aiCalls.push({ providerId, keys: profiles.map((p) => p.key || `${p.provider}:${p.id}`) });
+      if (providerId === "claude") {
+        return '{"claude:default":"果云号","claude:claude-hotmail":"微软号"}';
+      }
+      if (providerId === "codex") {
+        return '{"codex:default":"谷歌主"}';
+      }
+      return null;
+    },
+  });
+  await hub.init();
+  const initial = await hub.listProvidersAndProfiles();
+  assert.equal(initial.profiles.find((p) => p.key === "claude:default")?.health?.alias, "iCloud");
+  assert.equal(initial.profiles.find((p) => p.key === "claude:claude-hotmail")?.health?.alias, "Hotmail");
+  assert.equal(initial.profiles.find((p) => p.key === "codex:guuguo")?.health?.alias, "guuguo自用");
+
+  await new Promise((r) => setTimeout(r, 40));
+  const afterAi = await hub.listProvidersAndProfiles();
+  assert.equal(afterAi.profiles.find((p) => p.key === "claude:default")?.health?.alias, "果云号");
+  assert.equal(afterAi.profiles.find((p) => p.key === "claude:claude-hotmail")?.health?.alias, "微软号");
+  assert.equal(afterAi.profiles.find((p) => p.key === "codex:guuguo")?.health?.alias, "guuguo自用");
+  assert.equal(afterAi.profiles.find((p) => p.key === "codex:default")?.health?.alias, "谷歌主");
+  assert.equal(aiCalls.length, 2);
+  await hub.close();
+});
+
+test("queued turn steer endpoint delivers directly with images/goal and preserves entry on send failure", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-queue-steer-"));
+  t.after(async () => rm(dir, { recursive: true, force: true }).catch(() => {}));
+
+  let failSteer = false;
+  const sentPayloads = [];
+  const mockProvider = {
+    id: "antigravity",
+    label: "Antigravity",
+    setCallbacks() {},
+    async listProfiles() {
+      return [{ id: "desktop", label: "Antigravity 桌面", installed: true }];
+    },
+    async listThreads() {
+      return {
+        threads: [{ id: "t-steer-1", title: "排队列引导", cwd: dir, live: true, updatedAt: 1000 }],
+        nextCursor: null,
+      };
+    },
+    async readThread() {
+      return {
+        thread: {
+          id: "antigravity:desktop:t-steer-1",
+          rawId: "t-steer-1",
+          provider: "antigravity",
+          profileId: "desktop",
+          title: "排队列引导",
+          cwd: dir,
+          live: true,
+          turns: [{ id: "turn-active-1", status: "inProgress", items: [] }],
+        },
+        nextCursor: null,
+      };
+    },
+    async sendTurn(payload) {
+      sentPayloads.push(payload);
+      if (failSteer) {
+        throw Object.assign(new Error("当前通道临时繁忙"), { status: 409, code: "thread_busy" });
+      }
+      return { turn: { id: "turn-active-1", status: "inProgress" }, steered: Boolean(payload.steer) };
+    },
+  };
+
+  const hub = new ProviderHub({
+    dataDir: dir,
+    providers: [mockProvider],
+    enableQueueDrain: false,
+  });
+  const srv = await createAgentControlServer({ hub, host: "127.0.0.1", port: 0, disableRelay: true, dataDir: dir });
+  await hub.init();
+  await srv.start();
+  t.after(async () => {
+    await srv.close();
+    await hub.close();
+  });
+
+  const baseUrl = srv.url;
+  const headers = { "Content-Type": "application/json" };
+  const threadId = "antigravity:desktop:t-steer-1";
+
+  const enqueueRes = await fetch(`${baseUrl}/api/thread/queue`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId,
+      text: "先顺着改好按钮高度",
+      images: [{ name: "shot.png", dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" }],
+      permissionMode: "turbo",
+      goalMode: true,
+    }),
+  });
+  assert.equal(enqueueRes.status, 200);
+  const enqueued = await enqueueRes.json();
+  const entryId = enqueued.entry?.id;
+  assert.ok(entryId);
+  assert.equal(enqueued.items.length, 1);
+
+  // If sendTurn rejects during steer, queued item remains preserved.
+  failSteer = true;
+  const failedRes = await fetch(`${baseUrl}/api/thread/queue/steer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, id: entryId }),
+  });
+  assert.equal(failedRes.status, 409);
+  const stillQueued = await hub.listQueuedTurns(threadId);
+  assert.equal(stillQueued.length, 1);
+  assert.equal(stillQueued[0].id, entryId);
+
+  // Retry succeeds: item is delivered with steer=true + goalMode + images and removed from queue.
+  failSteer = false;
+  const okRes = await fetch(`${baseUrl}/api/thread/queue/steer`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, id: entryId, expectedTurnId: "turn-active-1" }),
+  });
+  assert.equal(okRes.status, 200);
+  const steeredJson = await okRes.json();
+  assert.equal(steeredJson.ok, true);
+  assert.equal(steeredJson.steered, true);
+  assert.equal(steeredJson.items.length, 0);
+  assert.equal(sentPayloads.length, 2);
+  assert.equal(sentPayloads[1].steer, true);
+  assert.equal(sentPayloads[1].text, "先顺着改好按钮高度");
+  assert.equal(sentPayloads[1].images.length, 1);
+  assert.equal(sentPayloads[1].permissionMode, "turbo");
+  const threadReadRes = await fetch(`${baseUrl}/api/thread?id=${encodeURIComponent(threadId)}`);
+  assert.equal(threadReadRes.status, 200);
+  const threadReadJson = await threadReadRes.json();
+  assert.equal(threadReadJson.thread?.goalState?.active, true);
+});
+
+test("custom-select descriptors and toolbar controls enforce unified 28px height without XSS or emojis", async () => {
+  const permDesc = extractSelectDescriptor({
+    id: "permissionSelect",
+    disabled: false,
+    hidden: false,
+    value: "turbo",
+    title: "选择权限",
+    options: [
+      { value: "turbo", textContent: "Turbo（自动批准）", selected: true },
+      { value: "safe", textContent: "只读 / <script>alert(1)</script>", selected: false },
+    ],
+  });
+  assert.equal(permDesc.variant, "permission");
+  assert.equal(permDesc.toneClass, "is-tone-turbo");
+  const triggerHtml = renderCustomSelectTriggerInnerHtml(permDesc);
+  assert.match(triggerHtml, /ac-icon-bolt/);
+  assert.match(triggerHtml, /<span class="ac-select-label">Turbo<\/span>/);
+  assert.match(triggerHtml, /ac-icon-chevron-down/);
+
+  const menuHtml = renderCustomSelectMenuHtml(permDesc);
+  assert.match(menuHtml, /data-ac-option-value="turbo"[^>]*aria-selected="true"/);
+  assert.match(menuHtml, /Turbo（自动批准）/);
+  assert.match(menuHtml, /ac-icon-check/);
+  assert.doesNotMatch(menuHtml, /<script>/);
+  assert.match(menuHtml, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+
+  const appCss = await readFile(fileURLToPath(new URL("../public/app.css", import.meta.url)), "utf8");
+  assert.match(appCss, /\.composer-icon-btn\s*\{[^}]*height:\s*28px;/);
+  assert.match(appCss, /\.composer-toolbar #composerGoalBtn\s*\{[^}]*height:\s*28px;/);
+  assert.match(appCss, /\.composer-toolbar #sendBtn\s*\{[^}]*height:\s*28px;/);
+  assert.match(appCss, /\.ac-select-trigger\s*\{[^}]*height:\s*28px;/);
+});
+
+test("slim subtle dark scrollbars and PC-only draggable sidebar resizer stay wired across HTML/CSS/JS", async () => {
+  const [indexHtml, appCss, appJs] = await Promise.all([
+    readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../public/app.css", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8"),
+  ]);
+
+  assert.match(appCss, /\*::-webkit-scrollbar\s*\{[^}]*width:\s*5px;\s*height:\s*5px;/);
+  assert.match(appCss, /\*::-webkit-scrollbar-track,\s*\*::-webkit-scrollbar-corner\s*\{\s*background:\s*transparent;/);
+  assert.match(appCss, /\.local-apps-strip::-webkit-scrollbar\s*\{\s*display:\s*none;/);
+
+  assert.match(indexHtml, /<\/aside>\s*<div[^>]*id="sidebarResizer"[^>]*class="sidebar-resizer"/);
+  assert.match(appCss, /\.sidebar-resizer\s*\{[^}]*cursor:\s*col-resize;/);
+  assert.match(appCss, /@media\s*\(max-width:\s*960px\)\s*\{[\s\S]*\.sidebar-resizer\s*\{\s*display:\s*none\s*!important;\s*\}/);
+
+  assert.match(appJs, /SIDEBAR_WIDTH_PREF_KEY\s*=\s*"agentControl\.sidebarWidth\.v1"/);
+  assert.match(appJs, /function bindSidebarResizer\(\)/);
+  assert.match(appJs, /setProperty\("--sidebar-width",\s*`\$\{clamped\}px`\)/);
+});
+
+test("deferred viewport image loading, anti-snapback upward wheel handling, and incremental turn diffing prevent offscreen image loading and scroll jumps", async () => {
+  const deferredTurnHtml = renderTurnHtml({
+    id: "t-defer-img",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        content: [
+          { type: "image", path: "assets/shot.png", name: "shot.png" },
+          { type: "text", text: "请看这张图" },
+        ],
+      },
+      {
+        type: "agentMessage",
+        text: "内嵌预览：![内嵌](assets/inline.png)\n\n导出结果：`assets/out.png`",
+      },
+    ],
+  }, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-defer",
+    deferImages: true,
+  });
+
+  assert.doesNotMatch(deferredTurnHtml, /<img[^>]*\ssrc=/);
+  assert.match(deferredTurnHtml, /class="msg-image is-deferred-image" data-lazy-src="\.\/api\/thread\/image\?threadId=antigravity%3Adesktop%3At-defer&amp;path=assets%2Fshot\.png&amp;w=480&amp;q=68"/);
+  assert.match(deferredTurnHtml, /class="md-inline-img is-deferred-image" data-lazy-src="\.\/api\/thread\/image\?threadId=antigravity%3Adesktop%3At-defer&amp;path=assets%2Finline\.png&amp;w=960&amp;q=70"/);
+  assert.match(deferredTurnHtml, /class="msg-image is-deferred-image" data-lazy-src="\.\/api\/thread\/image\?threadId=antigravity%3Adesktop%3At-defer&amp;path=assets%2Fout\.png&amp;w=480&amp;q=68"/);
+  assert.match(deferredTurnHtml, /data-preview-src="\.\/api\/thread\/image\?threadId=antigravity%3Adesktop%3At-defer&amp;path=assets%2Fshot\.png&amp;w=1280&amp;q=75"/);
+  assert.match(deferredTurnHtml, /class="msg-image-deferred-lead"/);
+  assert.match(deferredTurnHtml, /class="msg-reveal-thread-images-btn" data-reveal-thread-images="1"/);
+  assert.match(deferredTurnHtml, /class="md-inline-img-wrap is-deferred"[\s\S]*?data-reveal-inline-img="1"/);
+
+  // In-memory data URL attachments render eagerly even when network preview deferImages is active.
+  const dataUrlTurnHtml = renderTurnHtml({
+    id: "t-inline-data-img",
+    status: "completed",
+    items: [{
+      type: "userMessage",
+      content: [{ type: "image", url: "data:image/png;base64,iVBORw0KGgo=", name: "mem.png" }],
+    }],
+  }, {
+    agentLabel: "Antigravity",
+    threadId: "antigravity:desktop:t-defer",
+    deferImages: true,
+  });
+  assert.match(dataUrlTurnHtml, /<img class="msg-image" src="data:image\/png;base64,iVBORw0KGgo="/);
+  assert.doesNotMatch(dataUrlTurnHtml, /data-reveal-thread-images/);
+
+  const listeners = new Map();
+  const fakeViewport = {
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    removeEventListener(type, fn) {
+      const list = listeners.get(type) || [];
+      listeners.set(type, list.filter((f) => f !== fn));
+    },
+  };
+  let paused = 0;
+  let settled = 0;
+  const unbind = bindFollowIntent(fakeViewport, {
+    pause: () => { paused += 1; },
+    settle: () => { settled += 1; },
+  });
+  try {
+    for (const fn of listeners.get("wheel") || []) {
+      fn({ deltaY: -12 });
+    }
+    assert.equal(paused, 1);
+    assert.equal(settled, 0);
+
+    for (const fn of listeners.get("keyup") || []) {
+      fn({ key: "End" });
+    }
+    assert.equal(settled, 0);
+  } finally {
+    unbind();
+  }
+
+  const [appJs, appCss] = await Promise.all([
+    readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8"),
+    readFile(fileURLToPath(new URL("../public/app.css", import.meta.url)), "utf8"),
+  ]);
+  assert.match(appJs, /function syncTurnListIncremental\(/);
+  assert.match(appJs, /function patchTurnBlockInPlace\(/);
+  assert.match(appJs, /function hydrateRevealedDeferredImages\(/);
+  assert.match(appJs, /revealedDeferredImageSrcs/);
+  assert.match(appJs, /REVEALED_IMAGE_CACHE_LIMIT/);
+  assert.match(appJs, /function setThreadImagesUnlocked\(/);
+  assert.match(appJs, /if\s*\(\s*!isThreadImagesUnlocked\(\)\s*\)\s*return;/);
+  assert.match(appJs, /resetDeferredImageObserver\(\{\s*resetRevealed:\s*false\s*\}\)/);
+  assert.match(appJs, /function captureViewportAnchor\(/);
+  assert.match(appJs, /function restoreViewportAnchor\(/);
+  assert.match(appJs, /rootMargin:\s*"0px"/);
+  assert.match(appCss, /\.messages-viewport\s*\{[^}]*overflow-anchor:\s*auto;/);
+  assert.match(appCss, /#streamingTurn\s*\{[^}]*overflow-anchor:\s*none;/);
+  assert.match(appCss, /\.msg-image\.is-deferred-image\s*\{\s*display:\s*none;/);
+  assert.match(appCss, /\.msg-reveal-thread-images-btn\s*\{/);
+  assert.match(appCss, /\.md-inline-img-trigger\s*\{/);
+});
+
+test("expanded telemetry cards show reset dates inline without duplicate drawer grid, and distinct owners keep account handle priority", async (t) => {
+  const nowSec = Math.floor(new Date("2026-11-16T10:00:00").getTime() / 1000);
+  const sameDayResetSec = Math.floor(new Date("2026-11-16T18:30:00").getTime() / 1000);
+  const futureDateResetSec = Math.floor(new Date("2026-11-21T09:00:00").getTime() / 1000);
+
+  const html = renderAgentTelemetryBarHtml([
+    {
+      key: "codex:codex",
+      provider: "codex",
+      id: "codex",
+      label: "Codex · guuguo自用",
+      installed: true,
+      authenticated: true,
+      account: { email: "guuguo@qq.com" },
+      health: { alias: "guuguo·QQ" },
+      quota: {
+        status: "ok",
+        windows: {
+          fiveHour: { remainingPercent: 72, resetsAt: sameDayResetSec },
+          weekly: { remainingPercent: 94, resetsAt: futureDateResetSec },
+        },
+        buckets: [],
+      },
+    },
+  ], {}, { expanded: true, nowSec });
+
+  assert.match(html, /72% · 18:30/);
+  assert.match(html, /94% · 11\/21/);
+  assert.doesNotMatch(html, /telemetry-drawer-grid|telemetry-drawer-card/);
+
+  assert.deepEqual(
+    suggestFallbackDistinctAliases([
+      { key: "codex:codex", provider: "codex", id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "guuguo@qq.com" } },
+      { key: "codex:default", provider: "codex", id: "default", label: "Codex 默认", installed: true, account: { email: "fpf19910417@163.com" } },
+    ]),
+    {
+      "codex:codex": "guuguo·QQ",
+      "codex:default": "fpf·163",
+    },
+  );
+
+  assert.deepEqual(
+    suggestFallbackDistinctAliases([
+      { key: "grok:cockpit-1", provider: "grok", id: "cockpit-1", label: "Grok · guuguo", installed: true, account: { email: "guuguo@qq.com" } },
+      { key: "grok:default", provider: "grok", id: "default", label: "Grok 默认", installed: true, account: { email: "" } },
+    ]),
+    {
+      "grok:cockpit-1": "guuguo·QQ",
+      "grok:default": "默认",
+    },
+  );
+
+  // Stale v1 auto aliases (e.g. QQ / 163 / 热邮) upgrade cleanly to v2 without overwriting manual aliases.
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-alias-upgrade-"));
+  t.after(async () => rm(dir, { recursive: true, force: true }).catch(() => {}));
+  const metaStore = createThreadMetaStore({ filePath: resolve(dir, "thread-meta.json") });
+  await metaStore.load();
+  await metaStore.setProfileMeta("codex:codex", { alias: "QQ", autoAliasSource: "ai", autoAliasSignature: "v1-old" });
+  await metaStore.setProfileMeta("codex:default", { alias: "163", autoAliasSource: "ai", autoAliasSignature: "v1-old" });
+  await metaStore.setProfileMeta("claude:default", { alias: "手动留名", autoAliasSource: "manual" });
+
+  const mockCodex = {
+    id: "codex",
+    label: "Codex",
+    setCallbacks() {},
+    async listProfiles() {
+      return [
+        { id: "codex", label: "Codex · guuguo自用", installed: true, account: { email: "guuguo@qq.com" } },
+        { id: "default", label: "Codex 默认", installed: true, account: { email: "fpf19910417@163.com" } },
+      ];
+    },
+  };
+  const mockClaude = {
+    id: "claude",
+    label: "Claude Code",
+    setCallbacks() {},
+    async listProfiles() {
+      return [
+        { id: "default", label: "Claude 默认", installed: true, account: { email: "guodeqing@icloud.com" } },
+        { id: "claude-hotmail", label: "Claude · hotmail", installed: true, account: { email: "guodeqing@hotmail.com" } },
+      ];
+    },
+  };
+  const hub = new ProviderHub({
+    dataDir: dir,
+    metaStore,
+    providers: [mockCodex, mockClaude],
+    enableQueueDrain: false,
+    callLightweightProfileAi: async ({ providerId }) => {
+      if (providerId === "codex") return '{"codex:codex":"guuguo·QQ","codex:default":"fpf·163"}';
+      if (providerId === "claude") return '{"claude:claude-hotmail":"Hotmail"}';
+      return null;
+    },
+  });
+  await hub.init();
+  let list = await hub.listProvidersAndProfiles();
+  for (let i = 0; i < 20; i += 1) {
+    if (list.profiles.find((p) => p.key === "claude:claude-hotmail")?.health?.alias === "Hotmail") break;
+    await new Promise((r) => setTimeout(r, 25));
+    list = await hub.listProvidersAndProfiles();
+  }
+  assert.equal(list.profiles.find((p) => p.key === "codex:codex")?.health?.alias, "guuguo·QQ");
+  assert.equal(list.profiles.find((p) => p.key === "codex:default")?.health?.alias, "fpf·163");
+  assert.equal(list.profiles.find((p) => p.key === "claude:default")?.health?.alias, "手动留名");
+  assert.equal(list.profiles.find((p) => p.key === "claude:claude-hotmail")?.health?.alias, "Hotmail");
+  await hub.close();
+});
+
+test("restarted ProviderHub prioritizes interrupted inflight turns ahead of queued turns without auto-resuming manual interrupts", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-inflight-resume-"));
+  t.after(async () => rm(dir, { recursive: true, force: true }).catch(() => {}));
+
+  const createMockHubEnv = ({ unfinishedOnRead = true } = {}) => {
+    const sent = [];
+    const interrupted = [];
+    let emit = () => {};
+    let readCount = 0;
+    const mockProvider = {
+      id: "antigravity",
+      label: "Antigravity",
+      setCallbacks({ onEvent }) {
+        emit = onEvent || (() => {});
+      },
+      async listProfiles() {
+        return [{ id: "desktop", label: "Antigravity", installed: true }];
+      },
+      async getActivity() {
+        return { live: false, nativeQueuedTurns: [] };
+      },
+      async readThread(profileId, rawId) {
+        readCount += 1;
+        return {
+          thread: {
+            id: `antigravity:${profileId}:${rawId}`,
+            provider: "antigravity",
+            profileId,
+            rawId,
+            title: "老二重构任务",
+            cwd: dir,
+            live: false,
+            turns: unfinishedOnRead
+              ? [{
+                  id: "turn-1",
+                  status: "inProgress",
+                  items: [
+                    { type: "userMessage", content: [{ type: "text", text: "重构登录流程并验证测试" }] },
+                    { type: "mcpToolCall", tool: "edit_file", status: "completed" },
+                  ],
+                }]
+              : [{
+                  id: "turn-1",
+                  status: "completed",
+                  items: [
+                    { type: "userMessage", content: [{ type: "text", text: "重构登录流程并验证测试" }] },
+                    { type: "agentMessage", text: "已完成并验证通过。" },
+                  ],
+                }],
+          },
+          nextCursor: null,
+        };
+      },
+      async sendTurn({ profileId, rawId, text }) {
+        const turnId = `turn-sent-${sent.length + 1}`;
+        sent.push({ profileId, rawId, text, turnId });
+        return { turn: { id: turnId }, thread: { id: `antigravity:${profileId}:${rawId}`, title: "老二重构任务", cwd: dir } };
+      },
+      async interrupt({ rawId }) {
+        interrupted.push(rawId);
+        return { ok: true };
+      },
+    };
+    const hub = new ProviderHub({
+      dataDir: dir,
+      providers: [mockProvider],
+      enableQueueDrain: true,
+    });
+    return {
+      hub,
+      sent,
+      interrupted,
+      getReadCount: () => readCount,
+      emitCompleted(rawId, turnId, lastAgentMessage = "断点恢复完成") {
+        emit({
+          type: "turn_completed",
+          provider: "antigravity",
+          profileId: "desktop",
+          threadId: `antigravity:desktop:${rawId}`,
+          turnId,
+          status: "completed",
+          lastAgentMessage,
+        });
+      },
+    };
+  };
+
+  // 1. 服务重启前：t-laoer 正在执行原始任务，同时排着一条新任务 Q1。
+  const run1 = createMockHubEnv({ unfinishedOnRead: true });
+  await run1.hub.init();
+  await run1.hub.sendTurn({ threadId: "antigravity:desktop:t-laoer", cwd: dir, text: "重构登录流程并验证测试" });
+  await run1.hub.queueTurn({ threadId: "antigravity:desktop:t-laoer", text: "后续新排队任务 Q1" });
+  // 模拟服务突然重启（不触发 turn_completed）
+  await run1.hub.close();
+
+  // 2. 重启后的新服务实例：应先发出断点优先恢复，且不得先发 Q1。
+  const run2 = createMockHubEnv({ unfinishedOnRead: true });
+  await run2.hub.init();
+  for (let i = 0; i < 40 && run2.sent.length < 1; i += 1) {
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  assert.equal(run2.sent.length, 1);
+  assert.match(run2.sent[0].text, /服务重启后自动断点恢复/);
+  assert.doesNotMatch(run2.sent[0].text, /后续新排队任务 Q1/);
+
+  // 断点恢复任务跑完之后，Q1 才按序自动触发。
+  run2.emitCompleted("t-laoer", run2.sent[0].turnId, "刚才中断步骤已完成");
+  for (let i = 0; i < 40 && run2.sent.length < 2; i += 1) {
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  assert.equal(run2.sent.length, 2);
+  assert.equal(run2.sent[1].text, "后续新排队任务 Q1");
+
+  // 若是手动点中断，再重启绝不自动续跑。
+  await run2.hub.interrupt({ threadId: "antigravity:desktop:t-laoer" });
+  await run2.hub.close();
+
+  const run3 = createMockHubEnv({ unfinishedOnRead: true });
+  await run3.hub.init();
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(run3.sent.length, 0);
+  await run3.hub.close();
+});
+
+test("queued turns support fetching full images via /entry and updating in place without losing position or attachments", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-queue-edit-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const mockProvider = {
+    name: "antigravity",
+    async init() {},
+    async close() {},
+    onEvent() {
+      return () => {};
+    },
+    getProfiles() {
+      return [{ id: "desktop", label: "Agy", ready: true }];
+    },
+    getModels() {
+      return [{ id: "model-1", label: "Model 1" }];
+    },
+    async listThreads() {
+      return [{ id: "antigravity:desktop:t-edit-1", title: "编辑排队测试", cwd: dir, updatedAt: 1 }];
+    },
+    async readThread() {
+      return { thread: { id: "antigravity:desktop:t-edit-1", title: "编辑排队测试", cwd: dir, turns: [] }, nextCursor: null };
+    },
+    async sendTurn() {
+      return { turn: { id: "turn-1", status: "inProgress" } };
+    },
+  };
+
+  const hub = new ProviderHub({
+    dataDir: dir,
+    providers: [mockProvider],
+    enableQueueDrain: false,
+  });
+  const srv = await createAgentControlServer({ hub, host: "127.0.0.1", port: 0, disableRelay: true, dataDir: dir });
+  await hub.init();
+  await srv.start();
+  t.after(async () => {
+    await srv.close();
+    await hub.close();
+  });
+
+  const baseUrl = srv.url;
+  const headers = { "Content-Type": "application/json" };
+  const threadId = "antigravity:desktop:t-edit-1";
+  const imgDataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const img2DataUrl = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=";
+
+  const q1Res = await fetch(`${baseUrl}/api/thread/queue`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId,
+      text: "第一条原排队",
+      images: [{ name: "first.png", dataUrl: imgDataUrl }],
+      goalMode: true,
+    }),
+  });
+  assert.equal(q1Res.status, 200);
+  const q1Json = await q1Res.json();
+  const q1Id = q1Json.entry?.id;
+  assert.ok(q1Id);
+
+  const q2Res = await fetch(`${baseUrl}/api/thread/queue`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, text: "第二条占位" }),
+  });
+  assert.equal(q2Res.status, 200);
+
+  // 普通列表接口应继续脱敏（不带 dataUrl），但保留 imageCount
+  const listRes = await fetch(`${baseUrl}/api/thread/queue?id=${encodeURIComponent(threadId)}`);
+  assert.equal(listRes.status, 200);
+  const listJson = await listRes.json();
+  assert.equal(listJson.items.length, 2);
+  assert.equal(listJson.items[0].imageCount, 1);
+  assert.equal(listJson.items[0].images[0].omitted, true);
+  assert.equal(listJson.items[0].images[0].dataUrl, undefined);
+
+  // /api/thread/queue/entry 应返回完整原图 dataUrl，且不从队列移除
+  const entryRes = await fetch(`${baseUrl}/api/thread/queue/entry?threadId=${encodeURIComponent(threadId)}&id=${encodeURIComponent(q1Id)}`);
+  assert.equal(entryRes.status, 200);
+  const entryJson = await entryRes.json();
+  assert.equal(entryJson.entry.id, q1Id);
+  assert.equal(entryJson.entry.position, 1);
+  assert.equal(entryJson.entry.images.length, 1);
+  assert.equal(entryJson.entry.images[0].name, "first.png");
+  assert.equal(entryJson.entry.images[0].dataUrl, imgDataUrl);
+  assert.equal((await hub.listQueuedTurns(threadId)).length, 2);
+
+  // /api/thread/queue/update 应原位更新第 1 条且保持 position === 1 排在第二条前面
+  const updateRes = await fetch(`${baseUrl}/api/thread/queue/update`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      threadId,
+      id: q1Id,
+      text: "第一条修改后",
+      images: [
+        { name: "first.png", dataUrl: imgDataUrl },
+        { name: "second.jpg", dataUrl: img2DataUrl },
+      ],
+      goalMode: false,
+    }),
+  });
+  assert.equal(updateRes.status, 200);
+  const updateJson = await updateRes.json();
+  assert.equal(updateJson.items.length, 2);
+  assert.equal(updateJson.items[0].id, q1Id);
+  assert.equal(updateJson.items[0].position, 1);
+  assert.equal(updateJson.items[0].text, "第一条修改后");
+  assert.equal(updateJson.items[0].imageCount, 2);
+  assert.equal(updateJson.items[0].goalMode, false);
+  assert.equal(updateJson.items[1].text, "第二条占位");
+  assert.equal(updateJson.items[1].position, 2);
+
+  const entryAfterRes = await fetch(`${baseUrl}/api/thread/queue/entry?threadId=${encodeURIComponent(threadId)}&id=${encodeURIComponent(q1Id)}`);
+  assert.equal(entryAfterRes.status, 200);
+  const entryAfterJson = await entryAfterRes.json();
+  assert.deepEqual(entryAfterJson.entry.images, [
+    { name: "first.png", dataUrl: imgDataUrl },
+    { name: "second.jpg", dataUrl: img2DataUrl },
+  ]);
+
+  // 不存在的队列项返回 404 queued_turn_not_found
+  const missingRes = await fetch(`${baseUrl}/api/thread/queue/update`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, id: "missing-id", text: "不会写入" }),
+  });
+  assert.equal(missingRes.status, 404);
+  const missingJson = await missingRes.json();
+  assert.equal(missingJson.error?.code, "queued_turn_not_found");
 });

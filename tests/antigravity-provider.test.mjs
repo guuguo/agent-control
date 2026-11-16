@@ -2080,3 +2080,60 @@ test("antigravity-history captures per-turn models (including dual-model switche
   assert.equal(loaded.thread.model, "gemini-4-hydrogen-low");
   assert.deepEqual(loaded.thread.turns[0].models, ["gemini-pro-orchestrator", "gemini-4-hydrogen-low"]);
 });
+
+test("AntigravityProvider slims acp_tool_update payloads and suppresses idle late session/update broadcasts", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-sse-slim-"));
+  const desktopDir = resolve(dir, "desktop");
+  await mkdir(desktopDir, { recursive: true });
+  let provider = null;
+  t.after(async () => {
+    await provider?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const allEvents = [];
+  provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      AGY_BIN: MOCK_AGY_BIN,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "desktop", label: "Antigravity 桌面", home: desktopDir, profileType: "desktop" },
+      ]),
+    },
+    onEvent: (evt) => allEvents.push(evt),
+  });
+
+  const startedLarge = await provider.startThread({
+    profileId: "desktop",
+    cwd: dir,
+    text: "测试大工具更新裁剪 [LARGE_TOOL_UPDATE]",
+  });
+  await waitFor(() =>
+    allEvents.find((e) => e.type === "turn_completed" && e.rawId === startedLarge.thread.rawId),
+  );
+  const slimToolEvt = allEvents.find(
+    (e) => e.type === "acp_tool_update" && e.rawId === startedLarge.thread.rawId && e.update?.toolCallId === "tc-large-1",
+  );
+  assert.ok(slimToolEvt);
+  assert.equal(slimToolEvt.update.title, "读取桌面大图");
+  assert.ok(String(slimToolEvt.update.status || "").length <= 601);
+  assert.equal(Object.hasOwn(slimToolEvt.update, "rawOutput"), false);
+  assert.equal(Object.hasOwn(slimToolEvt.update, "rawInput"), false);
+  assert.equal(Object.hasOwn(slimToolEvt.update, "content"), false);
+  assert.equal(Object.hasOwn(slimToolEvt.update, "locations"), false);
+
+  const startedStale = await provider.startThread({
+    profileId: "desktop",
+    cwd: dir,
+    text: "测试空闲回放抑制 [STALE_AFTER_DONE]",
+  });
+  await waitFor(() =>
+    allEvents.find((e) => e.type === "turn_completed" && e.rawId === startedStale.thread.rawId),
+  );
+  // Wait long enough for mock-agy-cli's 40ms post-turn session/update burst to arrive.
+  await new Promise((r) => setTimeout(r, 140));
+  assert.equal(
+    allEvents.some((e) => JSON.stringify(e).includes("STALE_IDLE_")),
+    false,
+  );
+});

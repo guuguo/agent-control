@@ -96,6 +96,7 @@ export function normalizeServerRequest(message) {
       ...base,
       kind: "userInput",
       title: "Codex 需要你确认信息",
+      isBlocking: params.isBlocking !== false,
       questions: Array.isArray(params.questions) ? params.questions : [],
     };
   }

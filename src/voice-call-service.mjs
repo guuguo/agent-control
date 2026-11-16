@@ -35,37 +35,6 @@ const MODEL_CACHE_TTL_MS = 120_000;
 const EDGE_TTS_TIMEOUT_MS = 3_500;
 const VOICE_PROMPT_TIMEOUT_MS = 60_000;
 
-const TRAD_TO_SIMP_MAP = Object.freeze({
-  進: "进", 麼: "么", 現: "现", 開: "开", 個: "个", 務: "务", 對: "对", 話: "话",
-  會: "会", 線: "线", 確: "确", 認: "认", 審: "审", 讓: "让", 幫: "帮", 總: "总",
-  結: "结", 匯: "汇", 報: "报", 暫: "暂", 繼: "继", 續: "续", 運: "运", 測: "测",
-  試: "试", 檢: "检", 剛: "刚", 說: "说", 聽: "听", 聲: "声", 關: "关", 閉: "闭",
-  換: "换", 項: "项", 態: "态", 處: "处", 發: "发", 給: "给", 過: "过", 來: "来",
-  沒: "没", 還: "还", 這: "这", 裡: "里", 邊: "边", 絲: "丝", 顯: "显", 樣: "样",
-  題: "题", 錯: "错", 誤: "误", 敗: "败", 斷: "断", 連: "连", 構: "构", 單: "单",
-  詳: "详", 細: "细", 況: "况", 嗎: "吗", 點: "点", 選: "选", 擇: "择", 複: "复",
-  盤: "盘", 評: "评", 優: "优", 庫: "库", 碼: "码", 號: "号", 數: "数", 據: "据",
-  圖: "图", 視: "视", 頻: "频", 麥: "麦", 靜: "静", 語: "语", 臺: "台", 設: "设",
-  計: "计", 劃: "划", 問: "问", 無: "无", 與: "与", 為: "为", 並: "并", 從: "从",
-  當: "当", 該: "该", 經: "经", 動: "动", 讀: "读", 寫: "写", 刪: "删", 製: "制",
-  備: "备", 檔: "档", 錄: "录", 啟: "启", 執: "执", 狀: "状", 實: "实", 時: "时",
-  統: "统", 裝: "装", 顧: "顾", 兩: "两", 誰: "谁", 請: "请", 議: "议", 論: "论",
-  傳: "传", 達: "达", 調: "调", 轉: "转", 載: "载", 網: "网", 絡: "络", 頁: "页",
-  麵: "面", 鐘: "钟", 條: "条", 環: "环", 長: "长", 區: "区", 塊: "块", 變: "变",
-  記: "记", 歷: "历", 詢: "询", 應: "应", 別: "别",
-});
-
-export function normalizeSpokenChineseText(input = "") {
-  const raw = String(input || "");
-  if (!raw) return "";
-  let out = "";
-  for (let i = 0; i < raw.length; i += 1) {
-    const ch = raw[i];
-    out += TRAD_TO_SIMP_MAP[ch] || ch;
-  }
-  return out;
-}
-
 export function resolveEdgeTtsExecutable(env = process.env, {
   platform = process.platform,
   homeDir = os.homedir(),
@@ -140,15 +109,6 @@ export function minAudibleDurationMs(text = "") {
   const clean = stripSpeechNoise(text, 360);
   if (!clean) return 0;
   return Math.max(180, Math.min(1100, Math.round(estimateSpeechDurationMs(clean) * 0.22)));
-}
-
-export function isRepeatVoiceIntent(text = "") {
-  const clean = normalizeSpokenChineseText(text).trim();
-  if (!clean) return false;
-  if (/(修复|修改|排查|代码|测试|单元测试|新开|新建|创建|切到|打开|文件|日志)/.test(clean)) {
-    return false;
-  }
-  return /(没听到|没听见|没听清|听不见|听不清|没声音|没有声音|刚才说什么|刚刚说什么|上一句说什么|再说一遍|再说一次|再播一遍|再讲一遍|重播|重复一下|重复一遍|大声点|\brepeat(?:\s+that|\s+last)?\b)/i.test(clean);
 }
 
 export function pickPreferredHydrogenModel(models = [], preferredOverride = "") {
@@ -226,7 +186,6 @@ export function pickPreferredVoiceModel(provider, models = [], preferredOverride
   const override = String(preferredOverride || "").trim();
   if (override) return override;
   const prov = String(provider || "").trim().toLowerCase();
-  if (prov === "local") return "local-rules";
   if (prov === "antigravity") return pickPreferredHydrogenModel(models, "");
   const list = (Array.isArray(models) ? models : [])
     .map((m) => (typeof m === "string"
@@ -259,8 +218,6 @@ function voiceProviderDisplayName(provider) {
       return "Claude";
     case "grok":
       return "Grok";
-    case "local":
-      return "本机规则";
     default:
       return String(provider || "AI");
   }
@@ -269,27 +226,10 @@ function voiceProviderDisplayName(provider) {
 function formatVoiceModelShortName(provider, model) {
   const prov = String(provider || "").toLowerCase();
   const raw = String(model || "").trim();
-  if (prov === "local" || raw === "local-rules") return "本地规则";
   if (!raw) return voiceProviderDisplayName(prov);
   if (/hydrogen/i.test(raw)) return "Hydrogen";
   if (/haiku/i.test(raw)) return raw.replace(/^claude-/i, "").replace(/-(\d)/g, " $1");
   return raw.replace(/^gemini-\d+(?:\.\d+)?-/i, "");
-}
-
-function buildLocalSubagentSummary({ instruction = "", snapshot = {}, threadSnippet = "" } = {}) {
-  const cleanAsk = stripSpeechNoise(instruction, 48);
-  const parts = [];
-  if (threadSnippet) {
-    parts.push(`当前聚焦会话最新结论是：${stripSpeechNoise(threadSnippet, 140)}。`);
-  }
-  const briefing = summarizeFallbackBriefing(snapshot, { askResult: true });
-  if (briefing) parts.push(briefing);
-  if (!parts.length) {
-    parts.push(cleanAsk
-      ? `关于「${cleanAsk}」，当前处于本机轻量规则模式，暂时未连接外部推理模型。你可以在顶部切换 Claude、Codex 或 Antigravity 轻量模型来获取深度分析。`
-      : "当前处于本机规则模式，所有语音播报与快捷调度均正常运行。");
-  }
-  return parts.join(" ");
 }
 
 function extensionForAudioMime(mimeType = "") {
@@ -544,7 +484,9 @@ function parseCoordinatorJson(rawText = "", fallbackTranscript = "") {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         const rawDispatchMode = String(parsed.dispatchMode || "").trim().toLowerCase();
         const rawTier = String(parsed.executionTier || "").trim();
-        const intentVal = String(parsed.intent || "summarize_progress").trim();
+        const intentVal = String(parsed.intent || "").trim();
+        if (!["no_speech", "wake_ping", "summarize_progress", "open_thread", "open_project", "subagent_hydrogen", "send_turn", "create_thread", "approve_request", "interrupt_thread", "repeat_last"].includes(intentVal)) continue;
+        if (intentVal !== "no_speech" && !String(parsed.spokenReply || "").trim()) continue;
         const inferredTier = ["self_simple", "subagent_hydrogen", "external_thread"].includes(rawTier)
           ? rawTier
           : intentVal === "subagent_hydrogen"
@@ -555,6 +497,9 @@ function parseCoordinatorJson(rawText = "", fallbackTranscript = "") {
         return {
           heardText: String(parsed.heardText || fallbackTranscript || "").trim(),
           intent: intentVal,
+          noSpeech: intentVal === "no_speech",
+          silenceReason: intentVal === "no_speech" ? "model_no_speech" : "",
+          explicitFastHydrogen: Boolean(parsed.explicitFastHydrogen),
           executionTier: inferredTier,
           targetProjectCwd: String(parsed.targetProjectCwd || "").trim(),
           targetThreadId: String(parsed.targetThreadId || "").trim(),
@@ -572,23 +517,10 @@ function parseCoordinatorJson(rawText = "", fallbackTranscript = "") {
     }
   }
 
-  const spokenFallback = stripSpeechNoise(raw, 280);
-  return {
-    heardText: String(fallbackTranscript || "").trim(),
-    intent: "summarize_progress",
-    executionTier: "self_simple",
-    targetProjectCwd: "",
-    targetThreadId: "",
-    provider: "",
-    dispatchMode: "",
-    instruction: "",
-    requestId: "",
-    decision: "",
-    spokenReply: spokenFallback,
-  };
+  throw new Error("语音理解模型返回的 JSON 格式无效，未执行任何操作，请重试。");
 }
 
-function pickLatestAssistantSnippet(threadReadResult) {
+function pickLatestAssistantText(threadReadResult) {
   const turns = threadReadResult?.thread?.turns || [];
   for (let i = turns.length - 1; i >= 0; i -= 1) {
     const items = Array.isArray(turns[i]?.items) ? turns[i].items : [];
@@ -596,11 +528,14 @@ function pickLatestAssistantSnippet(threadReadResult) {
       const item = items[j];
       if (!item || item.type !== "agentMessage" || !item.text) continue;
       if (item.phase === "commentary") continue;
-      const clean = stripSpeechNoise(item.text, 160);
-      if (clean) return clean;
+      if (String(item.text).trim()) return String(item.text).trim();
     }
   }
   return "";
+}
+
+function pickLatestAssistantSnippet(threadReadResult) {
+  return stripSpeechNoise(pickLatestAssistantText(threadReadResult), 160);
 }
 
 function normCwd(cwd = "") {
@@ -609,828 +544,19 @@ function normCwd(cwd = "") {
   return raw.replace(/\/+$/, "");
 }
 
-function extractVoiceSearchTerms(text = "") {
-  const raw = String(text || "").toLowerCase().trim();
-  if (!raw) return [];
-  const terms = new Set();
-  for (const m of raw.matchAll(/[a-z0-9][a-z0-9._-]{1,}/g)) {
-    terms.add(m[0]);
-  }
-  for (const m of raw.matchAll(/[\u4e00-\u9fff]{2,}/g)) {
-    const seq = m[0];
-    if (seq.length <= 6) terms.add(seq);
-    for (let i = 0; i <= seq.length - 2; i += 1) {
-      terms.add(seq.slice(i, i + 2));
-    }
-  }
-  return [...terms];
-}
-
-export function resolveFuzzyVoiceTarget(plan = {}, snapshot = {}) {
-  const projects = Array.isArray(snapshot?.projects) ? snapshot.projects : [];
-  const rawCwd = normCwd(normalizeSpokenChineseText(plan?.targetProjectCwd || ""));
-  const rawThreadId = normalizeSpokenChineseText(plan?.targetThreadId || "").trim();
-  const rawHeard = normalizeSpokenChineseText(plan?.heardText || "").trim();
-
-  const cwdHintLow = rawCwd.toLowerCase();
-  const threadHintLow = rawThreadId.toLowerCase();
-  const heardLow = rawHeard.toLowerCase();
-  const heardTerms = extractVoiceSearchTerms(`${rawCwd} ${rawThreadId} ${rawHeard}`);
-
-  const scoreThread = (p, t) => {
-    const idLow = String(t?.id || "").toLowerCase();
-    const titleLow = String(t?.title || "").toLowerCase().trim();
-    let score = 0;
-    if (threadHintLow && (idLow.endsWith(`:${threadHintLow}`) || idLow.includes(threadHintLow))) {
-      score += 120;
-    }
-    if (threadHintLow && titleLow && (titleLow.includes(threadHintLow) || threadHintLow.includes(titleLow))) {
-      score += 90;
-    }
-    if (titleLow.length >= 2 && heardLow.includes(titleLow)) {
-      score += 65 + Math.min(30, titleLow.length * 2);
-    } else if (titleLow) {
-      for (const term of heardTerms) {
-        if (titleLow.includes(term)) score += term.length >= 3 ? 16 : 8;
-      }
-    }
-    if (score > 0) {
-      score += (t.live ? 4 : 0) + (t.pendingCount ? 4 : 0) + (p.pinned ? 3 : 0);
-    }
-    return score;
-  };
-
-  const pickBestThreadInProject = (p) => {
-    let best = null;
-    for (const t of p?.threads || []) {
-      const score = scoreThread(p, t);
-      if (score > 0 && (!best || score > best.score)) {
-        best = { project: p, thread: t, score };
-      }
-    }
-    return best;
-  };
-
-  // 1. 精确 ID / CWD 匹配
-  if (rawThreadId) {
-    for (const p of projects) {
-      const hitThread = (p.threads || []).find((t) => t.id === rawThreadId);
-      if (hitThread) {
-        return { project: p, thread: hitThread, cwd: p.cwd, threadId: hitThread.id, exact: true };
-      }
-    }
-  }
-  if (rawCwd) {
-    const hitProj = projects.find((p) => normCwd(p.cwd) === rawCwd);
-    if (hitProj) {
-      const hitThread = (hitProj.threads || []).find((t) => t.id === rawThreadId)
-        || pickBestThreadInProject(hitProj)?.thread
-        || null;
-      return {
-        project: hitProj,
-        thread: hitThread,
-        cwd: hitProj.cwd,
-        threadId: hitThread?.id || rawThreadId || hitProj.threads?.[0]?.id || "",
-        exact: true,
-      };
-    }
-  }
-
-  // 2. 模糊回退：当 Hydrogen 传了短名/近似路径或仅在 heardText 点名项目/会话时
-  let bestThreadMatch = null;
-  for (const p of projects) {
-    const candidate = pickBestThreadInProject(p);
-    if (candidate && (!bestThreadMatch || candidate.score > bestThreadMatch.score)) {
-      bestThreadMatch = candidate;
-    }
-  }
-
-  let bestProjectMatch = null;
-  for (const p of projects) {
-    const base = basename(normCwd(p.cwd) || "").toLowerCase();
-    const nameLow = String(p.name || "").toLowerCase().trim();
-    const aliasLow = String(p.alias || "").toLowerCase().trim();
-    const fullCwdLow = normCwd(p.cwd).toLowerCase();
-    const labels = [aliasLow, nameLow, base].filter((s) => s.length >= 2);
-    let score = 0;
-
-    if (cwdHintLow) {
-      if (labels.some((lbl) => lbl === cwdHintLow) || fullCwdLow.endsWith(`/${cwdHintLow}`)) {
-        score += 120;
-      } else if (labels.some((lbl) => lbl.includes(cwdHintLow) || cwdHintLow.includes(lbl)) || fullCwdLow.includes(cwdHintLow)) {
-        score += 85;
-      }
-    }
-    for (const lbl of labels) {
-      if (heardLow.includes(lbl)) {
-        score += 55 + Math.min(25, lbl.length * 2);
-      }
-    }
-    if (score === 0 && heardTerms.length) {
-      for (const term of heardTerms) {
-        if (labels.some((lbl) => lbl.includes(term))) {
-          score += term.length >= 3 ? 18 : 9;
-        }
-      }
-    }
-    if (score > 0) {
-      score += (p.pinned ? 6 : 0) + (p.liveCount ? 4 : 0) + (p.pendingCount ? 4 : 0);
-      if (!bestProjectMatch || score > bestProjectMatch.score) {
-        bestProjectMatch = { project: p, score };
-      }
-    }
-  }
-
-  if (bestProjectMatch && bestProjectMatch.score >= 18) {
-    const p = bestProjectMatch.project;
-    const inProjectThread = pickBestThreadInProject(p);
-    if (inProjectThread) {
-      return {
-        project: p,
-        thread: inProjectThread.thread,
-        cwd: p.cwd,
-        threadId: inProjectThread.thread.id,
-        exact: false,
-      };
-    }
-    if (!cwdHintLow && bestThreadMatch && bestThreadMatch.score >= 24 && bestThreadMatch.score > bestProjectMatch.score) {
-      return {
-        project: bestThreadMatch.project,
-        thread: bestThreadMatch.thread,
-        cwd: bestThreadMatch.project.cwd,
-        threadId: bestThreadMatch.thread.id,
-        exact: false,
-      };
-    }
-    return {
-      project: p,
-      thread: p.threads?.[0] || null,
-      cwd: p.cwd,
-      threadId: p.threads?.[0]?.id || "",
-      exact: false,
-    };
-  }
-  if (bestThreadMatch && bestThreadMatch.score >= 24) {
-    return {
-      project: bestThreadMatch.project,
-      thread: bestThreadMatch.thread,
-      cwd: bestThreadMatch.project.cwd,
-      threadId: bestThreadMatch.thread.id,
-      exact: false,
-    };
-  }
-
-  return {
-    project: null,
-    thread: null,
-    cwd: rawCwd.startsWith("/") ? rawCwd : "",
-    threadId: rawThreadId,
-    exact: false,
-  };
-}
-
-function summarizeFallbackBriefing(snapshot, { askResult = false } = {}) {
-  const parts = [];
-  const completedResults = Array.isArray(snapshot?.completedResults) ? snapshot.completedResults : [];
-  if (askResult && completedResults.length > 0) {
-    const latest = completedResults[0];
-    const label = latest.projectName || latest.title || "外部任务";
-    const body = stripSpeechNoise(latest.lastResultSummary || "", 180);
-    if (body) {
-      parts.push(`「${label}」的结果是：${body}`);
-    } else {
-      parts.push(`「${label}」已完成，暂时没有提取到详细文本摘要。`);
-    }
-    if (completedResults.length > 1) {
-      const second = completedResults[1];
-      const secondBody = stripSpeechNoise(second.lastResultSummary || "", 120);
-      if (secondBody) {
-        parts.push(`另外「${second.projectName || second.title || "任务"}」的结果是：${secondBody}`);
-      }
-    }
-  }
-  if (snapshot.pendingRequests?.length) {
-    const first = snapshot.pendingRequests[0];
-    parts.push(`当前有 ${snapshot.pendingRequests.length} 项待确认，第一项是${stripSpeechNoise(first.title || first.command || "权限审批", 60)}。`);
-  }
-  const running = (snapshot.projects || []).filter((p) => p.liveCount > 0);
-  if (running.length) {
-    const names = running.slice(0, 3).map((p) => p.alias || p.name).join("、");
-    parts.push(`${names} 正在运行中。`);
-  }
-  if (!askResult && completedResults.length > 0 && parts.length < 2) {
-    const latest = completedResults[0];
-    const body = stripSpeechNoise(latest.lastResultSummary || "", 140);
-    if (body) {
-      parts.push(`最近完成的「${latest.projectName || latest.title || "任务"}」结果为：${body}`);
-    }
-  }
-  const focus = (snapshot.projects || []).slice(0, 2).find((p) => p.threads?.length);
-  if (focus && !running.length && !snapshot.pendingRequests?.length && !completedResults.length) {
-    const t = focus.threads[0];
-    parts.push(`最近活跃项目是${focus.alias || focus.name}，最新对话《${t.title}》${t.preview ? `，进展为${t.preview}` : ""}。`);
-  }
-  if (!parts.length) {
-    return "目前没有运行中的任务或待确认请求，你可以随时告诉我项目名称或直接下达新任务。";
-  }
-  return parts.join(" ");
-}
-
-export function summarizeProjectBriefing(project, snapshot, { askResult = false } = {}) {
-  if (!project) return summarizeFallbackBriefing(snapshot, { askResult });
-  const threadIds = new Set((project.threads || []).map((t) => t.id));
-  const pending = (snapshot?.pendingRequests || []).filter(
-    (r) => r.projectCwd === project.cwd || threadIds.has(r.threadId),
-  );
-  const running = (project.threads || []).filter((t) => t.live);
-  const completedMatches = (snapshot?.completedResults || []).filter(
-    (r) => r.projectCwd === project.cwd || threadIds.has(r.threadId),
-  );
-  const parts = [];
-  if (askResult && completedMatches.length > 0 && completedMatches[0].lastResultSummary) {
-    parts.push(`${project.name}刚完成的结果是：${stripSpeechNoise(completedMatches[0].lastResultSummary, 160)}。`);
-  }
-  if (pending.length) {
-    parts.push(`${project.name}有 ${pending.length} 项待确认，比如：${pending[0].question || pending[0].title || pending[0].threadTitle || pending[0].command || "操作审批"}。`);
-  }
-  if (running.length) {
-    parts.push(`${project.name}当前有 ${running.length} 个任务运行中，最新是「${running[0].title || "新任务"}」，状态：${running[0].phase || running[0].preview || "执行中"}。`);
-  }
-  if (!askResult && !running.length && completedMatches.length > 0 && completedMatches[0].lastResultSummary) {
-    parts.push(`${project.name}最近已完成，结果为：${stripSpeechNoise(completedMatches[0].lastResultSummary, 160)}。`);
-  }
-  const latest = project.threads?.[0];
-  if (!parts.length && latest) {
-    parts.push(`${project.name}目前空闲，最近一条会话是「${latest.title || "新会话"}」${latest.preview ? `，${stripSpeechNoise(latest.preview, 70)}` : ""}。`);
-  }
-  if (!parts.length) {
-    parts.push(`${project.name}目前没有活跃任务。`);
-  }
-  return parts.join(" ");
-}
-
-export function detectSpokenRoute(text = "") {
-  const s = normalizeSpokenChineseText(text);
-  if (/(协调者|orchestrator|carbon)/i.test(s) && !/hydrogen/i.test(s)) {
-    return {
-      provider: "antigravity",
-      model: DEFAULT_AGY_MODEL,
-      explicitHeavy: true,
-      explicitFastHydrogen: false,
-    };
-  }
-  if (/(hydrogen|氢模型|快速模型|极速模型|低延迟)/i.test(s)) {
-    return {
-      provider: "antigravity",
-      model: "",
-      explicitHeavy: false,
-      explicitFastHydrogen: true,
-    };
-  }
-  if (/\bcodex\b/i.test(s)) {
-    return { provider: "codex", model: "", explicitHeavy: false, explicitFastHydrogen: false };
-  }
-  if (/\bclaude\b/i.test(s)) {
-    return { provider: "claude", model: "", explicitHeavy: false, explicitFastHydrogen: false };
-  }
-  if (/\b(antigravity|agy)\b|反重力/i.test(s)) {
-    return {
-      provider: "antigravity",
-      model: "",
-      explicitHeavy: false,
-      explicitFastHydrogen: true,
-    };
-  }
-  return { provider: "", model: "", explicitHeavy: false, explicitFastHydrogen: false };
-}
-
-function detectSpokenProvider(text = "") {
-  return detectSpokenRoute(text).provider;
-}
-
-/**
- * 区分语音下发指令是立即发送（直出结果/停止等待/不排队）还是常规排队。
- */
-export function detectVoiceDispatchMode(text = "") {
-  const clean = normalizeSpokenChineseText(text).trim();
-  if (!clean) {
-    return { dispatchMode: "queue", immediate: false, reason: "default_queue" };
-  }
-  if (/(?:排到后面|排队执行|排队处理|先排队|排个队|等当前(?:任务|回合|这轮)?(?:完成|结束)|等(?:它|他|上一轮)?忙完|等这轮结束)/i.test(clean)) {
-    return { dispatchMode: "queue", immediate: false, reason: "explicit_queue" };
-  }
-  if (
-    /(?:直接(?:出|给|返回|输出|汇报|总结|回答|给出|给个|给我)(?:最终|当前)?(?:结果|结论|答案|答复|方案|总结)|(?:先|快|马上|立刻)?(?:给|出|说|汇报|总结)(?:个|一下)?(?:最终|当前)?(?:结果|结论|答案)|停止等待|别等了|不用等了|不要等了|别再等了|不等了|先停(?:下|一下)?[，,:：\s]*(?:直接|给|出|说|汇报|总结|回答)|别(?:跑|查|找|搜|改|等|试)了[，,:：\s]*(?:直接|先|给|出|说|汇报|总结|回答))/i.test(clean)
-  ) {
-    return { dispatchMode: "immediate", immediate: true, reason: "direct_result_or_stop_waiting" };
-  }
-  if (
-    /(?:立即发送|马上发送|立刻发送|立即执行|马上执行|立刻执行|别排队|不要排队|不用排队|跳过排队|插队|插话(?:发|告诉|让他|叫他|说)?|现在就(?:发|执行|处理|停下|总结|给)|直接发过去)/i.test(clean)
-  ) {
-    return { dispatchMode: "immediate", immediate: true, reason: "explicit_immediate_send" };
-  }
-  return { dispatchMode: "queue", immediate: false, reason: "default_queue" };
-}
-
-const HEAVY_SELF_TASK_RE = /(?:分析一下|深入(?:分析|整理|查|总结|梳理)|仔细(?:查|看|检查)|排查(?:一下|原因|为什么)|原因是什么|为什么会(?:报错|失败|卡住)|定位一下(?:问题|原因)|写一份|生成一份|起草|整理(?:一份|成|出)|梳理(?:一下|出)|汇总成|写个(?:总结|周报|方案|排查)|对比(?:一下)?|区别在哪|方案(?:怎么选|推荐)|评估一下|复盘一下|详细(?:总结|介绍|汇报|梳理|分析|看看|查一下)|总结(?:一下|出)?(?:刚才|所有|最近).*(?:改动|做了什么|问题|报错|内容|原因))/i;
-
-/**
- * 区分语音指令执行层级：
- * - self_simple: 简单问答/控制面状态查询/开项目/审批/重播，由语音主脑直接完成
- * - subagent_hydrogen: 自己可做但有耗时的分析/梳理/排查/对比任务，开启 Hydrogen 子代理异步完成并持续反馈
- * - external_thread: 需要交由其他项目或会话执行的任务
- */
-export function classifyVoiceExecutionTier(text = "", { plan = null, matchedProject = null } = {}) {
-  const intent = String(plan?.intent || "").trim();
-  if (intent === "subagent_hydrogen") {
-    return { tier: "subagent_hydrogen", reason: "subagent_hydrogen_intent" };
-  }
-  if (intent === "send_turn" || intent === "create_thread" || intent === "interrupt_thread") {
-    return { tier: "external_thread", reason: `external_${intent}` };
-  }
-  if (["no_speech", "wake_ping", "repeat_last", "open_project", "open_thread", "approve_request"].includes(intent)) {
-    return { tier: "self_simple", reason: `simple_${intent}` };
-  }
-  const clean = normalizeSpokenChineseText(text).trim();
-  if (!clean) {
-    return { tier: "self_simple", reason: "empty_text" };
-  }
-  const explicitExternalVerb = /^(?:让|叫|通知|告诉|给)\s*\S+/.test(clean)
-    || /(?:新建|新开|创建|开个|开一个).*(?:会话|任务|对话|线程)/i.test(clean);
-  if (explicitExternalVerb || (matchedProject && /(?:去|跑一下|运行|修一下|修复|修改|写一下|测一下|部署|构建)/.test(clean))) {
-    return { tier: "external_thread", reason: "explicit_external_delegation" };
-  }
-  if (HEAVY_SELF_TASK_RE.test(clean)) {
-    return { tier: "subagent_hydrogen", reason: "heavy_self_cognitive_task" };
-  }
-  return { tier: "self_simple", reason: "simple_direct_query" };
-}
-
-function normalizeFuzzyKey(value = "") {
-  return normalizeSpokenChineseText(value)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "");
-}
-
-function normalizeHomophoneText(value = "") {
-  return normalizeSpokenChineseText(value)
-    .replace(/[展占战]/g, "站")
-    .replace(/[险鲜]/g, "显")
-    .replace(/宝/g, "包")
-    .replace(/[治智制]/g, "制");
-}
-
-function extractHanSubAliases(key = "") {
-  if (!/^[\u4e00-\u9fff]{4,}$/.test(key)) return [];
-  const subs = [];
-  for (let len = key.length - 1; len >= 3; len -= 1) {
-    subs.push(key.slice(0, len));
-    subs.push(key.slice(key.length - len));
-  }
-  return [...new Set(subs)];
-}
-
-function matchBestProjectInText(text = "", snapshot = {}) {
-  const normalizedText = normalizeSpokenChineseText(text);
-  const cleanText = normalizeFuzzyKey(normalizedText);
-  if (!cleanText) return null;
-  const homophoneRaw = normalizeHomophoneText(normalizedText).toLowerCase();
-  const homophoneClean = normalizeFuzzyKey(homophoneRaw);
-  let best = null;
-  let bestScore = 0;
-
-  for (const p of snapshot?.projects || []) {
-    const candidates = [p.alias, p.name, basename(p.cwd || "")].filter(Boolean);
-    const boost = (p.pinned ? 4 : 0) + (p.liveCount > 0 ? 2 : 0);
-    for (const cand of candidates) {
-      const normCand = normalizeSpokenChineseText(cand);
-      const key = normalizeFuzzyKey(normCand);
-      if (key.length < 2) continue;
-
-      if (cleanText.includes(key)) {
-        const score = key.length * 10 + boost;
-        if (score > bestScore) {
-          bestScore = score;
-          best = { project: p, matchedAlias: cand, matchedFragment: cand };
-        }
-        continue;
-      }
-
-      const keyHomo = normalizeFuzzyKey(normalizeHomophoneText(normCand));
-      if (keyHomo.length >= 3 && homophoneClean.includes(keyHomo)) {
-        const idx = homophoneRaw.indexOf(normalizeHomophoneText(normCand).toLowerCase());
-        const surface = idx >= 0 ? normalizedText.slice(idx, idx + normCand.length) : cand;
-        const score = keyHomo.length * 8 + boost;
-        if (score > bestScore) {
-          bestScore = score;
-          best = { project: p, matchedAlias: cand, matchedFragment: surface };
-        }
-        continue;
-      }
-
-      for (const sub of extractHanSubAliases(key)) {
-        if (cleanText.includes(sub)) {
-          const score = sub.length * 7 + boost;
-          if (score > bestScore) {
-            bestScore = score;
-            best = { project: p, matchedAlias: cand, matchedFragment: sub };
-          }
-          break;
-        }
-        const subHomo = normalizeHomophoneText(sub);
-        if (homophoneClean.includes(subHomo)) {
-          const idx = homophoneRaw.indexOf(subHomo);
-          const surface = idx >= 0 ? normalizedText.slice(idx, idx + sub.length) : sub;
-          const score = sub.length * 6 + boost;
-          if (score > bestScore) {
-            bestScore = score;
-            best = { project: p, matchedAlias: cand, matchedFragment: surface };
-          }
-          break;
-        }
-      }
-    }
-  }
-  return best;
-}
-
-function stripMatchedProjectFromInstruction(raw = "", matchedAlias = "", matchedFragment = "") {
-  let out = normalizeSpokenChineseText(raw).trim();
-  for (const token of [matchedAlias, matchedFragment]) {
-    if (!token) continue;
-    const normToken = normalizeSpokenChineseText(token).trim();
-    if (!normToken) continue;
-    const escaped = normToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    out = out.replace(new RegExp(escaped, "ig"), " ");
-  }
-  out = out
-    .replace(/^(?:请|麻烦)?(?:帮我|让|叫|给|告诉|在|把|切到|切换|打开)?\s*(?:这个|那个)?\s*(?:项目|工程|仓库|目录|对话|会话|这边)?\s*[，,:：]?\s*/i, "")
-    .replace(/^(?:去|继续|执行|处理|做一下)?\s*[，,:：]?\s*/, "")
-    .trim();
-  return out;
-}
-
-export function classifyNonActionableSpeech(text = "", { hasPending = false } = {}) {
-  const clean = normalizeSpokenChineseText(text).trim();
-  if (!clean || /^[\p{P}\p{S}\s]+$/u.test(clean)) {
-    return { noSpeech: true, reason: "empty_or_punctuation" };
-  }
-  if (/^(?:\[[^\]]{1,24}\]|\([^)]{1,24}\)|（[^）]{1,24}）|【[^】]{1,24}】|♪.*♪)+$/u.test(clean)) {
-    return { noSpeech: true, reason: "sound_tag" };
-  }
-  if (
-    /(字幕|请订阅|点赞订阅|感谢收看|感谢观看|谢谢观看|谢谢大家|优优独播剧场|明镜与点点|amara\.org|subtitles\s+by|thanks\s+for\s+watching|thank\s+you\s+for\s+watching|please\s+subscribe|软件开发与项目管理语音指令|以下是普通话|普通话或英文语音)/i.test(clean)
-    && !/(进度|状态|批准|拒绝|停止|中断|新建|打开|切换|切到|重播|再说)/.test(clean)
-  ) {
-    return { noSpeech: true, reason: "asr_hallucination" };
-  }
-  const bare = clean.replace(/[\p{P}\p{S}\s]+/gu, "");
-  if (!bare) {
-    return { noSpeech: true, reason: "empty_or_punctuation" };
-  }
-  if (/^喂+$/i.test(bare)) {
-    return { noSpeech: false, reason: "" };
-  }
-  if (bare.length <= 1) {
-    return { noSpeech: true, reason: "single_char_noise" };
-  }
-  if (hasPending && /^(?:好|好的|行|可以|没问题|确认|通过|同意|允许|批准|拒绝|驳回|不同意|ok|okay|yes|approve|reject)$/i.test(bare)) {
-    return { noSpeech: false, reason: "" };
-  }
-  if (/^(?:嗯+|啊+|哦+|呃+|额+|唉+|哎+|哼+|呼+|哈+|呵+|嘿+|嗯哼|啊这|这个|那个|就是|然后|是吗|对吧|行吧|好吧|好|好的|行|可以|对|是的|没问题|没事|没啥|算了|不用了|没关系|等一下|稍等|我看看|先这样|谢谢|谢谢你|thank\s*you|thanks|okay|ok|yes|no|yeah|um+|uh+|ah+|oh+|hm+|hmm+|you|the|bye)$/i.test(bare)) {
-    return { noSpeech: true, reason: "backchannel_or_filler" };
-  }
-  return { noSpeech: false, reason: "" };
-}
-
-export function buildDeterministicVoicePlan({
-  transcript = "",
-  snapshot = {},
-  activeThreadId = "",
-  mode = "turn",
-  lastUtterance = null,
-  unheardUtterances = [],
-} = {}) {
-  const clean = normalizeSpokenChineseText(transcript).trim();
-  const route = detectSpokenRoute(clean);
-  const dispatchModeInfo = detectVoiceDispatchMode(clean);
-  const basePlan = {
-    heardText: clean,
-    intent: "summarize_progress",
-    executionTier: "self_simple",
-    targetProjectCwd: "",
-    targetThreadId: "",
-    provider: "",
-    model: "",
-    explicitFastHydrogen: false,
-    dispatchMode: "",
-    dispatchModeReason: "",
-    instruction: "",
-    requestId: "",
-    decision: "",
-    spokenReply: "",
-  };
-
-  if (mode === "briefing") {
-    return {
-      ...basePlan,
-      heardText: clean || "播报当前任务进度",
-      spokenReply: summarizeFallbackBriefing(snapshot, { askResult: true }),
-    };
-  }
-
-  const pending = snapshot?.pendingRequests || [];
-  const noiseCheck = classifyNonActionableSpeech(clean, { hasPending: pending.length > 0 });
-  if (noiseCheck.noSpeech) {
-    return {
-      ...basePlan,
-      heardText: "",
-      ignoredText: clean,
-      intent: "no_speech",
-      noSpeech: true,
-      silenceReason: noiseCheck.reason,
-      spokenReply: "",
-    };
-  }
-
-  if (isRepeatVoiceIntent(clean)) {
-    const unheardList = Array.isArray(unheardUtterances)
-      ? unheardUtterances.filter((u) => String(u?.text || "").trim())
-      : [];
-    let spokenReply = "";
-    if (unheardList.length > 0) {
-      const recent = unheardList.slice(-2).map((u) => stripSpeechNoise(u.text, 150)).filter(Boolean);
-      spokenReply = stripSpeechNoise(`重新播报刚才未听到的内容：${recent.join("；")}`, 360);
-    } else if (String(lastUtterance?.text || "").trim()) {
-      spokenReply = stripSpeechNoise(`刚才说的是：${String(lastUtterance.text).trim()}`, 360);
-    } else {
-      spokenReply = stripSpeechNoise(`刚才还没有播报记录。${summarizeFallbackBriefing(snapshot)}`, 360);
-    }
-    return {
-      ...basePlan,
-      intent: "repeat_last",
-      executionTier: "self_simple",
-      spokenReply,
-    };
-  }
-
-  const matched = matchBestProjectInText(clean, snapshot);
-  const project = matched?.project || null;
-  const projectThreads = project?.threads || [];
-  const preferredThread = (route.explicitFastHydrogen
-    ? projectThreads.find((t) => t.provider === "antigravity" && /hydrogen/i.test(t.model || ""))
-      || projectThreads.find((t) => t.provider === "antigravity" && t.live)
-      || projectThreads.find((t) => t.provider === "antigravity")
-    : null)
-    || projectThreads.find((t) => t.live)
-    || projectThreads[0]
-    || null;
-  const provider = route.provider || detectSpokenProvider(clean);
-  const allThreads = Array.isArray(snapshot?.threads) && snapshot.threads.length
-    ? snapshot.threads
-    : (snapshot?.projects || []).flatMap((p) =>
-      (p.threads || []).map((t) => ({ ...t, cwd: t.cwd || p.cwd })),
-    );
-  const activeThread = allThreads.find((t) => t.id === (activeThreadId || snapshot?.activeThreadId));
-  const askResultCue = /(什么结果|结果怎么样|有结果了吗|做完了吗|什么结论|结果是什么|刚才.*结果|完成的结果)/i.test(clean);
-
-  // 1. Reject pending request
-  if (/(拒绝|不同意|驳回|不批准|别执行|decline|reject)/i.test(clean) && !/(批准|同意)/.test(clean)) {
-    const req = (project && pending.find((r) => r.projectCwd === project.cwd)) || pending[0];
-    return {
-      ...basePlan,
-      intent: "approve_request",
-      executionTier: "self_simple",
-      targetProjectCwd: req?.projectCwd || project?.cwd || "",
-      targetThreadId: req?.threadId || "",
-      requestId: req?.requestId || "",
-      decision: "decline",
-      spokenReply: req ? "好的，已拒绝这条待确认请求。" : "当前没有待确认的请求。",
-    };
-  }
-
-  // 2. Approve pending request
-  const isApprovalWord = /(批准|同意|通过审批|确认执行|允许执行|approve)/i.test(clean)
-    || (pending.length > 0 && /^(好|好的|行|可以|没问题|确认|通过|同意|允许)[。！!.,]*$/.test(clean));
-  if (isApprovalWord) {
-    const req = (project && pending.find((r) => r.projectCwd === project.cwd)) || pending[0];
-    return {
-      ...basePlan,
-      intent: "approve_request",
-      executionTier: "self_simple",
-      targetProjectCwd: req?.projectCwd || project?.cwd || "",
-      targetThreadId: req?.threadId || "",
-      requestId: req?.requestId || "",
-      decision: "accept",
-      spokenReply: req ? `好的，已批准${req.projectName ? `${req.projectName}的` : ""}待确认操作。` : "当前没有等待确认的请求。",
-    };
-  }
-
-  // 3. Interrupt task (unless user asked agent to stop waiting and immediately output results/follow-up)
-  const asksForAgentOutput = dispatchModeInfo.reason === "direct_result_or_stop_waiting"
-    || /(?:直接(?:出|给|返回|输出|汇报|总结|回答)|给出(?:结果|结论)|汇报(?:结果|结论)|总结一下)/.test(clean);
-  if (!asksForAgentOutput && /(中断|停止运行|停一下|别跑了|暂停任务|interrupt)/i.test(clean)) {
-    const runningTarget = (project && projectThreads.find((t) => t.live))
-      || (activeThread?.live ? activeThread : null)
-      || allThreads.find((t) => t.live);
-    if (runningTarget) {
-      return {
-        ...basePlan,
-        intent: "interrupt_thread",
-        executionTier: "external_thread",
-        targetProjectCwd: runningTarget.cwd || "",
-        targetThreadId: runningTarget.id || "",
-        spokenReply: `好的，正在中断「${runningTarget.title || "当前任务"}」。`,
-      };
-    }
-    return {
-      ...basePlan,
-      executionTier: "self_simple",
-      spokenReply: "目前没有正在运行的任务。",
-    };
-  }
-
-  // 4. Create a new thread (explicitly delegate a new session to another project/provider)
-  if (/(新建|新开|创建|开个|开一个).*(会话|任务|对话|线程)/i.test(clean)) {
-    const fallbackProject = project
-      || (activeThread ? (snapshot?.projects || []).find((p) => p.cwd === activeThread.cwd) : null)
-      || (snapshot?.projects || [])[0];
-    const promptPart = clean
-      .replace(/^.*?(?:会话|任务|对话|线程)\s*[，,:：]?\s*(?:去|帮我|做|执行|内容是)?\s*/, "")
-      .trim();
-    return {
-      ...basePlan,
-      intent: "create_thread",
-      executionTier: "external_thread",
-      targetProjectCwd: fallbackProject?.cwd || "",
-      provider,
-      model: route.model,
-      explicitFastHydrogen: route.explicitFastHydrogen,
-      instruction: promptPart || clean,
-      spokenReply: fallbackProject
-        ? `好的，已在${fallbackProject.name}新建任务并交付执行${promptPart ? `：${stripSpeechNoise(promptPart, 40)}` : ""}。`
-        : "没有找到可用项目目录来新建任务。",
-    };
-  }
-
-  const tierInfo = classifyVoiceExecutionTier(clean, { matchedProject: project });
-
-  // 5. Project-targeted voice commands (delegation or simple project lookup/open)
-  if (project) {
-    const remainder = stripMatchedProjectFromInstruction(clean, matched.matchedAlias, matched.matchedFragment);
-    const hasExplicitOpenVerb = /^(?:请|麻烦|帮我|我想|我要|现在)?\s*(?:打开|切到|切换|进入|跳转|过去看下|去看)/.test(clean);
-    const hasStatusKeyword = /(什么进度|进度怎么样|什么结果|结果怎么样|有结果了吗|怎么样了|现在怎么样|弄好了吗|好了吗|好了没|搞定了吗|搞定没|跑完了吗|忙完了吗|还在跑吗|在忙什么|状态|完成了吗|在干嘛|在做什么|什么情况|汇报|播报|如何)/.test(clean);
-    const isOpenOnly = !hasStatusKeyword && !dispatchModeInfo.immediate && (
-      (hasExplicitOpenVerb && (!remainder || /^(?:项目|会话|对话|主页|看看|打开|切过去|进去|查看)+[。！!]*$/.test(remainder)))
-      || (!hasExplicitOpenVerb && Boolean(remainder) && /^(?:看看|打开|切过去|进去|查看)[。！!]*$/.test(remainder))
-    );
-    const isStatusQuery = !dispatchModeInfo.immediate && tierInfo.tier !== "subagent_hydrogen" && ((!isOpenOnly && !remainder) || hasStatusKeyword);
-
-    if (isOpenOnly) {
-      return {
-        ...basePlan,
-        intent: "open_project",
-        executionTier: "self_simple",
-        targetProjectCwd: project.cwd,
-        targetThreadId: preferredThread?.id || "",
-        spokenReply: `已切换到${project.name}。${preferredThread ? `当前会话是「${preferredThread.title || "新会话"}」。` : ""}`,
-      };
-    }
-
-    if (isStatusQuery && !/^(?:让|叫|告诉|去|运行|执行|测试|修改|修复|检查|帮我)/.test(clean)) {
-      return {
-        ...basePlan,
-        intent: "summarize_progress",
-        executionTier: "self_simple",
-        targetProjectCwd: project.cwd,
-        targetThreadId: preferredThread?.id || "",
-        spokenReply: summarizeProjectBriefing(project, snapshot, { askResult: askResultCue }),
-      };
-    }
-
-    if (tierInfo.tier === "subagent_hydrogen" && !/^(?:让|叫|通知|告诉|给)\s*/.test(clean) && !dispatchModeInfo.immediate) {
-      return {
-        ...basePlan,
-        intent: "subagent_hydrogen",
-        executionTier: "subagent_hydrogen",
-        targetProjectCwd: project.cwd,
-        targetThreadId: preferredThread?.id || "",
-        provider: "antigravity",
-        model: route.model,
-        explicitFastHydrogen: true,
-        instruction: clean,
-        spokenReply: `好的，关于${project.name}的分析我先开一个 Hydrogen 子代理帮你处理，过程中会持续告诉你进展，有结果也第一时间反馈。`,
-      };
-    }
-
-    const instruction = remainder || clean;
-    const isImmediate = dispatchModeInfo.immediate;
-    return {
-      ...basePlan,
-      intent: "send_turn",
-      executionTier: "external_thread",
-      targetProjectCwd: project.cwd,
-      targetThreadId: preferredThread?.id || "",
-      provider,
-      model: route.model,
-      explicitFastHydrogen: route.explicitFastHydrogen,
-      dispatchMode: dispatchModeInfo.dispatchMode,
-      dispatchModeReason: dispatchModeInfo.reason,
-      instruction,
-      spokenReply: isImmediate
-        ? `好的，立即发送给${project.name}：${stripSpeechNoise(instruction, 40)}。`
-        : `好的，已发给${project.name}处理：${stripSpeechNoise(instruction, 40)}。`,
-    };
-  }
-
-  // 6. Heavy self-doable task without delegating to another session -> Hydrogen subagent
-  if (tierInfo.tier === "subagent_hydrogen" && !dispatchModeInfo.immediate && !/^(?:让当前(?:对话|会话|任务)?|给当前(?:对话|会话|任务)?)/.test(clean)) {
-    return {
-      ...basePlan,
-      intent: "subagent_hydrogen",
-      executionTier: "subagent_hydrogen",
-      targetProjectCwd: activeThread?.cwd || "",
-      targetThreadId: activeThreadId || snapshot?.activeThreadId || "",
-      provider: route.provider || "",
-      model: route.model,
-      explicitFastHydrogen: route.explicitFastHydrogen,
-      instruction: clean,
-      spokenReply: "好的，这个需要一点时间处理，我先开一个 Hydrogen 子代理帮你做，过程中会持续同步进展，有结果马上反馈给你。",
-    };
-  }
-
-  // 7. General progress/status/result consultation (simple local lookup)
-  if (!dispatchModeInfo.immediate && /(进度|状态|汇总|汇报|播报|概览|情况|待确认|完成|卡在哪|在干嘛|有什么任务|多少个|什么结果|结果怎么样|有结果了吗|结果是什么|结论|怎么样了|现在怎么样|弄好了吗|好了吗|好了没|搞定了吗|搞定没|跑完了吗|忙完了吗|还在跑吗|在忙什么)/.test(clean)) {
-    return {
-      ...basePlan,
-      executionTier: "self_simple",
-      spokenReply: summarizeFallbackBriefing(snapshot, { askResult: askResultCue }),
-    };
-  }
-
-  // 8. Follow-up or immediate instruction targeting current active/running thread (delegated to external session)
-  const liveThread = allThreads.find((t) => t.live) || null;
-  const targetId = activeThreadId || snapshot?.activeThreadId || liveThread?.id || "";
-  const isImmediateCurrent = dispatchModeInfo.immediate;
-  if (targetId && (isImmediateCurrent || /^(?:让当前(?:对话|会话|任务)?|继续|帮我|请帮我|给当前|发送|执行|跑一下|查一下|修改|修复|测试|检查)/.test(clean))) {
-    const inst = clean.replace(/^(?:让当前(?:对话|会话|任务)?|给当前(?:对话|会话|任务)?|发送)\s*[，,:：]?\s*/, "").trim() || clean;
-    const targetThreadObj = allThreads.find((t) => t.id === targetId);
-    return {
-      ...basePlan,
-      intent: "send_turn",
-      executionTier: "external_thread",
-      targetProjectCwd: targetThreadObj?.cwd || "",
-      targetThreadId: targetId,
-      provider,
-      model: route.model,
-      explicitFastHydrogen: route.explicitFastHydrogen,
-      dispatchMode: dispatchModeInfo.dispatchMode,
-      dispatchModeReason: dispatchModeInfo.reason,
-      instruction: inst,
-      spokenReply: isImmediateCurrent
-        ? `好的，立即发送给当前对话：${stripSpeechNoise(inst, 40)}。`
-        : `好的，已发给当前对话：${stripSpeechNoise(inst, 40)}。`,
-    };
-  }
-
-  if (/(你在吗|^在吗[？?！!。]*$|能听到吗|听得到吗|听得见吗|喂.*在吗)/i.test(clean)) {
-    return {
-      ...basePlan,
-      intent: "wake_ping",
-      executionTier: "self_simple",
-      spokenReply: "我在，请讲。",
-    };
-  }
-
-  if (/^(?:你好|您好|哈喽|hello|hi|喂+|在不在|有声音吗|说话了吗|试音)[？?！!。,.，\s]*$/i.test(clean)
-    || /(?:在不在|有声音吗|说话了吗|试音)/i.test(clean)) {
-    return {
-      ...basePlan,
-      intent: "wake_ping",
-      executionTier: "self_simple",
-      spokenReply: "我在，声音正常，请讲。",
-    };
-  }
-
-  const hasActionOrDomainCue = /(进度|状态|任务|项目|会话|对话|线程|审批|确认|请求|权限|继续|暂停|停止|中断|新建|新开|创建|打开|切换|切到|重播|再说|出结果|给结果|结果|结论|答案|排队|插队|插话|别等|停止等待|立即|立刻|马上|分析|梳理|整理|排查|对比|起草|写一份|评估|复盘|帮我|请|麻烦|跑|查|看|修|改|写|测|构建|部署|总结|汇报|播报|问题|报错|怎么样|好了|搞定|在忙|你好|在不在|有声音|说话了吗|试音|codex|claude|antigravity|agy|hydrogen|carbon|grok|agent|project|status|run|fix|test|open|check)/i.test(clean);
-  if (!hasActionOrDomainCue) {
-    return {
-      ...basePlan,
-      heardText: "",
-      ignoredText: clean,
-      intent: "no_speech",
-      executionTier: "self_simple",
-      noSpeech: true,
-      silenceReason: "no_actionable_intent",
-      spokenReply: "",
-    };
-  }
-
-  return {
-    ...basePlan,
-    executionTier: "self_simple",
-    spokenReply: `听到你说「${stripSpeechNoise(clean, 36)}」。${summarizeFallbackBriefing(snapshot)}`,
-  };
+// Resolve only identifiers chosen by the model; never infer a target from spoken text.
+export function resolveVoicePlanTarget(plan = {}, snapshot = {}) {
+  const projects = snapshot.projects || [];
+  const threads = snapshot.threads || projects.flatMap((p) =>
+    (p.threads || []).map((t) => ({ ...t, cwd: p.cwd })));
+  const thread = plan.targetThreadId ? threads.find((t) => t.id === plan.targetThreadId) : null;
+  const project = plan.targetProjectCwd
+    ? projects.find((p) => normCwd(p.cwd) === normCwd(plan.targetProjectCwd))
+    : (thread ? projects.find((p) => p.cwd === thread.cwd) : null);
+  const valid = (!plan.targetThreadId || Boolean(thread))
+    && (!plan.targetProjectCwd || Boolean(project))
+    && (!thread || !project || thread.cwd === project.cwd);
+  return { project, thread, cwd: project?.cwd || thread?.cwd || "", threadId: thread?.id || "", valid };
 }
 
 export class VoiceCallService {
@@ -1660,18 +786,6 @@ export class VoiceCallService {
       }
     }
 
-    options.push({
-      key: "local:local-rules",
-      provider: "local",
-      profileId: "",
-      model: "local-rules",
-      effort: "",
-      isLight: true,
-      label: "仅本机规则（零模型）",
-      shortLabel: "本机规则",
-      description: "无需 Gemini 或任何外部分析模型，纯本地状态总结与语音操控",
-    });
-
     const resolved = await this.resolveVoiceTarget({
       voiceProvider,
       voiceModel,
@@ -1695,31 +809,13 @@ export class VoiceCallService {
     _modelsByProvider = null,
   } = {}) {
     const callPref = callId ? this.#callStates.get(callId)?.voicePref : null;
-    const rawProvider = String(
-      voiceProvider
-      || callPref?.voiceProvider
-      || this.#env?.AGENT_CONTROL_VOICE_PROVIDER
-      || "",
-    ).trim().toLowerCase();
-    const rawModel = String(
-      voiceModel
-      || callPref?.voiceModel
-      || this.#env?.AGENT_CONTROL_VOICE_MODEL
-      || "",
-    ).trim();
+    const requestedProvider = String(voiceProvider || callPref?.voiceProvider || this.#env?.AGENT_CONTROL_VOICE_PROVIDER || "").trim().toLowerCase();
+    const requestedModel = String(voiceModel || callPref?.voiceModel || this.#env?.AGENT_CONTROL_VOICE_MODEL || "").trim();
+    // Migrate saved preferences from the removed local-rule mode.
+    const legacyLocal = requestedProvider === "local" || requestedModel === "local-rules";
+    const rawProvider = legacyLocal ? "auto" : requestedProvider;
+    const rawModel = legacyLocal ? "" : requestedModel;
     const rawProfileId = String(voiceProfileId || callPref?.voiceProfileId || "").trim();
-
-    if (rawProvider === "local" || rawModel === "local-rules") {
-      return {
-        selectionKey: "local:local-rules",
-        provider: "local",
-        profileId: "",
-        model: "local-rules",
-        effort: "",
-        shortLabel: "本机规则",
-        displayName: "本机规则",
-      };
-    }
 
     const installedProfiles = _installedProfiles || await this.#getInstalledVoiceProfiles();
     const hasProviderList = installedProfiles.length > 0;
@@ -1836,15 +932,7 @@ export class VoiceCallService {
       };
     }
 
-    return {
-      selectionKey: "local:local-rules",
-      provider: "local",
-      profileId: "",
-      model: "local-rules",
-      effort: "",
-      shortLabel: "本机规则",
-      displayName: "本机规则",
-    };
+    throw Object.assign(new Error("未找到可用的语音理解模型，请选择已登录的模型。未执行任何语音控制操作。"), { status: 503 });
   }
 
   async #resolveTaskModelAndEffort({
@@ -1898,7 +986,7 @@ export class VoiceCallService {
         const normalized = normalizeAcpPermissionRequest(msg);
         client.respond(
           normalized.rawId,
-          createAcpPermissionResponse(normalized, { decision: "acceptForSession" }),
+          createAcpPermissionResponse(normalized, { decision: "decline" }),
         );
       });
 
@@ -2273,9 +1361,7 @@ export class VoiceCallService {
     let dispatchProfileId = "";
     let dispatchLabel = "Hydrogen";
     let modelOptions = [];
-    let selectedVoiceOption = activePref.voiceProvider === "local"
-      ? "local:local-rules"
-      : (activePref.voiceProvider && activePref.voiceProvider !== "auto" && activePref.voiceModel
+    let selectedVoiceOption = (activePref.voiceProvider && !["auto", "local"].includes(activePref.voiceProvider) && activePref.voiceModel
           ? `${activePref.voiceProvider}:${activePref.voiceProfileId || "default"}:${activePref.voiceModel}`
           : "auto");
     let asrAvailable = true;
@@ -2371,7 +1457,7 @@ export class VoiceCallService {
             await client.configureSession(sessionId, {
               model: dispatchModel,
               effort: "low",
-              permissionMode: "turbo",
+              permissionMode: "plan",
             });
             entry = {
               callId: cleanCallId,
@@ -2415,7 +1501,7 @@ export class VoiceCallService {
       asrAvailable,
       asrEngine,
       warmed,
-      ttsEngine: ttsBin ? "edge-tts" : (sayBin ? "macos-say" : "browser"),
+      ttsEngine: ttsBin ? "edge-tts" : (sayBin ? "macos-say" : "none"),
       ...(warning ? { warning } : {}),
     };
   }
@@ -2540,6 +1626,7 @@ export class VoiceCallService {
       projects,
       completedResults: [...(callState?.completedResults || [])],
       delegatedTasks: [...(callState?.delegatedTasks?.values() || [])],
+      threads: threads.map(({ id, cwd, title, provider, model, live }) => ({ id, cwd, title, provider, model, live })),
     };
   }
 
@@ -2571,7 +1658,7 @@ export class VoiceCallService {
 
     let audioBase64 = "";
     let mimeType = "";
-    let provider = "browser";
+    let provider = "none";
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
     const sayBin = resolveMacSayExecutable(this.#env);
     const cacheKey = cleanText.length <= 120
@@ -2665,7 +1752,7 @@ export class VoiceCallService {
             provider = "macos-say";
           }
         } catch {
-          // Fall through to browser speechSynthesis.
+          // Leave audio empty so the client reports an unheard reply.
         } finally {
           await unlink(outWavPath).catch(() => {});
         }
@@ -2721,29 +1808,50 @@ export class VoiceCallService {
     };
   }
 
-  #buildHydrogenPrompt({
+  async #runVoiceCoordinator({ callId, target, promptText }) {
+    if (target.provider !== "antigravity") {
+      return this.#runHubVoicePrompt({ target, text: promptText });
+    }
+    const client = await this.#ensureClient();
+    let entry = this.#calls.get(callId);
+    if (!entry || entry.model !== target.model) {
+      const created = await client.newSession({ cwd: this.#workspaceDir });
+      if (!created?.sessionId) throw new Error("语音理解模型未返回会话 ID");
+      await client.configureSession(created.sessionId, {
+        model: target.model, effort: target.effort || "low", permissionMode: "plan",
+      });
+      entry = { callId, sessionId: created.sessionId, model: target.model, createdAt: Date.now() };
+      this.#calls.set(callId, entry);
+      this.#trimCallCache();
+    }
+    entry.lastUsedAt = Date.now();
+    return this.#runSerializedPrompt(entry.sessionId, promptText);
+  }
+
+  #buildCoordinatorPrompt({
     snapshot,
-    audioFilePath = "",
     transcriptText = "",
     mode = "turn",
     unheardUtterances = [],
+    lastUtterance = null,
   }) {
     const rules = [
-      `${VOICE_CALL_TAG} 你是运行在用户本机 Agent Control 里的实时语音通话副驾（多模态 Hydrogen）。`,
+      `${VOICE_CALL_TAG} 你是运行在用户本机 Agent Control 里的实时语音通话副驾。`,
       "用户在手机上通过语音电话与你连续对话，经常一边忙或开车一边听进度、找项目或口头给某个智能体下达任务。",
       "严格规则：",
-      audioFilePath
-        ? `1. 请调用一次 read_file 工具读取本轮用户原声音频文件（${audioFilePath}），直接听懂原话并识别可能的中英文混读或同音字；严禁修改任何代码文件、严禁执行命令或搜索仓库。`
-        : "1. 本轮无音频附件，请直接依据用户的文本请求或播报模式处理；严禁调用读写文件或命令工具。",
+      "1. 依据完整原话、上下文和控制快照理解语义、指代、否定、疑问、转述及同音误识别，由你决定意图、目标、模型与排队方式。严禁调用工具、执行命令、读写文件或直接操作任务；只返回计划，由控制台执行。",
       "2. 只能从下方实时控制快照 JSON 中挑选真实存在的 `cwd`、`threads[].id`、`pendingRequests[].requestId`，绝不编造。",
       "3. 先判断指令复杂度与归属：（a）简单查询/打开项目/审批/重播/唤醒由你自己直接完成，`executionTier` 设为 `self_simple`；（b）你自己可做但需要较长耗时分析/排查/梳理/总结上下文/对比方案的任务，`intent` 设为 `subagent_hydrogen`、`executionTier` 设为 `subagent_hydrogen`；（c）需要交由其他项目或会话执行的任务，`intent` 设为 `send_turn`（或 `create_thread`）、`executionTier` 设为 `external_thread`（若用户要求直接出结果、给结论、停止等待、别等了、立即发送或别排队，`dispatchMode` 设为 `immediate`，否则设为 `queue`）；若仅停止任务设 `interrupt_thread`；若用户没听清要求再说一遍，设 `intent` 为 `repeat_last`。",
+      "询问原因、否认授权、引用别人说的话，均不等于要求执行其中的动作。比如询问为什么停止任务，应只读解释记录，不能再次停止任务。自然问答可以直接回答；无法确定指代或操作范围时，先口头询问，intent=summarize_progress，不得猜选第一个任务或审批。操作目标必须复制快照中完整的 ID/CWD；新建任务必须指定项目，停止任务必须指定单个会话，审批必须指定 requestId 和明确 decision。",
+      "只有明确并非面向你的背景对白或识别噪声才设 intent=no_speech、spokenReply 留空；不要因为口头表达短、没有固定词语就忽略。repeat_last 应根据最近播报和未听到的记录重新组织回复。provider/model 只在用户明确要求切换任务执行模型时填写；否则保留已有会话配置。",
       "4. `spokenReply` 用 1~3 句自然简洁的电话口语回复（像电话里的得力副驾），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
       "5. 最终回复必须且只能输出一个合法 JSON 对象，格式如下：",
-      '{"heardText":"听到的用户原话","intent":"summarize_progress|open_thread|open_project|subagent_hydrogen|send_turn|create_thread|approve_request|interrupt_thread|repeat_last","executionTier":"self_simple|subagent_hydrogen|external_thread","targetProjectCwd":"","targetThreadId":"","provider":"","dispatchMode":"immediate|queue","instruction":"","requestId":"","decision":"accept|decline|","spokenReply":"用于电话朗读的简短自然中文回复"}',
+      '{"heardText":"听到的用户原话","intent":"no_speech|wake_ping|summarize_progress|open_thread|open_project|subagent_hydrogen|send_turn|create_thread|approve_request|interrupt_thread|repeat_last","executionTier":"self_simple|subagent_hydrogen|external_thread","targetProjectCwd":"","targetThreadId":"","provider":"","model":"","dispatchMode":"immediate|queue","instruction":"","requestId":"","decision":"accept|decline|","spokenReply":"用于电话朗读的简短自然中文回复"}',
       "",
       "<LIVE_CONTROL_SNAPSHOT>",
       JSON.stringify(snapshot),
       "</LIVE_CONTROL_SNAPSHOT>",
+      `<LAST_REPLY>\n${JSON.stringify(lastUtterance ? { text: lastUtterance.text, intent: lastUtterance.intent } : null)}\n</LAST_REPLY>`,
     ];
 
     if (Array.isArray(unheardUtterances) && unheardUtterances.length > 0) {
@@ -2760,8 +1868,6 @@ export class VoiceCallService {
       rules.push("用户点击了【播报最新进度】：请用 2~3 句电话口语总结当前最需要关注的待确认请求、运行中任务与最新进展，heardText 填 \"播报当前任务进度\"，intent 填 \"summarize_progress\"。");
     } else if (transcriptText) {
       rules.push(`用户补充输入：${transcriptText}`);
-    } else if (audioFilePath) {
-      rules.push(`请立即 read_file("${audioFilePath}") 听取用户说话内容并返回唯一 JSON。`);
     }
     return rules.join("\n");
   }
@@ -2816,12 +1922,16 @@ export class VoiceCallService {
         },
       };
     }
-    const fuzzy = resolveFuzzyVoiceTarget(plan, snapshot);
+    const fuzzy = resolveVoicePlanTarget(plan, snapshot);
+    const needsTarget = ["open_project", "open_thread", "send_turn", "create_thread", "interrupt_thread"].includes(intent);
+    if (!fuzzy.valid || (needsTarget && !fuzzy.threadId && !fuzzy.cwd)) {
+      return { needsBackground: false, immediateResult: {
+        ok: false, action: intent, summaryTag: "目标未确认",
+        overrideReply: "模型未明确选定有效的项目或会话，请补充要操作的目标。",
+      } };
+    }
     const resolvedProject = fuzzy.project;
-    const resolvedThreadId = fuzzy.threadId
-      || activeThreadId
-      || snapshot.activeThreadId
-      || "";
+    const resolvedThreadId = fuzzy.threadId || "";
     const resolvedCwd = fuzzy.cwd || "";
     const targetName = resolvedProject?.name || (resolvedCwd ? basename(resolvedCwd) : "当前对话");
 
@@ -2833,11 +1943,9 @@ export class VoiceCallService {
       const fallbackProv = VOICE_LIGHT_PROVIDER_PRIORITY.find((p) =>
         (snapshot?.availableProfiles || []).some((prof) => prof.provider === p && prof.authenticated !== false),
       ) || "";
-      const prefProv = String(plan.provider || voicePref.voiceProvider || resolvedProv || fallbackProv || "").trim().toLowerCase();
+      const prefProv = String(plan.provider || resolvedProv || voicePref.voiceProvider || fallbackProv || "").trim().toLowerCase();
       const useHydrogenNaming = !prefProv || prefProv === "auto" || prefProv === "antigravity";
-      const subagentLabel = prefProv === "local"
-        ? "本机规则"
-        : (useHydrogenNaming ? "Hydrogen 子代理" : `${voiceProviderDisplayName(prefProv)} 轻量助手`);
+      const subagentLabel = useHydrogenNaming ? "Hydrogen 子代理" : `${voiceProviderDisplayName(prefProv)} 轻量助手`;
       return {
         needsBackground: true,
         alwaysAsync: true,
@@ -2845,6 +1953,7 @@ export class VoiceCallService {
           action: "subagent_hydrogen",
           executionTier: "subagent_hydrogen",
           provider: prefProv || (useHydrogenNaming ? "antigravity" : ""),
+          model: voicePref.voiceModel || callState?.resolvedTarget?.model || "",
           focusThreadId: resolvedThreadId || "",
           focusProjectCwd: resolvedCwd || "",
           projectName: targetName,
@@ -2870,7 +1979,7 @@ export class VoiceCallService {
           const resProvider = String(res.provider || "antigravity").toLowerCase();
           const resLabel = resProvider === "antigravity"
             ? "Hydrogen 子代理"
-            : (resProvider === "local" ? "本机规则" : `${voiceProviderDisplayName(resProvider)} 子代理`);
+            : `${voiceProviderDisplayName(resProvider)} 子代理`;
           const spokenSummary = stripSpeechNoise(res.summary || "已完成分析。", 220);
           if (callId && spokenSummary) {
             this.#recordCompletedResult(callId, {
@@ -2928,16 +2037,15 @@ export class VoiceCallService {
     }
 
     if (intent === "approve_request") {
-      const targetReq = snapshot.pendingRequests.find((r) => r.requestId === plan.requestId)
-        || snapshot.pendingRequests[0];
-      if (!targetReq) {
+      const targetReq = snapshot.pendingRequests.find((r) => r.requestId === plan.requestId);
+      if (!targetReq || !["accept", "decline"].includes(plan.decision)) {
         return {
           needsBackground: false,
           immediateResult: {
             ok: false,
             action: "approve_request",
             summaryTag: "暂无待确认请求",
-            overrideReply: "当前没有等待确认的审批请求。",
+            overrideReply: "模型未明确选定有效的审批请求和决定，请补充确认。",
           },
         };
       }
@@ -3076,8 +2184,7 @@ export class VoiceCallService {
       const shouldOverrideTurnModel = targetProvider === "antigravity"
         && (Boolean(plan.explicitFastHydrogen) || Boolean(plan.model) || !existingThreadModel);
       const explicitPlanMode = plan.dispatchMode === "immediate" || plan.dispatchMode === "queue" ? plan.dispatchMode : "";
-      const detectedMode = detectVoiceDispatchMode(text);
-      const dispatchMode = explicitPlanMode || detectedMode.dispatchMode;
+      const dispatchMode = explicitPlanMode || "queue";
       const isImmediate = dispatchMode === "immediate";
       return {
         needsBackground: true,
@@ -3496,14 +2603,6 @@ export class VoiceCallService {
     threadSnippet = "",
     targetCwd = "",
   }) {
-    if (typeof this.#hub?.startThread !== "function") {
-      return {
-        provider: "local",
-        model: "local-rules",
-        summary: buildLocalSubagentSummary({ instruction, snapshot, threadSnippet }),
-      };
-    }
-
     const compactProjects = (snapshot?.projects || []).slice(0, 6).map((p) => ({
       name: p.alias || p.name,
       liveCount: p.liveCount,
@@ -3516,21 +2615,27 @@ export class VoiceCallService {
     }));
     const subPrompt = [
       `${VOICE_CALL_TAG} 你是 Agent Control 的语音后台只读分析助手（${target.displayName}）。`,
-      "请基于以下控制快照与会话摘录，在严禁修改任何代码文件的前提下，直接帮用户完成分析、整理、排查或结论总结。",
+      "只分析下面提供的控制快照与会话摘录，不调用工具或系统命令，不得停止、恢复、派发任务或批准请求。用户问为什么停止是询问原因，不是停止指令；记录不足就直说无法确定原因，不得猜测。",
       "输出要求：用 2~4 句自然流畅的中文电话口语给出清晰结论与建议，不要包含 Markdown 符号、代码块或文件路径斜杠。",
       `用户请求：${instruction}`,
       ...(threadSnippet ? [`当前聚焦会话最近输出：${threadSnippet}`] : []),
       `<CONTEXT_SNAPSHOT>\n${JSON.stringify({ projects: compactProjects, pendingRequests: snapshot?.pendingRequests || [] })}\n</CONTEXT_SNAPSHOT>`,
     ].join("\n");
 
+    const raw = await this.#runHubVoicePrompt({ target, text: subPrompt, cwd: targetCwd });
+    return { provider: target.provider, model: target.model, summary: stripSpeechNoise(raw, 260) || "已完成分析整理。" };
+  }
+
+  async #runHubVoicePrompt({ target, text, cwd = "" }) {
+    if (typeof this.#hub?.startThread !== "function") throw new Error("当前模型不支持语音理解请求，未执行任何操作。");
     const started = await this.#hub.startThread({
       provider: target.provider,
       profileId: target.profileId || "default",
-      cwd: targetCwd || this.#workspaceDir,
+      cwd: cwd || this.#workspaceDir,
       model: target.model || undefined,
       ...(target.effort ? { effort: target.effort } : {}),
-      text: subPrompt,
-      permissionMode: "turbo",
+      text,
+      permissionMode: "plan",
     });
 
     const createdThreadId = String(started?.thread?.id || "").trim();
@@ -3574,7 +2679,11 @@ export class VoiceCallService {
         const turns = Array.isArray(latestThread?.turns) ? latestThread.turns : [];
         const lastTurn = turns[turns.length - 1];
         if (lastTurn && lastTurn.status && lastTurn.status !== "inProgress" && lastTurn.status !== "running") {
-          const snippet = pickLatestAssistantSnippet(readRes);
+          if (lastTurn.status === "failed" || lastTurn.status === "interrupted") {
+            fail(new Error("语音模型请求未完成"));
+            return;
+          }
+          const snippet = pickLatestAssistantText(readRes);
           if (snippet || lastTurn.status === "completed") {
             finish(snippet || "已完成分析整理。");
           }
@@ -3590,11 +2699,7 @@ export class VoiceCallService {
       summary = text;
     });
 
-    return {
-      provider: target.provider,
-      model: target.model || started?.thread?.model || "",
-      summary: stripSpeechNoise(summary || "", 260) || "已完成分析整理。",
-    };
+    return summary;
   }
 
   async #runHydrogenSubagent({
@@ -3615,14 +2720,7 @@ export class VoiceCallService {
       voiceProvider: preferredProvider,
       voiceModel: preferredModel,
       voiceProfileId: preferredProfileId,
-    }).catch(async () => ({
-      provider: "antigravity",
-      profileId: "cli",
-      model: await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL),
-      effort: "low",
-      shortLabel: "Hydrogen",
-      displayName: "Hydrogen",
-    }));
+    });
     const model = target.model || DEFAULT_VOICE_HYDROGEN_MODEL;
     const effort = target.effort || (/\b(low|fast|lite)\b|-low\b/i.test(model) ? "low" : "");
     const targetCwd = projectCwd && existsSync(projectCwd) ? projectCwd : this.#workspaceDir;
@@ -3676,14 +2774,6 @@ export class VoiceCallService {
         };
       }
 
-      if (target.provider === "local") {
-        return {
-          provider: "local",
-          model: "local-rules",
-          summary: buildLocalSubagentSummary({ instruction, snapshot, threadSnippet }),
-        };
-      }
-
       if (target.provider !== "antigravity") {
         return await this.#runHubVoiceSubagent({
           target,
@@ -3701,7 +2791,7 @@ export class VoiceCallService {
       await client.configureSession(sessionId, {
         model,
         ...(effort ? { effort } : {}),
-        permissionMode: "readOnly",
+        permissionMode: "plan",
       });
 
       const subBuffer = {
@@ -3731,7 +2821,7 @@ export class VoiceCallService {
       }));
       const subPrompt = [
         "[AC_VOICE_SUBAGENT] 你是 Agent Control 的语音后台分析子代理（Hydrogen）。",
-        "请基于以下控制快照与会话摘录，在不动手修改代码的前提下，直接帮用户完成分析、整理、排查或结论总结。",
+        "只分析下面提供的控制快照与会话摘录，不调用工具或系统命令，不得停止、恢复、派发任务或批准请求。用户问为什么停止是询问原因，不是停止指令；记录不足就直说无法确定原因，不得猜测。",
         "输出要求：用 2~4 句自然流畅的中文电话口语给出清晰结论与建议，不要包含 Markdown 符号、代码块或文件路径斜杠。",
         `用户请求：${instruction}`,
         ...(threadSnippet ? [`当前聚焦会话最近输出：${threadSnippet}`] : []),
@@ -3797,7 +2887,7 @@ export class VoiceCallService {
 
     if (!resultText && typeof this.#hub?.readThread === "function") {
       const readRes = await this.#hub.readThread(threadId, { limit: 4 }).catch(() => null);
-      resultText = pickLatestAssistantSnippet(readRes);
+      resultText = pickLatestAssistantText(readRes);
     }
     const cleanResultSummary = stripSpeechNoise(resultText, 240);
 
@@ -3806,7 +2896,7 @@ export class VoiceCallService {
       if (rawStatus === "failed") {
         subagentWaiter.reject(new Error(evt.error || "语音后台分析子代理执行失败"));
       } else {
-        subagentWaiter.resolve(cleanResultSummary || "已完成分析整理。");
+        subagentWaiter.resolve(resultText || "");
       }
     }
 
@@ -4158,7 +3248,6 @@ export class VoiceCallService {
     const cleanAudio = String(audioBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
     const cleanTranscript = String(transcriptText || "").trim();
     const asrBinName = basename(String(this.#env?.VOICE_ASR_BIN || "").trim());
-    const hasExplicitAsrBin = Boolean(asrBinName);
     const agyBinName = basename(agyExecutable(this.#env) || "");
     const isMockAgy = agyBinName.includes("mock-agy");
     const isMockAsr = asrBinName.includes("mock-voice-asr");
@@ -4221,19 +3310,6 @@ export class VoiceCallService {
           localAudioFiltered: false,
         });
       }
-      if (!cleanAudio && cleanTranscript) {
-        const pendingList = this.#hub.allPendingRequests?.() || [];
-        const speechCheck = classifyNonActionableSpeech(cleanTranscript, { hasPending: pendingList.length > 0 });
-        if (speechCheck.noSpeech) {
-          return buildLocalNoSpeechPayload({
-            silenceReason: speechCheck.reason,
-            ignoredText: cleanTranscript,
-            model: "local-filter",
-            localAudioFiltered: false,
-            pendingCount: pendingList.length,
-          });
-        }
-      }
       if (cleanAudio && !cleanTranscript) {
         const audioBuf = Buffer.from(cleanAudio, "base64");
         if (audioBuf.length < 64) {
@@ -4266,102 +3342,35 @@ export class VoiceCallService {
     const lastUtterance = [...callState.utterances].reverse().find((u) => String(u?.text || "").trim()) || null;
     const snapshot = await this.buildLiveSnapshot({ activeThreadId, callId: cleanCallId });
 
-    let plan;
-    let usedFallback = false;
-    let model = "";
-    let engineLabel = "local-voice";
-
-    if (!isMockAgy || hasExplicitAsrBin) {
-      let heard = cleanTranscript;
-      let asrResult = null;
-      if (cleanAudio && !heard) {
-        const projectNames = (snapshot.projects || [])
-          .slice(0, 8)
-          .map((p) => p.alias || p.name)
-          .filter(Boolean);
-        const promptHints = projectNames.length
-          ? `以下是普通话简体中文语音指令，可能包含项目名称：${projectNames.join("、")}。常用指令：现在什么进度，跑一下测试，打开项目，批准请求，拒绝，停止运行，再说一遍。`
-          : "";
-        asrResult = await this.transcribeAudio({
-          audioBase64: cleanAudio,
-          audioMimeType,
-          promptHints,
-        });
-        heard = String(asrResult?.text || "").trim();
-        engineLabel = asrResult?.engine || engineLabel;
-      }
-      if (cleanAudio && !heard && mode !== "briefing") {
-        return buildLocalNoSpeechPayload({
-          silenceReason: String(asrResult?.silenceReason || "empty_transcript"),
-          model: engineLabel,
-          localAudioFiltered: Boolean(asrResult?.localAudioFiltered),
-          pendingCount: snapshot.pendingRequests.length,
-          liveProjectCount: snapshot.projects.filter((p) => p.liveCount > 0).length,
-        });
-      }
-      plan = buildDeterministicVoicePlan({
-        transcript: heard,
-        snapshot,
-        activeThreadId,
-        mode,
-        lastUtterance,
-        unheardUtterances,
+    let heard = cleanTranscript;
+    let engineLabel = "";
+    if (cleanAudio && !heard) {
+      const projectNames = (snapshot.projects || []).map((p) => p.alias || p.name).filter(Boolean).slice(0, 8);
+      const asr = await this.transcribeAudio({ audioBase64: cleanAudio, audioMimeType,
+        promptHints: projectNames.length ? `可能提到的项目名称：${projectNames.join("、")}。` : "",
       });
-      model = engineLabel;
-    } else {
-      const started = await this.startCall({ callId: cleanCallId });
-      model = started.model;
-      let utterancePath = "";
-
-      try {
-        if (cleanAudio) {
-          await mkdir(this.#utterancesDir, { recursive: true });
-          const ext = extensionForAudioMime(audioMimeType);
-          utterancePath = resolve(this.#utterancesDir, `turn-${randomUUID()}.${ext}`);
-          await writeFile(utterancePath, Buffer.from(cleanAudio, "base64"));
-        }
-
-        if (!started.warmed || !this.#calls.get(cleanCallId)?.sessionId) {
-          usedFallback = true;
-          plan = buildDeterministicVoicePlan({
-            transcript: cleanTranscript || (mode === "briefing" ? "播报当前任务进度" : ""),
-            snapshot,
-            activeThreadId,
-            mode,
-            lastUtterance,
-            unheardUtterances,
-          });
-        } else {
-          const entry = this.#calls.get(cleanCallId);
-          entry.lastUsedAt = Date.now();
-          const promptText = this.#buildHydrogenPrompt({
-            snapshot,
-            audioFilePath: utterancePath,
-            transcriptText: cleanTranscript,
-            mode,
-            unheardUtterances,
-          });
-
-          const rawResponse = await this.#runSerializedPrompt(entry.sessionId, promptText);
-          plan = parseCoordinatorJson(rawResponse, cleanTranscript);
-          if (!plan.spokenReply && !plan.noSpeech && plan.intent !== "no_speech") {
-            plan.spokenReply = summarizeFallbackBriefing(snapshot);
-          }
-        }
-      } catch (error) {
-        this.#calls.delete(cleanCallId);
-        throw error;
-      } finally {
-        if (utterancePath) {
-          await unlink(utterancePath).catch(() => {});
-        }
-      }
+      heard = String(asr.text || "").trim();
+      engineLabel = asr.engine || "";
+      if (!heard && mode !== "briefing") return buildLocalNoSpeechPayload({
+        silenceReason: asr.silenceReason || "empty_transcript", model: engineLabel,
+        localAudioFiltered: Boolean(asr.localAudioFiltered), pendingCount: snapshot.pendingRequests.length,
+        liveProjectCount: snapshot.projects.filter((p) => p.liveCount > 0).length,
+      });
     }
+    const target = await this.resolveVoiceTarget({ callId: cleanCallId });
+    callState.resolvedTarget = target;
+    const promptText = this.#buildCoordinatorPrompt({ snapshot, transcriptText: heard, mode,
+      unheardUtterances, lastUtterance,
+    });
+    const rawResponse = await this.#runVoiceCoordinator({ callId: cleanCallId, target, promptText });
+    const plan = parseCoordinatorJson(rawResponse, heard);
+    const model = target.model;
+    const usedFallback = false;
 
     if (plan?.noSpeech || plan?.intent === "no_speech") {
       return buildLocalNoSpeechPayload({
         silenceReason: plan.silenceReason || "no_speech",
-        ignoredText: String(plan.ignoredText || cleanTranscript || "").trim(),
+        ignoredText: heard,
         model,
         usedFallback,
         localAudioFiltered: false,
@@ -4370,8 +3379,7 @@ export class VoiceCallService {
       });
     }
 
-    const executionTier = plan?.executionTier
-      || classifyVoiceExecutionTier(plan?.instruction || plan?.heardText || "", { plan }).tier;
+    const executionTier = plan.executionTier;
     const utteranceId = `utt-${randomUUID().slice(0, 10)}`;
     let executed = { ok: true, action: plan.intent, executionTier, summaryTag: "" };
     let pendingDispatchStart = null;
@@ -4503,6 +3511,7 @@ export class VoiceCallService {
       ok: true,
       callId: cleanCallId,
       model,
+      asrEngine: cleanAudio ? engineLabel : "",
       usedFallback,
       heardText: plan.heardText,
       spokenReply: plan.spokenReply,

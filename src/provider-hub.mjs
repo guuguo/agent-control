@@ -15,6 +15,9 @@ import {
   splitFilePathAndAnchor,
 } from "./file-preview.mjs";
 import { createGoalController, GOAL_COMPLETE_MARKER } from "./goal-controller.mjs";
+import { createInflightTurnStore, inflightTurnsPath } from "./inflight-turns.mjs";
+import { ExecutionStats } from "./execution-stats.mjs";
+import { isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { isTurboPermissionMode, normalizePermissionMode } from "./permissions.mjs";
 import { isSubpathOrEqual, isUserHomePath, resolveUserHome } from "./platform.mjs";
@@ -24,6 +27,12 @@ import {
   normalizeProfileHealth,
   sortProfilesByHealth,
 } from "./profile-health.mjs";
+import {
+  computeMultiProfileSignature,
+  isAutoAliasUpgradeCandidate,
+  resolveAutoProfileAliases,
+  suggestFallbackDistinctAliases,
+} from "./profile-auto-alias.mjs";
 import { createQueuedTurnQueue, queuedTurnsPath } from "./queued-turns.mjs";
 import { createThreadMetaStore, threadMetaPath } from "./thread-meta-store.mjs";
 import { stripPromptNoise } from "./thread-display.mjs";
@@ -122,8 +131,8 @@ function mergeQueuedTurnLists(nativeItems = [], controlItems = []) {
     })),
     ...(Array.isArray(controlItems) ? controlItems : []).map((item) => summarizeQueuedTurnEntry({
       ...item,
-      source: "control",
-      sourceLabel: "控制端队列",
+      source: item.source || "control",
+      sourceLabel: item.sourceLabel || (item.source === "resume" ? "断点优先恢复" : "控制端队列"),
       canCancel: true,
     })),
   ];
@@ -135,7 +144,15 @@ function inlineImagePayloadString(part) {
   if (typeof part.url === "string" && /^data:image\//i.test(part.url)) return part.url;
   if (typeof part.image_url === "string" && /^data:image\//i.test(part.image_url)) return part.image_url;
   if (typeof part.image_url?.url === "string" && /^data:image\//i.test(part.image_url.url)) return part.image_url.url;
+  if (typeof part.data === "string" && /^data:image\//i.test(part.data)) return part.data;
   return "";
+}
+
+function truncateSseText(str, maxChars) {
+  if (typeof str !== "string" || str.length <= maxChars) return str;
+  const cleaned = str.replace(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{256,}/gi, "[图片Base64已省略]");
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars)}…[已省略 ${cleaned.length - maxChars} 字符]`;
 }
 
 function sanitizeImagePartForSse(part, maxInlineDataChars) {
@@ -154,24 +171,79 @@ function sanitizeImagePartForSse(part, maxInlineDataChars) {
   return part;
 }
 
+function sanitizePartListForSse(parts, maxInlineDataChars, { truncateText = false } = {}) {
+  if (!Array.isArray(parts) || !parts.length) return parts;
+  let contentChanged = false;
+  const mapped = parts.map((part) => {
+    const cleanImg = sanitizeImagePartForSse(part, maxInlineDataChars);
+    if (cleanImg !== part) {
+      contentChanged = true;
+      return cleanImg;
+    }
+    if (truncateText && part && typeof part === "object") {
+      if (typeof part.text === "string" && part.text.length > maxInlineDataChars) {
+        contentChanged = true;
+        return { ...part, text: truncateSseText(part.text, maxInlineDataChars) };
+      }
+      if (typeof part.content === "string" && part.content.length > maxInlineDataChars) {
+        contentChanged = true;
+        return { ...part, content: truncateSseText(part.content, maxInlineDataChars) };
+      }
+    }
+    return part;
+  });
+  return contentChanged ? mapped : parts;
+}
+
 function sanitizeItemForSse(item, maxInlineDataChars) {
-  if (!item || typeof item !== "object" || item.type !== "userMessage") return item;
-  let changed = false;
-  let nextContent = item.content;
+  if (!item || typeof item !== "object") return item;
+  const directClean = sanitizeImagePartForSse(item, maxInlineDataChars);
+  if (directClean !== item) return directClean;
+
+  const isAgentMsg = item.type === "agentMessage";
+  let next = null;
+  const ensureCopy = () => {
+    if (!next) next = { ...item };
+    return next;
+  };
+
   if (Array.isArray(item.content)) {
-    let contentChanged = false;
-    const mapped = item.content.map((part) => {
-      const clean = sanitizeImagePartForSse(part, maxInlineDataChars);
-      if (clean !== part) contentChanged = true;
-      return clean;
-    });
-    if (contentChanged) {
-      changed = true;
-      nextContent = mapped;
+    const mapped = sanitizePartListForSse(item.content, maxInlineDataChars, { truncateText: !isAgentMsg });
+    if (mapped !== item.content) {
+      ensureCopy().content = mapped;
+    }
+  } else if (!isAgentMsg && typeof item.content === "string" && item.content.length > maxInlineDataChars) {
+    ensureCopy().content = truncateSseText(item.content, maxInlineDataChars);
+  }
+
+  if (item.result && typeof item.result === "object") {
+    let nextResult = null;
+    const ensureResult = () => {
+      if (!nextResult) nextResult = { ...item.result };
+      return nextResult;
+    };
+    if (Array.isArray(item.result.content)) {
+      const mappedRes = sanitizePartListForSse(item.result.content, maxInlineDataChars, { truncateText: !isAgentMsg });
+      if (mappedRes !== item.result.content) {
+        ensureResult().content = mappedRes;
+      }
+    }
+    if (!isAgentMsg && typeof item.result.output === "string" && item.result.output.length > maxInlineDataChars) {
+      ensureResult().output = truncateSseText(item.result.output, maxInlineDataChars);
+    }
+    if (nextResult) {
+      ensureCopy().result = nextResult;
     }
   }
-  if (!changed) return item;
-  return { ...item, content: nextContent };
+
+  if (!isAgentMsg && typeof item.aggregatedOutput === "string" && item.aggregatedOutput.length > maxInlineDataChars) {
+    ensureCopy().aggregatedOutput = truncateSseText(item.aggregatedOutput, maxInlineDataChars);
+  }
+  if (!isAgentMsg && typeof item.output === "string" && item.output.length > maxInlineDataChars) {
+    ensureCopy().output = truncateSseText(item.output, maxInlineDataChars);
+  }
+
+  return next || item;
 }
 
 function sanitizeItemsListForSse(items, maxInlineDataChars) {
@@ -201,6 +273,45 @@ export function sanitizeEventForSse(event, data, { maxInlineDataChars = DEFAULT_
     if (!next) next = { ...data };
     return next;
   };
+
+  if (data.type === "acp_tool_update" && data.update && typeof data.update === "object") {
+    const u = data.update;
+    const rawStatus = u.status !== undefined && u.status !== null ? String(u.status) : "";
+    ensureCopy().update = {
+      ...(u.sessionUpdate ? { sessionUpdate: u.sessionUpdate } : {}),
+      ...(u.toolCallId ? { toolCallId: u.toolCallId } : {}),
+      ...(u.id ? { id: u.id } : {}),
+      ...(u.title ? { title: u.title } : {}),
+      ...(u.kind ? { kind: u.kind } : {}),
+      ...(rawStatus ? { status: rawStatus.length > 600 ? `${rawStatus.slice(0, 600)}…` : rawStatus } : {}),
+    };
+  }
+  if (data.type === "tool_result" && data.toolResult && typeof data.toolResult === "object") {
+    const cleanResult = sanitizeItemForSse(data.toolResult, maxInlineDataChars);
+    if (cleanResult !== data.toolResult) {
+      ensureCopy().toolResult = cleanResult;
+    }
+  }
+  if (
+    data.type === "tool_use"
+    && data.toolUse
+    && typeof data.toolUse === "object"
+    && data.toolUse.input
+    && typeof data.toolUse.input === "object"
+    && !Array.isArray(data.toolUse.input)
+  ) {
+    let inputChanged = false;
+    const nextInput = { ...data.toolUse.input };
+    for (const [k, v] of Object.entries(nextInput)) {
+      if (typeof v === "string" && v.length > maxInlineDataChars) {
+        nextInput[k] = truncateSseText(v, maxInlineDataChars);
+        inputChanged = true;
+      }
+    }
+    if (inputChanged) {
+      ensureCopy().toolUse = { ...data.toolUse, input: nextInput };
+    }
+  }
 
   if (data.turn && Array.isArray(data.turn.items)) {
     const cleanItems = sanitizeItemsListForSse(data.turn.items, maxInlineDataChars);
@@ -258,6 +369,20 @@ export function sanitizeEventForSse(event, data, { maxInlineDataChars = DEFAULT_
   return next || data;
 }
 
+function inlinePartPayloadLength(part) {
+  if (!part || typeof part !== "object") return 0;
+  const inlineUrl = inlineImagePayloadString(part);
+  if (inlineUrl) return inlineUrl.length;
+  if (part.source?.type === "base64" && typeof part.source.data === "string") {
+    return part.source.data.length;
+  }
+  if ((part.type === "image" || part.type === "input_image" || part.type === "image_url")
+    && typeof part.data === "string") {
+    return part.data.length;
+  }
+  return 0;
+}
+
 export function capOversizedThreadInlineImages(thread, {
   maxSingleDataUrlChars = DEFAULT_THREAD_SINGLE_IMAGE_CHARS,
   maxTotalDataUrlChars = DEFAULT_THREAD_TOTAL_IMAGE_CHARS,
@@ -269,6 +394,23 @@ export function capOversizedThreadInlineImages(thread, {
   let turnsChanged = false;
   const nextTurns = [...thread.turns];
 
+  const capPartArray = (parts) => {
+    if (!Array.isArray(parts) || !parts.length) return { changed: false, parts };
+    let changed = false;
+    const nextParts = [...parts];
+    for (let cIdx = nextParts.length - 1; cIdx >= 0; cIdx -= 1) {
+      const payloadLen = inlinePartPayloadLength(nextParts[cIdx]);
+      if (!payloadLen) continue;
+      if (payloadLen > maxSingleDataUrlChars || totalChars + payloadLen > maxTotalDataUrlChars) {
+        nextParts[cIdx] = { type: "image", path: "[图片] 历史大图（已省略原图防卡顿）" };
+        changed = true;
+      } else {
+        totalChars += payloadLen;
+      }
+    }
+    return { changed, parts: changed ? nextParts : parts };
+  };
+
   for (let tIdx = nextTurns.length - 1; tIdx >= 0; tIdx -= 1) {
     const turn = nextTurns[tIdx];
     if (!turn || !Array.isArray(turn.items) || !turn.items.length) continue;
@@ -277,24 +419,24 @@ export function capOversizedThreadInlineImages(thread, {
 
     for (let iIdx = nextItems.length - 1; iIdx >= 0; iIdx -= 1) {
       const item = nextItems[iIdx];
-      if (!item || item.type !== "userMessage" || !Array.isArray(item.content)) continue;
-      let contentChanged = false;
-      const nextContent = [...item.content];
+      if (!item || typeof item !== "object") continue;
 
-      for (let cIdx = nextContent.length - 1; cIdx >= 0; cIdx -= 1) {
-        const part = nextContent[cIdx];
-        const inlineUrl = inlineImagePayloadString(part);
-        if (!inlineUrl) continue;
-        if (inlineUrl.length > maxSingleDataUrlChars || totalChars + inlineUrl.length > maxTotalDataUrlChars) {
-          nextContent[cIdx] = { type: "image", path: "[图片] 历史大图（已省略原图防卡顿）" };
-          contentChanged = true;
-        } else {
-          totalChars += inlineUrl.length;
+      let nextItem = null;
+      if (item.result && typeof item.result === "object" && Array.isArray(item.result.content)) {
+        const resCapped = capPartArray(item.result.content);
+        if (resCapped.changed) {
+          nextItem = { ...item, result: { ...item.result, content: resCapped.parts } };
+        }
+      }
+      if (Array.isArray(item.content)) {
+        const contentCapped = capPartArray(item.content);
+        if (contentCapped.changed) {
+          nextItem = { ...(nextItem || item), content: contentCapped.parts };
         }
       }
 
-      if (contentChanged) {
-        nextItems[iIdx] = { ...item, content: nextContent };
+      if (nextItem) {
+        nextItems[iIdx] = nextItem;
         itemsChanged = true;
       }
     }
@@ -308,18 +450,40 @@ export function capOversizedThreadInlineImages(thread, {
   return turnsChanged ? { ...thread, turns: nextTurns } : thread;
 }
 
+const INFLIGHT_RECOVERY_MAX_AGE_MS = 30 * 60 * 1000;
+const MAX_AUTO_RESUME_ATTEMPTS = 2;
+const RESUME_AFTER_RESTART_PROMPT = [
+  "[服务重启后自动断点恢复] 上一轮任务在执行过程中因控制台服务重启被意外中断，尚未完成。",
+  "请先核对当前会话上下文与工作区状态，优先继续完成刚才中断的步骤；不要直接跳过去执行后续排队任务。",
+].join("");
+
+function turnHasFinalPrimaryReply(turn) {
+  const items = Array.isArray(turn?.items) ? turn.items : [];
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const it = items[i];
+    if (it?.type === "agentMessage" && it.phase !== "commentary" && String(it.text || "").trim()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class ProviderHub {
   #providers = new Map();
   #metaStore;
   #goalController;
+  #inflightStore;
   #queue;
   #pendingRequests = new Map();
   #activeTurns = new Map();
+  #recoveringThreads = new Set();
+  #startupRecoveryReady = true;
   #lastAssistantText = new Map();
   #goalContinuationTimers = new Set();
   #sseListeners = new Set();
   #quotaService;
   #telemetry;
+  #executionStats;
   #telemetryTimer = null;
   #telemetryTickInFlight = false;
   #lastTelemetrySig = "";
@@ -332,6 +496,9 @@ export class ProviderHub {
   #nativeQueuedCache = new Map();
   #drainTimers = new Set();
   #enableQueueDrain = true;
+  #env;
+  #callLightweightProfileAi = null;
+  #autoAliasInFlight = new Set();
   #closed = false;
 
   constructor({
@@ -340,13 +507,20 @@ export class ProviderHub {
     providers = null,
     metaStore = null,
     goalController = null,
+    inflightStore = null,
     quotaService = null,
     telemetryService = null,
     enableQueueDrain = true,
+    callLightweightProfileAi = null,
   } = {}) {
+    this.#env = env;
+    this.#callLightweightProfileAi = typeof callLightweightProfileAi === "function" ? callLightweightProfileAi : null;
     this.#enableQueueDrain = Boolean(enableQueueDrain);
+    this.#startupRecoveryReady = !this.#enableQueueDrain;
     this.#metaStore = metaStore || createThreadMetaStore({ filePath: threadMetaPath(dataDir) });
     this.#goalController = goalController || createGoalController({ filePath: goalStatePath(dataDir) });
+    this.#inflightStore = inflightStore || createInflightTurnStore({ filePath: inflightTurnsPath(dataDir) });
+    this.#executionStats = new ExecutionStats({ filePath: resolve(dataDir, "execution-stats.json") });
 
     const emitEvent = (evt) => this.#handleProviderEvent(evt);
     const emitServerRequest = (req) => this.#handleProviderServerRequest(req);
@@ -387,8 +561,16 @@ export class ProviderHub {
         permissionMode: entry.permissionMode,
         goalMode: entry.goalMode,
         writerConflictPolicy: "reject",
+        isSystemResume: entry.source === "resume",
+        resumeAttempts: entry.resumeAttempts || 0,
       }),
-      isRetryable: (error) => Number(error?.status) === 409,
+      isRetryable: (error) => (
+        Number(error?.status) === 409
+        || error?.code === "thread_busy"
+        || error?.code === "writer_conflict"
+        || error?.code === "codex_app_running"
+        || /already has an active writer|\bactive writer\b|thread is busy/i.test(String(error?.message || ""))
+      ),
       onEvent: (event) => {
         const tid = event.entry?.threadId || "";
         void (async () => {
@@ -408,12 +590,126 @@ export class ProviderHub {
   }
 
   async init() {
-    await Promise.all([
+    const [, goalStates] = await Promise.all([
       this.#metaStore.load(),
       this.#goalController.load(),
+      this.#inflightStore.load(),
+      this.#executionStats.load(),
       this.#queue.load(),
       ...this.providerList().map((p) => p.refreshProfiles?.().catch(() => {})),
     ]);
+    this.#scheduleStartupRecovery(goalStates || {});
+  }
+
+  #scheduleStartupRecovery(goalStates = {}) {
+    if (!this.#enableQueueDrain || this.#closed) {
+      this.#startupRecoveryReady = true;
+      return;
+    }
+    const now = Date.now();
+    const candidates = new Map();
+
+    for (const item of this.#inflightStore.all()) {
+      if (!item?.threadId) continue;
+      if ((now - (Number(item.startedAt) || 0)) > INFLIGHT_RECOVERY_MAX_AGE_MS || (Number(item.resumeAttempts) || 0) >= MAX_AUTO_RESUME_ATTEMPTS) {
+        this.#inflightStore.clear(item.threadId);
+        continue;
+      }
+      candidates.set(item.threadId, item);
+    }
+
+    for (const [tid, gs] of Object.entries(goalStates || {})) {
+      if (!tid || !gs?.active || gs.backend === "native") continue;
+      if ((now - (Number(gs.updatedAt || gs.startedAt) || 0)) > INFLIGHT_RECOVERY_MAX_AGE_MS) continue;
+      if (!candidates.has(tid)) {
+        candidates.set(tid, {
+          threadId: tid,
+          cwd: "",
+          model: gs.model || "",
+          effort: gs.effort || "",
+          permissionMode: gs.permissionMode || "workspace",
+          goalMode: true,
+          resumeAttempts: 0,
+          startedAt: gs.updatedAt || gs.startedAt || now,
+        });
+      }
+    }
+
+    if (!candidates.size) {
+      this.#startupRecoveryReady = true;
+      return;
+    }
+
+    for (const tid of candidates.keys()) {
+      this.#recoveringThreads.add(tid);
+    }
+    this.#startupRecoveryReady = true;
+
+    void (async () => {
+      for (const [tid, cand] of candidates.entries()) {
+        if (this.#closed) break;
+        let shouldDrainThread = false;
+        try {
+          const parsed = parseCompositeThreadId(tid);
+          const provider = this.getProvider(parsed.provider);
+          const act = typeof provider.getActivity === "function"
+            ? await provider.getActivity(parsed.profileId, parsed.rawId, { cursor: null }).catch(() => null)
+            : null;
+          if (this.#closed) break;
+          if (act?.live) {
+            this.#activeTurns.set(tid, { turnId: act.turnId || "", startedAt: cand.startedAt || Date.now() });
+            continue;
+          }
+
+          const readRes = await provider.readThread(parsed.profileId, parsed.rawId, { detail: "auto", limit: 4 }).catch(() => null);
+          if (this.#closed) break;
+          const upstreamThread = readRes?.thread || null;
+          if (upstreamThread?.live) {
+            this.#activeTurns.set(tid, { turnId: "", startedAt: cand.startedAt || Date.now() });
+            continue;
+          }
+          const turns = Array.isArray(upstreamThread?.turns) ? upstreamThread.turns : [];
+          const lastTurn = turns.length ? turns[turns.length - 1] : null;
+          const goalState = this.#goalController.get(tid);
+          const completedCleanly = Boolean(
+            lastTurn
+            && lastTurn.status === "completed"
+            && turnHasFinalPrimaryReply(lastTurn)
+            && !goalState?.active,
+          );
+          if (completedCleanly) {
+            this.#inflightStore.clear(tid);
+            shouldDrainThread = this.#queue.has(tid);
+            continue;
+          }
+
+          const prefs = this.#metaStore.get(tid);
+          const nextAttempts = (Number(cand.resumeAttempts) || 0) + 1;
+          this.#inflightStore.clear(tid);
+          this.#queue.enqueuePriority(tid, {
+            text: RESUME_AFTER_RESTART_PROMPT,
+            images: [],
+            cwd: cand.cwd || upstreamThread?.cwd || "",
+            model: cand.model || prefs?.model || upstreamThread?.model || "",
+            effort: cand.effort || prefs?.reasoningEffort || "",
+            permissionMode: normalizePermissionMode(cand.permissionMode || prefs?.permissionMode || "workspace"),
+            goalMode: Boolean(cand.goalMode || goalState?.active),
+            resumeAttempts: nextAttempts,
+            source: "resume",
+            sourceLabel: "断点优先恢复",
+          });
+          shouldDrainThread = true;
+        } catch {
+          this.#inflightStore.clear(tid);
+          shouldDrainThread = this.#queue.has(tid);
+        } finally {
+          this.#recoveringThreads.delete(tid);
+          if (shouldDrainThread && !this.#closed) {
+            this.#scheduleDeferredQueueDrain(40, tid);
+          }
+        }
+      }
+    })();
   }
 
   providerList() {
@@ -565,10 +861,16 @@ export class ProviderHub {
 
   #handleProviderEvent(evt) {
     const threadId = evt.threadId || "";
+    this.#executionStats.handle(evt, threadId ? (this.#metaStore.get(threadId) || {}) : {});
 
     if (evt.type === "codex_notification") {
       const { method, params } = evt;
-      if (threadId && method === "turn/started") {
+      if (method === "serverRequest/resolved") {
+        const requestId = `${evt.provider}:${evt.profileId}:${params?.requestId}`;
+        if (this.#pendingRequests.delete(requestId)) {
+          this.#broadcast("server_request_resolved", { requestId, threadId });
+        }
+      } else if (threadId && method === "turn/started") {
         this.#activeTurns.set(threadId, { turnId: params?.turn?.id || "", startedAt: Date.now() });
         this.#lastAssistantText.delete(threadId);
       } else if (threadId && (method === "item/agentMessage/delta" || method === "codex/event/agent_message_content_delta")) {
@@ -589,6 +891,7 @@ export class ProviderHub {
         this.#broadcast("goal_state", { threadId, goalState: params.goalState });
       } else if (threadId && method === "turn/completed") {
         this.#activeTurns.delete(threadId);
+        this.#inflightStore.clear(threadId);
         this.#clearPendingRequestsForThread(threadId);
         const rawError = params?.turn?.error || null;
         const recoverableErr = isRecoverableToolExecutionError(rawError);
@@ -643,6 +946,7 @@ export class ProviderHub {
       this.#lastAssistantText.set(threadId, evt.item.text);
     } else if (evt.type === "turn_completed" && threadId) {
       this.#activeTurns.delete(threadId);
+      this.#inflightStore.clear(threadId);
       this.#clearPendingRequestsForThread(threadId);
       const rawError = evt.error || null;
       const recoverableErr = isRecoverableToolExecutionError(rawError);
@@ -867,7 +1171,26 @@ export class ProviderHub {
             identityLabel,
           };
         });
-        const sortedProfiles = sortProfilesByHealth(enriched);
+        const installedForSig = enriched.filter((p) => p && p.installed !== false && !p.health?.disabled);
+        const currentSig = installedForSig.length >= 2 ? computeMultiProfileSignature(installedForSig) : "";
+        const forFallback = enriched.map((item) => (
+          currentSig && isAutoAliasUpgradeCandidate(item, currentSig)
+            ? { ...item, health: { ...item.health, alias: "" } }
+            : item
+        ));
+        const fallbackAliases = suggestFallbackDistinctAliases(forFallback);
+        const withEffectiveAlias = enriched.map((item) => {
+          const fallbackAlias = fallbackAliases[item.key];
+          if (!fallbackAlias) return item;
+          const needsUpgrade = currentSig ? isAutoAliasUpgradeCandidate(item, currentSig) : !item.health?.alias;
+          if (!needsUpgrade) return item;
+          return {
+            ...item,
+            health: { ...item.health, alias: fallbackAlias },
+            identityLabel: fallbackAlias,
+          };
+        });
+        const sortedProfiles = sortProfilesByHealth(withEffectiveAlias);
         const availableCount = sortedProfiles.filter(
           (p) => p.installed && !p.health?.disabled && p.health?.status !== "unavailable",
         ).length;
@@ -880,12 +1203,77 @@ export class ProviderHub {
             availableCount,
           },
           profiles: sortedProfiles,
+          _rawEnriched: enriched,
         };
       }),
     );
+    const allRawProfiles = profileGroups.flatMap((g) => g._rawEnriched || g.profiles);
+    for (const g of profileGroups) {
+      if (g._rawEnriched) {
+        this.#maybeScheduleAutoAlias(g.provider.id, g._rawEnriched, allRawProfiles);
+        delete g._rawEnriched;
+      }
+    }
     this.#cachedRawProfiles = profileGroups.flatMap((g) => g.profiles);
     this.#cachedRawProfilesAt = Date.now();
     return profileGroups;
+  }
+
+  #maybeScheduleAutoAlias(providerId, rawProfiles = [], allRawProfiles = []) {
+    if (this.#closed) return;
+    const installed = rawProfiles.filter((p) => p && p.installed !== false && !p.health?.disabled);
+    if (installed.length < 2) return;
+    const sig = computeMultiProfileSignature(installed);
+    if (!sig) return;
+    const pendingUnnamed = installed.filter((p) => isAutoAliasUpgradeCandidate(p, sig));
+    if (!pendingUnnamed.length) return;
+    const lockKey = `${providerId}:${sig}`;
+    if (this.#autoAliasInFlight.has(lockKey)) return;
+
+    this.#autoAliasInFlight.add(lockKey);
+    void (async () => {
+      try {
+        const res = await resolveAutoProfileAliases({
+          providerId,
+          profiles: installed,
+          allProfiles: allRawProfiles,
+          env: this.#env,
+          callLightweightAi: this.#callLightweightProfileAi,
+        });
+        const aliases = res?.aliases || {};
+        let updatedAny = false;
+        for (const p of pendingUnnamed) {
+          const key = p.key || `${providerId}:${p.id}`;
+          const latestMeta = this.#metaStore.getProfileMeta(key);
+          const latestAlias = String(latestMeta?.alias || "").trim();
+          const latestSource = String(latestMeta?.autoAliasSource || "").trim();
+          const isAutoManaged = !latestAlias
+            || (["ai", "fallback", "checked"].includes(latestSource) && latestMeta?.autoAliasSignature !== sig);
+          if (!isAutoManaged) continue;
+          const nextAlias = aliases[key];
+          if (nextAlias) {
+            await this.#metaStore.setProfileMeta(key, {
+              alias: nextAlias,
+              autoAliasSignature: sig,
+              autoAliasSource: res.source || "fallback",
+            });
+            updatedAny = true;
+          } else if (res.source === "ai") {
+            await this.#metaStore.setProfileMeta(key, {
+              autoAliasSignature: sig,
+              autoAliasSource: "checked",
+            });
+          }
+        }
+        if (updatedAny && !this.#closed) {
+          await this.#broadcastProfilesUpdated().catch(() => null);
+        }
+      } catch {
+        // Ignore auto-alias background failures silently; deterministic fallback stays active.
+      } finally {
+        this.#autoAliasInFlight.delete(lockKey);
+      }
+    })();
   }
 
   async listProvidersAndProfiles({ refreshQuotas = false } = {}) {
@@ -919,6 +1307,10 @@ export class ProviderHub {
       defaultProfileId: defaultProfile?.id || "default",
       quotasUpdatedAt: quotaResult?.updatedAt || null,
     };
+  }
+
+  getExecutionStats(options = {}) {
+    return this.#executionStats.snapshot(options);
   }
 
   async getTelemetry() {
@@ -1053,7 +1445,10 @@ export class ProviderHub {
     const key = formatProfileKey(cleanProvider, cleanProfileId);
     const patch = {};
     if (disabled !== undefined) patch.disabled = Boolean(disabled);
-    if (alias !== undefined) patch.alias = String(alias || "");
+    if (alias !== undefined) {
+      patch.alias = String(alias || "");
+      patch.autoAliasSource = "manual";
+    }
     await this.#metaStore.setProfileMeta(key, patch);
     const payload = await this.#broadcastProfilesUpdated();
     return { ok: true, key, ...payload };
@@ -1108,7 +1503,9 @@ export class ProviderHub {
   }
 
   async #canDeliverQueuedTurn(entry) {
-    if (!entry?.threadId || this.#activeTurns.has(entry.threadId)) return false;
+    if (!entry?.threadId) return false;
+    if (!this.#startupRecoveryReady || this.#recoveringThreads.has(entry.threadId)) return false;
+    if (this.#activeTurns.has(entry.threadId)) return false;
     try {
       const parsed = parseCompositeThreadId(entry.threadId);
       const provider = this.getProvider(parsed.provider);
@@ -1726,6 +2123,10 @@ export class ProviderHub {
     if (cleanText) {
       this.#lastTurnUserText.set(res.thread.id, cleanText);
     }
+    this.#executionStats.context(res.thread.id, res.turn?.id || "", {
+      model: model || res.thread.model || "", effort: effort || res.thread.reasoningEffort || "",
+      internal: isInternalVoiceCallThread({ cwd: res.thread.cwd || cwd, preview: cleanText }), goalMode: useGoal,
+    });
     const appliedStart = this.#metaStore.applyToThread({
       ...res.thread,
       firstUserText: res.thread.firstUserText || cleanText,
@@ -1755,6 +2156,15 @@ export class ProviderHub {
         goalPrompt: text,
       });
       thread.goalState = goalState;
+    }
+    if (res.turn?.id || cleanText || (Array.isArray(images) && images.length > 0)) {
+      this.#inflightStore.markStarted(thread.id, {
+        cwd: res.thread.cwd || cwd || "",
+        model: model || res.thread.model || "",
+        effort,
+        permissionMode: cleanPerm,
+        goalMode: useGoal,
+      });
     }
     return {
       thread,
@@ -1823,6 +2233,8 @@ export class ProviderHub {
     runMode = "normal",
     goalMode = false,
     writerConflictPolicy = "reject",
+    isSystemResume = false,
+    resumeAttempts = 0,
   } = {}) {
     const parsed = parseCompositeThreadId(threadId);
     const provider = this.getProvider(parsed.provider);
@@ -1845,7 +2257,7 @@ export class ProviderHub {
     let preTurnBroadcastTitle = "";
     let ranPreAdaptive = false;
     const cachedCtx = this.#threadCwdCache.get(threadId);
-    if (!likelyBusy && hasPreBaseline && cleanText) {
+    if (!isSystemResume && !likelyBusy && hasPreBaseline && cleanText) {
       ranPreAdaptive = true;
       const preBase = this.#metaStore.applyToThread({
         id: threadId,
@@ -1897,7 +2309,7 @@ export class ProviderHub {
 
     const hadPrevUserText = this.#lastTurnUserText.has(threadId);
     const prevUserText = this.#lastTurnUserText.get(threadId);
-    if (cleanText) {
+    if (!isSystemResume && cleanText) {
       this.#lastTurnUserText.set(threadId, cleanText);
     }
     let res;
@@ -1919,15 +2331,35 @@ export class ProviderHub {
       if (ranPreAdaptive && prevCachedTitle) {
         this.#setCachedThreadTitle(threadId, prevCachedTitle);
       }
-      if (cleanText) {
+      if (!isSystemResume && cleanText) {
         if (hadPrevUserText) this.#lastTurnUserText.set(threadId, prevUserText);
         else this.#lastTurnUserText.delete(threadId);
       }
       void this.#recordProfileFailure(parsed.provider, parsed.profileId, error);
       throw error;
     }
+    if (!res.steered) this.#executionStats.context(threadId, res.turn?.id || "", {
+      model: effectiveModel || res.thread?.model || "", effort: effectiveEffort || res.thread?.reasoningEffort || "",
+      internal: isInternalVoiceCallThread({ cwd: res.thread?.cwd || cwd || cachedCtx?.cwd, preview: cleanText }),
+      goalMode: useGoal || this.#goalController.get(threadId)?.active,
+    });
     if (res.turn?.id) {
       this.#activeTurns.set(threadId, { turnId: res.turn.id, startedAt: Date.now() });
+    }
+    this.#inflightStore.markStarted(threadId, {
+      cwd: res.thread?.cwd || cwd || cachedCtx?.cwd || "",
+      model: effectiveModel,
+      effort: effectiveEffort,
+      permissionMode: cleanPerm,
+      goalMode: Boolean(useGoal || this.#goalController.get(threadId)?.active),
+      resumeAttempts,
+    });
+    if (isSystemResume) {
+      return {
+        ...res,
+        thread: res.thread ? this.#enrichThread(this.#metaStore.applyToThread(res.thread)) : null,
+        goalState: this.#goalController.get(threadId),
+      };
     }
     if (preTurnBroadcastTitle) {
       this.#broadcast("thread_renamed", { threadId, name: preTurnBroadcastTitle, auto: true });
@@ -2033,6 +2465,131 @@ export class ProviderHub {
     return { ok, threadId, items: await this.listQueuedTurns(threadId) };
   }
 
+  async getQueuedTurnEntry(threadId, entryId) {
+    parseCompositeThreadId(threadId);
+    const cleanId = String(entryId || "").trim();
+    if (!cleanId) {
+      throw Object.assign(new Error("缺少排队消息 ID"), { status: 400, code: "missing_queue_id" });
+    }
+    const entry = this.#queue.get(threadId, cleanId);
+    if (!entry) {
+      throw Object.assign(new Error("该排队消息已发送或不存在"), { status: 404, code: "queued_turn_not_found" });
+    }
+    const images = Array.isArray(entry.images)
+      ? entry.images
+          .filter(Boolean)
+          .map((img, idx) => (typeof img === "string"
+            ? { name: `image-${idx + 1}.jpg`, dataUrl: img }
+            : {
+                name: String(img.name || `image-${idx + 1}.jpg`),
+                dataUrl: String(img.dataUrl || img.url || ""),
+              }))
+          .filter((img) => Boolean(img.dataUrl))
+      : [];
+    return {
+      ok: true,
+      threadId,
+      entry: {
+        ...entry,
+        images,
+      },
+    };
+  }
+
+  async updateQueuedTurn(threadId, entryId, {
+    text,
+    images,
+    model,
+    effort,
+    permissionMode,
+    goalMode,
+  } = {}) {
+    parseCompositeThreadId(threadId);
+    const cleanId = String(entryId || "").trim();
+    if (!cleanId) {
+      throw Object.assign(new Error("缺少排队消息 ID"), { status: 400, code: "missing_queue_id" });
+    }
+    const nextText = text !== undefined ? String(text || "") : undefined;
+    const nextImages = images !== undefined
+      ? (Array.isArray(images) ? images : []).filter((img) => Boolean(img && (typeof img === "string" || img.dataUrl || img.url)))
+      : undefined;
+    const existing = this.#queue.get(threadId, cleanId);
+    if (!existing) {
+      throw Object.assign(new Error("该排队消息已发送或不存在"), { status: 404, code: "queued_turn_not_found" });
+    }
+    const resolvedText = nextText !== undefined ? nextText : String(existing.text || "");
+    const resolvedImages = nextImages !== undefined ? nextImages : (Array.isArray(existing.images) ? existing.images : []);
+    if (!resolvedText.trim() && !resolvedImages.length) {
+      throw Object.assign(new Error("排队消息内容与图片不能同时为空"), { status: 400, code: "empty_queued_turn" });
+    }
+    const updated = this.#queue.update(threadId, cleanId, {
+      ...(nextText !== undefined ? { text: nextText } : {}),
+      ...(nextImages !== undefined ? { images: nextImages } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(permissionMode !== undefined ? { permissionMode: normalizePermissionMode(permissionMode) } : {}),
+      ...(goalMode !== undefined ? { goalMode: Boolean(goalMode) } : {}),
+    });
+    if (!updated) {
+      throw Object.assign(new Error("该排队消息已进入发送中或不存在"), { status: 409, code: "queued_turn_locked" });
+    }
+    return {
+      ok: true,
+      threadId,
+      entry: summarizeQueuedTurnEntry({
+        ...updated,
+        source: updated.source || "control",
+        sourceLabel: updated.sourceLabel || (updated.source === "resume" ? "断点优先恢复" : "控制端队列"),
+        canCancel: true,
+      }),
+      items: await this.listQueuedTurns(threadId),
+    };
+  }
+
+  async steerQueuedTurn(threadId, entryId, { expectedTurnId = "" } = {}) {
+    parseCompositeThreadId(threadId);
+    const cleanId = String(entryId || "").trim();
+    if (!cleanId) {
+      throw Object.assign(new Error("缺少排队消息 ID"), { status: 400, code: "missing_queue_id" });
+    }
+    const entry = this.#queue.beginSteer(threadId, cleanId);
+    if (!entry) {
+      throw Object.assign(new Error("该排队消息已发送或不存在"), { status: 404, code: "queued_turn_not_found" });
+    }
+    let turnResult;
+    try {
+      turnResult = await this.sendTurn({
+        threadId,
+        text: String(entry.text || ""),
+        images: Array.isArray(entry.images) ? entry.images : [],
+        model: entry.model || "",
+        effort: entry.effort || "",
+        permissionMode: entry.permissionMode || "workspace",
+        steer: true,
+        expectedTurnId: expectedTurnId || this.#activeTurns.get(threadId)?.turnId || "",
+        goalMode: Boolean(entry.goalMode),
+        writerConflictPolicy: "reject",
+      });
+    } catch (error) {
+      this.#queue.abortSteer(cleanId);
+      throw error;
+    }
+    this.#queue.completeSteer(threadId, cleanId, turnResult);
+    return {
+      ok: true,
+      threadId,
+      steered: true,
+      result: turnResult,
+      entry: summarizeQueuedTurnEntry({
+        ...entry,
+        source: "control",
+        sourceLabel: "控制端队列",
+        canCancel: true,
+      }),
+      items: await this.listQueuedTurns(threadId),
+    };
+  }
+
   async interrupt({ threadId, turnId = "" } = {}) {
     const parsed = parseCompositeThreadId(threadId);
     const provider = this.getProvider(parsed.provider);
@@ -2042,6 +2599,7 @@ export class ProviderHub {
     }
     await this.#cancelPendingRequestsForThread(threadId).catch(() => {});
     const result = await provider.interrupt({ profileId: parsed.profileId, rawId: parsed.rawId, turnId });
+    this.#inflightStore.clear(threadId);
     if (this.#activeTurns.has(threadId)) {
       this.#activeTurns.delete(threadId);
     }
@@ -2134,10 +2692,12 @@ export class ProviderHub {
     this.#drainTimers.clear();
     await Promise.all([
       this.#queue.flush(),
+      this.#inflightStore.flush(),
       this.#metaStore.flush(),
       this.#goalController.flush(),
       ...this.providerList().map((p) => p.close?.().catch(() => {})),
     ]);
+    await this.#executionStats.flush();
   }
 }
 

@@ -30,12 +30,14 @@ export function renderServerRequestCard(request, { agentLabel = "" } = {}) {
       const qId = escapeHtml(q.id || `q_${qIdx}`);
       const options = Array.isArray(q.options) ? q.options : [];
       const inputType = q.multiSelect ? "checkbox" : "radio";
+      const inputName = `q-${qIdx}`;
       const optsHtml = options.map((opt, oIdx) => {
         const val = escapeHtml(opt.label || opt);
         const desc = opt.description ? `<span class="sr-opt-desc">${escapeHtml(opt.description)}</span>` : "";
         return `
           <label class="sr-option">
-            <input type="${inputType}" name="q-${qId}" value="${val}" ${!q.multiSelect && oIdx === 0 ? "checked" : ""} />
+            <input type="${inputType}" name="${inputName}" value="${val}" ${!q.multiSelect ? "required" : ""} />
+            <span class="sr-opt-number" aria-hidden="true">${oIdx + 1}</span>
             <span class="sr-opt-main">
               <strong>${val}</strong>
               ${desc}
@@ -44,13 +46,25 @@ export function renderServerRequestCard(request, { agentLabel = "" } = {}) {
         `;
       }).join("");
 
+      const allowOther = !options.length || q.isOther !== false;
+      const otherOption = options.length && allowOther ? `
+        <label class="sr-option sr-custom-option">
+          <input type="${inputType}" name="${inputName}" data-answer-other ${!q.multiSelect ? "required" : ""} />
+          <span class="sr-opt-main"><strong>其他 · 自行填写</strong></span>
+        </label>` : "";
+      const textAttrs = `class="sr-other-input" data-other-for="${qId}" aria-label="${escapeHtml(q.question || q.header || "你的回答")}" ${options.length ? "disabled" : "required"}`;
+      const otherField = allowOther ? `<div class="sr-other-field" ${options.length ? "hidden" : ""}>
+        ${q.isSecret
+          ? `<input type="password" ${textAttrs} autocomplete="off" placeholder="输入你的回答" />`
+          : `<textarea ${textAttrs} rows="2" placeholder="输入你的回答…"></textarea>`}
+      </div>` : "";
       return `
-        <div class="sr-question" data-question-id="${qId}" data-multi="${q.multiSelect ? "1" : "0"}">
-          <div class="sr-q-header">${escapeHtml(q.header || `问题 ${qIdx + 1}`)}</div>
+        <fieldset class="sr-question" data-question-id="${qId}" data-multi="${q.multiSelect ? "1" : "0"}">
+          <legend class="sr-q-header">${questions.length > 1 ? `${qIdx + 1}/${questions.length} · ` : ""}${escapeHtml(q.header || `问题 ${qIdx + 1}`)}<span class="sr-q-mode">${options.length ? (q.multiSelect ? "可多选" : "单选") : "自由填写"}</span></legend>
           <div class="sr-q-prompt">${escapeHtml(q.question || "")}</div>
-          ${optsHtml ? `<div class="sr-options">${optsHtml}</div>` : ""}
-          ${q.isOther !== false ? `<input class="sr-other-input" type="text" data-other-for="${qId}" placeholder="其他补充说明（可选）" />` : ""}
-        </div>
+          ${optsHtml ? `<div class="sr-options">${optsHtml}${otherOption}</div>` : ""}
+          ${otherField}
+        </fieldset>
       `;
     }).join("");
 
@@ -60,10 +74,11 @@ export function renderServerRequestCard(request, { agentLabel = "" } = {}) {
           <span class="sr-badge">${escapeHtml(resolvedLabel)}</span>
           <strong>${escapeHtml(request.title || `${resolvedLabel} 需要你的回答`)}</strong>
         </div>
+        <div class="sr-input-hint">${request.isBlocking === false ? "任务在后台继续，你可以在这里补充回答。" : "选择或填写后提交，任务将继续。"}</div>
         <div class="sr-questions">${qHtml}</div>
         <div class="sr-actions">
           <button type="submit" class="btn-primary">提交回答</button>
-          <button type="button" class="btn-secondary" data-decline-id="${id}">取消</button>
+          <button type="button" class="btn-secondary" data-decline-id="${id}">跳过回答</button>
         </div>
       </form>
     `;
@@ -119,14 +134,47 @@ export function renderServerRequestCard(request, { agentLabel = "" } = {}) {
 
 export function collectUserInputAnswers(request, formElement) {
   const answers = {};
-  for (const q of request?.questions || []) {
-    const qId = String(q.id || "");
-    const inputs = [...formElement.querySelectorAll(`input[name="q-${CSS?.escape ? CSS.escape(qId) : qId}"]:checked`)];
+  const fields = [...formElement.querySelectorAll(".sr-question")];
+  for (const [index, q] of (request?.questions || []).entries()) {
+    const qId = String(q.id || `q_${index}`);
+    const field = fields.find((el) => el.dataset.questionId === qId);
+    const inputs = [...(field?.querySelectorAll("input:checked:not([data-answer-other])") || [])];
     const selected = inputs.map((el) => el.value).filter(Boolean);
-    const otherInput = formElement.querySelector(`input[data-other-for="${CSS?.escape ? CSS.escape(qId) : qId}"]`);
-    const otherValue = String(otherInput?.value || "").trim();
+    const otherInput = field?.querySelector("[data-other-for]");
+    const otherValue = otherInput?.disabled ? "" : String(otherInput?.value || "").trim();
     if (otherValue) selected.push(otherValue);
+    if (!selected.length) throw new Error(`请选择或填写「${q.header || q.question || `问题 ${index + 1}`}」的回答`);
     answers[qId] = { answers: selected };
   }
   return answers;
+}
+
+export function syncUserInputQuestion(target) {
+  const question = target.closest(".sr-question");
+  const toggle = question?.querySelector("[data-answer-other]");
+  if (!toggle) return;
+  const field = question.querySelector(".sr-other-field");
+  const input = question.querySelector("[data-other-for]");
+  field.hidden = !toggle.checked;
+  input.disabled = !toggle.checked;
+  input.required = toggle.checked;
+}
+
+// Keep live form elements when another request arrives or SSE reconnects.
+export function syncServerRequestCards(dock, requests) {
+  const previous = new Map([...dock.children].map((el) => [el.dataset.requestId, el]));
+  requests.forEach((request, index) => {
+    const html = renderServerRequestCard(request);
+    let card = previous.get(request.id);
+    if (!card || card._acRequestHtml !== html) {
+      card?.remove();
+      const template = dock.ownerDocument.createElement("template");
+      template.innerHTML = html;
+      card = template.content.firstElementChild;
+      card._acRequestHtml = html;
+    }
+    previous.delete(request.id);
+    if (dock.children[index] !== card) dock.insertBefore(card, dock.children[index] || null);
+  });
+  for (const card of previous.values()) card.remove();
 }

@@ -78,6 +78,8 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
   const nowSec = Math.floor(now / 1000);
   const disabled = Boolean(meta.disabled);
   const alias = String(meta.alias || "").trim();
+  const autoAliasSignature = String(meta.autoAliasSignature || "").trim();
+  const autoAliasSource = String(meta.autoAliasSource || "").trim();
 
   if (!installed) {
     return {
@@ -90,6 +92,8 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
       cooldownUntil: 0,
       disabled,
       alias,
+      ...(autoAliasSignature ? { autoAliasSignature } : {}),
+      ...(autoAliasSource ? { autoAliasSource } : {}),
     };
   }
 
@@ -101,6 +105,15 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
 
   if (!["healthy", "unknown", "cooldown", "unavailable"].includes(status)) {
     status = "unknown";
+  }
+
+  // 历史曾因会话并发占用锁（如 already has an active writer）误标成实例不可用时，自动清洗恢复为 unknown。
+  if (status === "unavailable" && detail && isIgnorableTurnError({ message: detail })) {
+    status = "unknown";
+    reasonCode = "";
+    shortReason = "";
+    detail = "";
+    cooldownUntil = 0;
   }
 
   if (status === "cooldown" && cooldownUntil > 0 && nowSec >= cooldownUntil) {
@@ -121,6 +134,8 @@ export function normalizeProfileHealth(rawMeta = {}, { installed = true, now = D
     cooldownUntil,
     disabled,
     alias,
+    ...(autoAliasSignature ? { autoAliasSignature } : {}),
+    ...(autoAliasSource ? { autoAliasSource } : {}),
   };
 }
 
@@ -155,7 +170,15 @@ export function sortProfilesByHealth(profiles = []) {
 export function isIgnorableTurnError(error) {
   if (!error) return false;
   if (Number(error.status) === 409) return true;
-  if (error.code === "thread_busy" || error.code === "thread_not_directly_controllable" || error.code === "invalid_cwd") return true;
+  if (
+    error.code === "thread_busy"
+    || error.code === "writer_conflict"
+    || error.code === "codex_app_running"
+    || error.code === "thread_not_directly_controllable"
+    || error.code === "invalid_cwd"
+  ) {
+    return true;
+  }
   const msg = extractErrorMessage(error);
-  return /(?:interrupted|aborted|cancelled|canceled|已中断)/i.test(msg);
+  return /(?:interrupted|aborted|cancelled|canceled|已中断|already has an active writer|\bactive writer\b|thread is busy|正在运行|已被.*占用|被本地客户端占用)/i.test(msg);
 }

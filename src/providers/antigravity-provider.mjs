@@ -46,6 +46,7 @@ export class AntigravityProvider {
   #profiles = [];
   #clients = new Map();
   #activePrompts = new Map();
+  #preparingSessions = new Set();
   #recentlyEndedPrompts = new Map();
   #legacyProfiles = new Map();
   #modelsCache = null;
@@ -178,6 +179,34 @@ export class AntigravityProvider {
     const active = this.#activePrompts.get(rawId);
     const updateType = update.sessionUpdate || "";
 
+    if (updateType === "session_info_update" && update.title && rawId) {
+      const known = this.#knownSessions.get(`${profileId}:${rawId}`);
+      if (known) known.title = update.title;
+      this.#onEvent({
+        type: "thread_updated",
+        provider: "antigravity",
+        profileId,
+        rawId,
+        threadId: compositeId,
+        title: update.title,
+      });
+      return;
+    }
+
+    if (!active) {
+      if (this.#preparingSessions.has(`${profileId}:${rawId}`)) {
+        return;
+      }
+      let hasSameProfileActive = false;
+      for (const entry of this.#activePrompts.values()) {
+        if (!entry?.profileId || entry.profileId === profileId) {
+          hasSameProfileActive = true;
+          break;
+        }
+      }
+      if (!hasSameProfileActive) return;
+    }
+
     if (updateType === "agent_message_chunk") {
       const text = update.content?.text || "";
       if (text && active) {
@@ -234,9 +263,15 @@ export class AntigravityProvider {
         active.updatedAt = Math.floor(Date.now() / 1000);
         active.seq = (active.seq || 0) + 1;
       }
-      const patchedUpdate = resolvedTitle && !update.title
-        ? { ...update, title: resolvedTitle }
-        : update;
+      const rawStatusStr = typeof update.status === "string" ? update.status : String(update.status ?? "");
+      const slimUpdate = {
+        ...(update.sessionUpdate ? { sessionUpdate: update.sessionUpdate } : {}),
+        ...(toolCallId ? { toolCallId } : {}),
+        ...(update.id ? { id: update.id } : {}),
+        ...(resolvedTitle ? { title: resolvedTitle } : {}),
+        ...(update.kind ? { kind: update.kind } : {}),
+        ...(rawStatusStr ? { status: rawStatusStr.length > 600 ? `${rawStatusStr.slice(0, 600)}…` : rawStatusStr } : {}),
+      };
       this.#onEvent({
         type: "acp_tool_update",
         provider: "antigravity",
@@ -244,7 +279,7 @@ export class AntigravityProvider {
         rawId,
         threadId: compositeId,
         turnId: active?.turnId || "",
-        update: patchedUpdate,
+        update: slimUpdate,
       });
     } else if (updateType === "plan") {
       this.#onEvent({
@@ -255,17 +290,6 @@ export class AntigravityProvider {
         threadId: compositeId,
         turnId: active?.turnId || "",
         entries: update.entries || [],
-      });
-    } else if (updateType === "session_info_update" && update.title && rawId) {
-      const known = this.#knownSessions.get(`${profileId}:${rawId}`);
-      if (known) known.title = update.title;
-      this.#onEvent({
-        type: "thread_updated",
-        provider: "antigravity",
-        profileId,
-        rawId,
-        threadId: compositeId,
-        title: update.title,
       });
     }
   }
@@ -729,22 +753,28 @@ export class AntigravityProvider {
     const resolvedCwd = candidateCwd && existsSync(candidateCwd) ? candidateCwd : os.homedir();
     const effectiveModel = model || knownSession?.model || indexed?.model || DEFAULT_AGY_MODEL;
 
-    await client.ensureSessionLoaded(rawId, { cwd: resolvedCwd });
-    this.#sessionPermissionModes.set(`${resolvedProfileId}:${rawId}`, cleanPerm);
-    await client.configureSession(rawId, { model: effectiveModel, effort, permissionMode: cleanPerm });
-    if (knownSession) {
-      knownSession.model = effectiveModel;
-      knownSession.permissionMode = cleanPerm;
-      if (effort) knownSession.reasoningEffort = effort;
-    } else {
-      this.#knownSessions.set(`${resolvedProfileId}:${rawId}`, {
-        id: rawId,
-        cwd: resolvedCwd,
-        updatedAt: Math.floor(Date.now() / 1000),
-        model: effectiveModel,
-        permissionMode: cleanPerm,
-        ...(effort ? { reasoningEffort: effort } : {}),
-      });
+    const prepKey = `${resolvedProfileId}:${rawId}`;
+    this.#preparingSessions.add(prepKey);
+    try {
+      await client.ensureSessionLoaded(rawId, { cwd: resolvedCwd });
+      this.#sessionPermissionModes.set(`${resolvedProfileId}:${rawId}`, cleanPerm);
+      await client.configureSession(rawId, { model: effectiveModel, effort, permissionMode: cleanPerm });
+      if (knownSession) {
+        knownSession.model = effectiveModel;
+        knownSession.permissionMode = cleanPerm;
+        if (effort) knownSession.reasoningEffort = effort;
+      } else {
+        this.#knownSessions.set(`${resolvedProfileId}:${rawId}`, {
+          id: rawId,
+          cwd: resolvedCwd,
+          updatedAt: Math.floor(Date.now() / 1000),
+          model: effectiveModel,
+          permissionMode: cleanPerm,
+          ...(effort ? { reasoningEffort: effort } : {}),
+        });
+      }
+    } finally {
+      this.#preparingSessions.delete(prepKey);
     }
 
     const turnId = `agy-turn-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -774,6 +804,8 @@ export class AntigravityProvider {
       profileId: resolvedProfileId,
       rawId,
       threadId: compositeId,
+      model: effectiveModel,
+      effort: effort || knownSession?.reasoningEffort || "",
       turn: {
         id: turnId,
         status: "inProgress",

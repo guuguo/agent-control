@@ -26,6 +26,20 @@ import { discoverCodexProfiles, readCodexPublicEndpoint } from "./profile-discov
 
 const execFileAsync = promisify(execFile);
 
+const CODEX_ACTIVE_WRITER_RE = /already has an active writer|\bactive writer\b|thread is busy|already running|turn in progress/i;
+
+function normalizeCodexTurnError(error) {
+  const msg = String(error?.message || error || "").trim();
+  if (CODEX_ACTIVE_WRITER_RE.test(msg)) {
+    return Object.assign(new Error(`当前会话正被其他任务占用（${msg}）`), {
+      status: 409,
+      code: "thread_busy",
+      rawMessage: msg,
+    });
+  }
+  return error;
+}
+
 function toTimestampSeconds(value, fallback = 0) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
@@ -579,11 +593,16 @@ export class CodexProvider {
     }
 
     if (steer && activeTurnId) {
-      const steerRes = await client.request("turn/steer", {
-        threadId: rawId,
-        expectedTurnId: activeTurnId,
-        input,
-      });
+      let steerRes;
+      try {
+        steerRes = await client.request("turn/steer", {
+          threadId: rawId,
+          expectedTurnId: activeTurnId,
+          input,
+        });
+      } catch (error) {
+        throw normalizeCodexTurnError(error);
+      }
       return {
         turn: steerRes?.turn || { id: steerRes?.turnId || activeTurnId, status: "inProgress" },
         steered: true,
@@ -612,15 +631,20 @@ export class CodexProvider {
       }
     }
 
-    await this.#ensureThreadResumed(client, profileId, rawId, cwd || indexed?.cwd || "");
-    const result = await client.request("turn/start", {
-      threadId: rawId,
-      input,
-      ...(model ? { model } : {}),
-      ...(effort ? { effort } : {}),
-      approvalPolicy: policy.approvalPolicy,
-      sandbox: policy.sandbox,
-    });
+    let result;
+    try {
+      await this.#ensureThreadResumed(client, profileId, rawId, cwd || indexed?.cwd || "");
+      result = await client.request("turn/start", {
+        threadId: rawId,
+        input,
+        ...(model ? { model } : {}),
+        ...(effort ? { effort } : {}),
+        approvalPolicy: policy.approvalPolicy,
+        sandbox: policy.sandbox,
+      });
+    } catch (error) {
+      throw normalizeCodexTurnError(error);
+    }
     const turn = result?.turn || result || { id: `turn-${Date.now()}`, status: "inProgress" };
     this.#writers.markActive(rawId, { turnId: turn.id || "" });
     return {

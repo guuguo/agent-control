@@ -34,6 +34,48 @@ test("computeSlidingTokensPerSec handles stream deltas and exact span decay", ()
   assert.equal(rateDecayed, 0);
 });
 
+test("Codex native token_count supports nested usage and preserves single-line increments", async (t) => {
+  const root = await mkdtemp(join(os.tmpdir(), "ac-codex-tps-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let nowMs = Date.now();
+  const rolloutPath = join(root, "rollout.jsonl");
+  const db = new DatabaseSync(join(root, "state_5.sqlite"));
+  db.exec("CREATE TABLE threads (id TEXT, title TEXT, name TEXT, rollout_path TEXT, updated_at INTEGER, archived INTEGER)");
+  db.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, 0)").run("native-thread", "Codex 任务", "", rolloutPath, Math.floor(nowMs / 1000));
+  db.close();
+  const profiles = [{ provider: "codex", id: "default", home: root }];
+  for (const nested of [true, false]) {
+    const tokenEvent = (tokens) => ({ type: "event_msg", payload: {
+      type: "token_count",
+      ...(nested ? { info: { last_token_usage: { output_tokens: tokens } } } : { last_token_usage: { output_tokens: tokens } }),
+    } });
+    await writeFile(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn-1" } },
+      tokenEvent(10_000),
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const svc = new AgentTelemetryService({ nowFn: () => nowMs });
+    assert.equal((await svc.collectSnapshot({ profiles })).byProvider.codex.tokensPerSec, 0);
+    nowMs += 2000;
+    await appendFile(rolloutPath, JSON.stringify(tokenEvent(300)) + "\n");
+    await utimes(rolloutPath, new Date(nowMs), new Date(nowMs));
+    const snap = await svc.collectSnapshot({ profiles });
+    assert.equal(snap.byProfile["codex:default"].tokensPerSec, 50, nested ? "现代嵌套字段" : "旧版外层字段");
+    assert.equal(snap.byProvider.codex.tokensPerSec, 50);
+    assert.equal((await svc.collectSnapshot({ profiles })).byProvider.codex.tokensPerSec, 50, "没有新行时不能重复计数");
+    nowMs += 7000;
+    assert.equal((await svc.collectSnapshot({ profiles })).byProvider.codex.tokensPerSec, 0);
+    svc.recordStreamDelta("codex", "codex:default:native-thread", "a".repeat(100), nowMs);
+    await appendFile(rolloutPath, JSON.stringify(tokenEvent(600)) + "\n");
+    const managed = await svc.collectSnapshot({
+      profiles,
+      activeTurnsByProvider: { codex: [{ id: "codex:default:native-thread", rawId: "native-thread" }] },
+    });
+    assert.equal(managed.byProvider.codex.tokensPerSec, 4.3, "托管会话已按流式文本计数，不再叠加磁盘 token");
+    await appendFile(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } }) + "\n");
+    assert.equal((await svc.collectSnapshot({ profiles })).byProvider.codex.runningCount, 0);
+  }
+});
+
 test("AgentTelemetryService aggregates managed runs and tails native disk runs across all 4 providers", async () => {
   const root = await mkdtemp(join(os.tmpdir(), "ac-telemetry-"));
   let nowMs = 1_700_000_100_000;

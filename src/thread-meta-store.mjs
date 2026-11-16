@@ -119,16 +119,6 @@ export function createThreadMetaStore({
     return persistScheduled;
   };
 
-  const persistProfiles = async () => {
-    const snapshot = {
-      version: 1,
-      profiles: state.profiles,
-    };
-    const next = profileWriteChain.then(() => writeJsonAtomic(profileFilePath, snapshot));
-    profileWriteChain = next.catch(() => {});
-    return next;
-  };
-
   return {
     filePath,
     profileFilePath,
@@ -336,50 +326,64 @@ export function createThreadMetaStore({
       return out;
     },
     async setProfileMeta(profileKey, patch = {}) {
-      await ensureLoaded();
-      await loadProfilesFresh();
       const key = String(profileKey || "").trim();
       if (!key) {
         throw Object.assign(new Error("实例标识 profileKey 不能为空"), { status: 400 });
       }
-      if (!state.profiles || typeof state.profiles !== "object") {
-        state.profiles = {};
-      }
-      const prev = state.profiles[key] || {};
-      const next = { ...prev };
-      if (Object.hasOwn(patch, "status") && typeof patch.status === "string") {
-        next.status = patch.status;
-      }
-      if (Object.hasOwn(patch, "reasonCode")) {
-        next.reasonCode = String(patch.reasonCode || "");
-      }
-      if (Object.hasOwn(patch, "shortReason")) {
-        next.shortReason = String(patch.shortReason || "");
-      }
-      if (Object.hasOwn(patch, "detail")) {
-        next.detail = String(patch.detail || "").slice(0, 400);
-      }
-      if (Object.hasOwn(patch, "latencyMs")) {
-        next.latencyMs = patch.latencyMs === null || patch.latencyMs === undefined
-          ? null
-          : Math.max(0, Math.round(Number(patch.latencyMs) || 0));
-      }
-      if (Object.hasOwn(patch, "checkedAt")) {
-        next.checkedAt = Number(patch.checkedAt) || 0;
-      }
-      if (Object.hasOwn(patch, "cooldownUntil")) {
-        next.cooldownUntil = Number(patch.cooldownUntil) || 0;
-      }
-      if (Object.hasOwn(patch, "disabled")) {
-        next.disabled = Boolean(patch.disabled);
-      }
-      if (Object.hasOwn(patch, "alias")) {
-        next.alias = cleanProfileAlias(patch.alias);
-      }
-      next.updatedAt = Math.floor(Date.now() / 1000);
-      state.profiles[key] = next;
-      await persistProfiles();
-      return { ...next };
+      const runUpdate = async () => {
+        await ensureLoaded();
+        await loadProfilesFresh();
+        if (!state.profiles || typeof state.profiles !== "object") {
+          state.profiles = {};
+        }
+        const prev = state.profiles[key] || {};
+        const next = { ...prev };
+        if (Object.hasOwn(patch, "status") && typeof patch.status === "string") {
+          next.status = patch.status;
+        }
+        if (Object.hasOwn(patch, "reasonCode")) {
+          next.reasonCode = String(patch.reasonCode || "");
+        }
+        if (Object.hasOwn(patch, "shortReason")) {
+          next.shortReason = String(patch.shortReason || "");
+        }
+        if (Object.hasOwn(patch, "detail")) {
+          next.detail = String(patch.detail || "").slice(0, 400);
+        }
+        if (Object.hasOwn(patch, "latencyMs")) {
+          next.latencyMs = patch.latencyMs === null || patch.latencyMs === undefined
+            ? null
+            : Math.max(0, Math.round(Number(patch.latencyMs) || 0));
+        }
+        if (Object.hasOwn(patch, "checkedAt")) {
+          next.checkedAt = Number(patch.checkedAt) || 0;
+        }
+        if (Object.hasOwn(patch, "cooldownUntil")) {
+          next.cooldownUntil = Number(patch.cooldownUntil) || 0;
+        }
+        if (Object.hasOwn(patch, "disabled")) {
+          next.disabled = Boolean(patch.disabled);
+        }
+        if (Object.hasOwn(patch, "alias")) {
+          next.alias = cleanProfileAlias(patch.alias);
+        }
+        if (Object.hasOwn(patch, "autoAliasSignature")) {
+          next.autoAliasSignature = String(patch.autoAliasSignature || "").slice(0, 240);
+        }
+        if (Object.hasOwn(patch, "autoAliasSource")) {
+          next.autoAliasSource = String(patch.autoAliasSource || "").slice(0, 32);
+        }
+        next.updatedAt = Math.floor(Date.now() / 1000);
+        state.profiles[key] = next;
+        await writeJsonAtomic(profileFilePath, {
+          version: 1,
+          profiles: state.profiles,
+        });
+        return { ...next };
+      };
+      const op = profileWriteChain.then(runUpdate, runUpdate);
+      profileWriteChain = op.catch(() => {});
+      return op;
     },
     flush() {
       return Promise.all([persistScheduled || Promise.resolve(), writeChain, profileWriteChain]);

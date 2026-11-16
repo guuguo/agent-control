@@ -19,9 +19,11 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>__AGENT_CONTROL_VERSION__</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>__AGENT_CONTROL_BUILD_NUMBER__</string>
+  <key>AgentControlBuildHash</key>
+  <string>__AGENT_CONTROL_DESKTOP_HASH__</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key>

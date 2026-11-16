@@ -1,4 +1,4 @@
-import { iconSvg, providerIconSvg } from "./icons.js?v=20261116o";
+import { iconSvg, providerIconSvg } from "./icons.js?v=20261116ae";
 
 export const PROVIDER_META = Object.freeze({
   all: { id: "all", label: "全部", short: "全部" },
@@ -537,25 +537,33 @@ function compactBucketDetailText(detail = "") {
   return clean.replace(/^近\s*/, "").replace(/\s+消息$/, "次").slice(0, 14);
 }
 
-function renderWindowChipHtml(tagLabel, bucket, { nowSec, fallbackStatus = "ok" } = {}) {
+function renderWindowChipHtml(tagLabel, bucket, { nowSec, fallbackStatus = "ok", showResetDate = false, displayValue = "" } = {}) {
   if (!bucket) return "";
   const pct = parseFinitePercent(bucket.remainingPercent);
   const tone = classifyTelemetryTone(pct, fallbackStatus);
   const resetSec = normalizeResetSec(bucket.resetsAt);
   const resetRel = resetSec ? formatQuotaResetRelative(resetSec, nowSec) : "";
+  const resetText = resetSec ? (resetRel || "已到重置时间，待刷新") : "";
   const titleParts = [bucket.label || tagLabel];
   if (pct != null) titleParts.push(`剩余 ${pct}%`);
   if (bucket.detail) titleParts.push(String(bucket.detail));
-  if (resetRel) titleParts.push(resetRel);
-
-  let valueText = pct != null ? `${pct}%` : compactBucketDetailText(bucket.detail) || "正常";
-  if (pct != null && pct <= 25 && resetRel) {
-    valueText += ` · ${resetRel.replace(/后重置$/, "")}`;
+  if (resetSec) {
+    titleParts.push(resetText);
+    titleParts.push(`重置时间：${new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZoneName: "short",
+    }).format(new Date(resetSec * 1000))}`);
+  } else {
+    titleParts.push("未提供重置时间");
   }
 
-  return `<span class="telemetry-quota-chip is-${tone}" title="${escapeAttrHtml(titleParts.join(" · "))}">`
+  const valueText = displayValue || (pct != null ? `${pct}%` : compactBucketDetailText(bucket.detail) || "正常");
+  const showReset = showResetDate && Boolean(resetSec);
+
+  return `<span class="telemetry-quota-chip${showReset ? " has-reset" : ""} is-${tone}" title="${escapeAttrHtml(titleParts.join(" · "))}">`
     + `<span class="telemetry-chip-k">${escapeAttrHtml(tagLabel)}</span>`
     + `<span class="telemetry-chip-v">${escapeAttrHtml(valueText)}</span>`
+    + (showReset ? `<time class="telemetry-chip-reset" datetime="${new Date(resetSec * 1000).toISOString()}">${escapeAttrHtml(resetText)}</time>` : "")
     + `</span>`;
 }
 
@@ -567,7 +575,7 @@ function compactCreditCount(raw) {
   return String(Math.round(num));
 }
 
-function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
+function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec, { showResetDates = false } = {}) {
   if (!repProfiles.length) {
     return {
       chipsHtml: `<span class="telemetry-quota-chip is-muted">未接入</span>`,
@@ -648,7 +656,7 @@ function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
     }
     const win = resolveQuotaWindowsForUi(q);
     if (win.fiveHour) {
-      chips.push(renderWindowChipHtml("5h", win.fiveHour, { nowSec, fallbackStatus: qTone }));
+      chips.push(renderWindowChipHtml("5h", win.fiveHour, { nowSec, fallbackStatus: qTone, showResetDate: showResetDates }));
       const p5 = parseFinitePercent(win.fiveHour.remainingPercent);
       if (p5 != null) {
         pctCandidates.push(p5);
@@ -656,7 +664,7 @@ function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
       }
     }
     if (win.weekly) {
-      chips.push(renderWindowChipHtml("周", win.weekly, { nowSec, fallbackStatus: qTone }));
+      chips.push(renderWindowChipHtml("周", win.weekly, { nowSec, fallbackStatus: qTone, showResetDate: showResetDates }));
       const pw = parseFinitePercent(win.weekly.remainingPercent);
       if (pw != null) {
         pctCandidates.push(pw);
@@ -665,7 +673,7 @@ function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
     }
     if (provider === "antigravity" && (win.thirdPartyFiveHour || win.thirdPartyWeekly)) {
       const tp = win.thirdPartyFiveHour || win.thirdPartyWeekly;
-      chips.push(renderWindowChipHtml("3P", tp, { nowSec, fallbackStatus: qTone }));
+      chips.push(renderWindowChipHtml("3P", tp, { nowSec, fallbackStatus: qTone, showResetDate: showResetDates }));
       const pt = parseFinitePercent(tp.remainingPercent);
       if (pt != null) pctCandidates.push(pt);
     }
@@ -675,17 +683,12 @@ function buildCompactQuotaChipsHtml(provider, repProfiles, nowSec) {
       if (pb != null) {
         pctCandidates.push(pb);
         bumpTone(classifyTelemetryTone(pb, qTone));
-        chips.push(renderWindowChipHtml(shortK, b, { nowSec, fallbackStatus: qTone }));
+        chips.push(renderWindowChipHtml(shortK, b, { nowSec, fallbackStatus: qTone, showResetDate: showResetDates }));
       } else if (b.detail) {
         const shortV = String(b.id || "").includes("credit")
           ? (compactCreditCount(b.detail.replace(/[^\d.]/g, "")) || b.detail.slice(0, 10))
           : b.detail.slice(0, 12);
-        chips.push(
-          `<span class="telemetry-quota-chip is-ok" title="${escapeAttrHtml(`${b.label}: ${b.detail}`)}">`
-          + `<span class="telemetry-chip-k">${escapeAttrHtml(shortK)}</span>`
-          + `<span class="telemetry-chip-v">${escapeAttrHtml(shortV)}</span>`
-          + `</span>`,
-        );
+        chips.push(renderWindowChipHtml(shortK, b, { nowSec, fallbackStatus: "ok", showResetDate: showResetDates, displayValue: shortV }));
       }
     }
     const hasCreditBucket = win.extraBuckets.some((b) => String(b.id || "").includes("credit") || String(b.label || "").includes("积分"));
@@ -765,7 +768,7 @@ export function compactProfileDisplayLabel(label = "", provider = "") {
 function formatTelemetryCardTitle(provider, profile, totalForProvider) {
   const meta = providerVisualMeta(provider);
   const alias = String(profile?.health?.alias || "").trim();
-  if (alias) return abbreviateMiddleText(alias, { head: 4, tail: 3, maxLen: 10 });
+  if (alias) return abbreviateMiddleText(alias, { head: 6, tail: 4, maxLen: 12 });
   if (totalForProvider <= 1) return meta.short;
 
   const rawLabel = String(profile?.label || profile?.id || "").trim();
@@ -1027,7 +1030,7 @@ function renderTelemetryPickerPanelHtml(items, visibleSet) {
   </div>`;
 }
 
-function renderTelemetryDrawerHtml(profiles, byProvider, { providerFilter, nowSec } = {}) {
+function renderTelemetryDrawerHtml(_profiles, byProvider) {
   const runningEntries = [];
   for (const prov of TELEMETRY_PROVIDER_ORDER) {
     const stat = byProvider?.[prov];
@@ -1038,170 +1041,45 @@ function renderTelemetryDrawerHtml(profiles, byProvider, { providerFilter, nowSe
     }
   }
 
-  const activeThreadsHtml = runningEntries.length
-    ? `<div class="telemetry-drawer-section">
-        <div class="telemetry-drawer-heading">正在运行的任务 (${runningEntries.length})</div>
-        <div class="telemetry-running-pills">
-          ${runningEntries.map((item) => {
-            const meta = providerVisualMeta(item.provider);
-            return `<button type="button" class="telemetry-jump-pill is-${escapeAttrHtml(meta.tone)}" data-telemetry-jump-thread="${escapeAttrHtml(item.id)}" title="点击跳转到该会话">`
-              + `<span class="telemetry-jump-badge">${providerIconSvg(item.provider, { size: 11 })} ${escapeAttrHtml(meta.short)}</span>`
-              + `<span class="telemetry-jump-title">${escapeAttrHtml(item.title)}</span>`
-              + `</button>`;
-          }).join("")}
-        </div>
-      </div>`
-    : `<div class="telemetry-drawer-section">
-        <div class="telemetry-drawer-empty">当前所有 Agent 均无正在执行的任务</div>
-      </div>`;
-
-  const accountCards = [];
-  for (const prov of TELEMETRY_PROVIDER_ORDER) {
-    const meta = providerVisualMeta(prov);
-    const scoped = filterProfilesByProvider(profiles, prov);
-    const usable = scoped.filter((p) => !(scoped.length > 1 && isTelemetryPlaceholderProfile(p, scoped.length)));
-    const list = usable.length ? usable : scoped;
-    if (!list.length) continue;
-
-    for (const p of list) {
-      const q = p.quota;
-      const qTone = q?.statusTone || q?.status || "ok";
-      const win = resolveQuotaWindowsForUi(q);
-      const identity = formatProfileIdentityHint(p);
-      const titleName = p.health?.alias
-        ? abbreviateMiddleText(p.health.alias, { head: 4, tail: 3, maxLen: 10 })
-        : (compactProfileDisplayLabel(p.label, prov) || abbreviateMiddleText(p.id, { head: 3, tail: 3, maxLen: 8 }) || meta.label);
-      const subParts = [];
-      const planLabel = String(q?.planLabel || "").trim();
-      if (planLabel && !titleName.toLowerCase().includes(planLabel.toLowerCase())) subParts.push(planLabel);
-      if (identity && !titleName.toLowerCase().includes(identity.toLowerCase())) subParts.push(identity);
-      const bucketList = [
-        win.fiveHour,
-        win.weekly,
-        win.thirdPartyFiveHour,
-        win.thirdPartyWeekly,
-        ...win.extraBuckets,
-      ].filter(Boolean);
-
-      const rows = bucketList.map((b) => {
-        const pct = parseFinitePercent(b.remainingPercent);
-        const tone = classifyTelemetryTone(pct, qTone);
-        const resetSec = normalizeResetSec(b.resetsAt);
-        const resetRel = resetSec ? formatQuotaResetRelative(resetSec, nowSec) : "";
-        const rightText = pct != null
-          ? `剩 ${pct}%${resetRel ? ` · ${resetRel}` : ""}`
-          : (b.detail || "正常");
-        return `<div class="telemetry-drawer-bucket">`
-          + `<span class="telemetry-db-label">${escapeAttrHtml(b.label || b.id)}</span>`
-          + `<span class="telemetry-db-val is-${tone}">${escapeAttrHtml(rightText)}</span>`
-          + `</div>`;
-      });
-
-      const hasCreditRow = bucketList.some((b) => String(b.id || "").includes("credit") || String(b.label || "").includes("积分"));
-      if (!hasCreditRow && q?.credits?.balance != null) {
-        rows.push(
-          `<div class="telemetry-drawer-bucket">`
-          + `<span class="telemetry-db-label">积分</span>`
-          + `<span class="telemetry-db-val is-ok">${escapeAttrHtml(String(q.credits.balance))}</span>`
-          + `</div>`,
-        );
-      }
-
-      const rowsHtml = rows.length
-        ? rows.join("")
-        : `<div class="telemetry-drawer-bucket"><span class="telemetry-db-label">状态</span><span class="telemetry-db-val">${escapeAttrHtml(q?.summaryText || q?.detail || q?.headline || "就绪")}</span></div>`;
-
-      const filterActive = providerFilter === prov;
-      accountCards.push(`<div class="telemetry-drawer-card">
-        <div class="telemetry-drawer-card-head">
-          <div class="telemetry-drawer-card-title">
-            <span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}">${providerIconSvg(prov, { size: 12 })}</span>
-            <span>${escapeAttrHtml(titleName)}</span>
-            ${subParts.length ? `<span class="telemetry-drawer-sub">${escapeAttrHtml(subParts.join(" · "))}</span>` : ""}
-          </div>
-          <button type="button" class="telemetry-filter-btn ${filterActive ? "is-active" : ""}" data-telemetry-filter-provider="${escapeAttrHtml(prov)}">${filterActive ? "取消筛选" : "只看此 Agent"}</button>
-        </div>
-        <div class="telemetry-drawer-buckets">${rowsHtml}</div>
-      </div>`);
-    }
+  if (!runningEntries.length) {
+    return "";
   }
 
-  return `<div class="telemetry-drawer" role="region" aria-label="Agent 实时运行与额度明细">
-    ${activeThreadsHtml}
-    ${accountCards.length ? `<div class="telemetry-drawer-grid">${accountCards.join("")}</div>` : ""}
+  return `<div class="telemetry-drawer is-compact-tasks" role="region" aria-label="正在运行的 Agent 任务">
+    <div class="telemetry-drawer-section">
+      <div class="telemetry-drawer-heading">正在运行的任务 (${runningEntries.length})</div>
+      <div class="telemetry-running-pills">
+        ${runningEntries.map((item) => {
+          const meta = providerVisualMeta(item.provider);
+          return `<button type="button" class="telemetry-jump-pill is-${escapeAttrHtml(meta.tone)}" data-telemetry-jump-thread="${escapeAttrHtml(item.id)}" title="点击跳转到该会话">`
+            + `<span class="telemetry-jump-badge">${providerIconSvg(item.provider, { size: 11 })} ${escapeAttrHtml(meta.short)}</span>`
+            + `<span class="telemetry-jump-title">${escapeAttrHtml(item.title)}</span>`
+            + `</button>`;
+        }).join("")}
+      </div>
+    </div>
   </div>`;
 }
 
-function formatSimplifiedQuotaSummary(provider, repProfiles = [], nowSec = Math.floor(Date.now() / 1000)) {
-  if (!repProfiles.length) return { summaryText: "未接入", tone: "muted" };
+function compactQuotaDisplay(repProfiles = []) {
   const p = repProfiles[0];
   const q = p?.quota;
-  const qTone = q?.statusTone || q?.status || "ok";
-  if (p?.authenticated === false || !q || q.status === "unavailable") {
-    return { summaryText: q?.summaryText || q?.headline || "未认证", tone: "muted" };
-  }
-
-  const win = resolveQuotaWindowsForUi(q);
-  const parts = [];
-  const pcts = [];
-  let worstTone = "ok";
-  const bumpTone = (tone) => {
-    if (tone === "danger") worstTone = "danger";
-    else if (tone === "warn" && worstTone !== "danger") worstTone = "warn";
-  };
-
-  const p5 = parseFinitePercent(win.fiveHour?.remainingPercent);
-  if (p5 != null) {
-    parts.push(`5h ${p5}%`);
-    pcts.push(p5);
-    bumpTone(classifyTelemetryTone(p5, qTone));
-  } else if (win.fiveHour?.detail) {
-    parts.push(`5h ${compactBucketDetailText(win.fiveHour.detail)}`);
-  }
-  const pw = parseFinitePercent(win.weekly?.remainingPercent);
-  if (pw != null) {
-    parts.push(`周 ${pw}%`);
-    pcts.push(pw);
-    bumpTone(classifyTelemetryTone(pw, qTone));
-  } else if (win.weekly?.detail) {
-    parts.push(`周 ${compactBucketDetailText(win.weekly.detail)}`);
-  }
-  if (!parts.length && provider === "antigravity" && (win.thirdPartyFiveHour || win.thirdPartyWeekly)) {
-    const tp = win.thirdPartyFiveHour || win.thirdPartyWeekly;
-    const pt = parseFinitePercent(tp.remainingPercent);
-    if (pt != null) {
-      parts.push(`3P ${pt}%`);
-      pcts.push(pt);
-      bumpTone(classifyTelemetryTone(pt, qTone));
-    }
-  }
-  for (const b of win.extraBuckets) {
-    if (parts.length >= 2) break;
-    const shortK = String(b.label || b.id || "").replace(/^(订阅|Grok\s*)/i, "").slice(0, 10) || "额度";
-    const pb = parseFinitePercent(b.remainingPercent);
-    if (pb != null) {
-      parts.push(`${shortK} ${pb}%`);
-      pcts.push(pb);
-      bumpTone(classifyTelemetryTone(pb, qTone));
-    } else if (b.detail && (String(b.id || "").includes("credit") || String(b.label || "").includes("积分"))) {
-      const cr = compactCreditCount(b.detail.replace(/[^\d.]/g, ""));
-      if (cr) parts.push(`积分 ${cr}`);
-    }
-  }
-  if (parts.length < 2 && q.credits?.balance != null) {
-    const hasCreditPart = parts.some((x) => x.includes("积分"));
-    const cr = compactCreditCount(q.credits.balance);
-    if (!hasCreditPart && cr) parts.push(`积分 ${cr}`);
-  }
-  if (!parts.length) {
+  if (!p || p.authenticated === false || !q || q.status === "unavailable") {
     return {
-      summaryText: q.summaryText || q.headline || "就绪",
-      tone: classifyTelemetryTone(null, qTone),
+      weeklyPercent: null,
+      lowFiveHour: null,
+      tone: "muted",
+      statusText: !p ? "未接入" : (p.authenticated === false ? "未认证" : "额度未知"),
     };
   }
+  const win = resolveQuotaWindowsForUi(q);
+  const weeklyPercent = parseFinitePercent(win.weekly?.remainingPercent ?? win.thirdPartyWeekly?.remainingPercent);
+  const fiveHour = parseFinitePercent(win.fiveHour?.remainingPercent ?? win.thirdPartyFiveHour?.remainingPercent);
   return {
-    summaryText: parts.slice(0, 2).join(" · "),
-    tone: pcts.length ? worstTone : classifyTelemetryTone(null, qTone),
+    weeklyPercent,
+    lowFiveHour: fiveHour != null && fiveHour < 30 ? fiveHour : null,
+    tone: classifyTelemetryTone(weeklyPercent, q.statusTone || q.status),
+    statusText: "",
   };
 }
 
@@ -1286,6 +1164,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
     defaultVisible: true,
   }));
 
+  const isExpandedMode = Boolean(expanded || pickerOpen);
   const entries = renderCardItems.map((item) => {
     const prov = item.provider;
     const { running, queued, tokensPerSec } = resolveTelemetryItemMetrics(
@@ -1294,7 +1173,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
       byProfile,
       defaultCountByProv,
     );
-    const compactChips = buildCompactQuotaChipsHtml(prov, item.profiles, nowSec);
+    const compactChips = buildCompactQuotaChipsHtml(prov, item.profiles, nowSec, { showResetDates: isExpandedMode });
     if (compactChips.meterTone === "danger") worstTone = "danger";
     else if (compactChips.meterTone === "warn" && worstTone !== "danger") worstTone = "warn";
     return {
@@ -1306,7 +1185,6 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
     };
   });
 
-  const isExpandedMode = Boolean(expanded || pickerOpen);
   if (!isExpandedMode) {
     const compactEntries = selectCompactTelemetryEntries(entries, { activeProvider, activeProfileId });
     const shownRunning = compactEntries.reduce((sum, e) => sum + e.running, 0);
@@ -1322,15 +1200,23 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         ? `${running} 运行${queued > 0 ? ` · ${queued} 排队` : ""}`
         : (queued > 0 ? `${queued} 排队` : "");
       const tpsText = tokensPerSec > 0 ? `${formatTokensPerSec(tokensPerSec)} tok/s` : "";
-      const { summaryText, tone } = formatSimplifiedQuotaSummary(prov, item.profiles, nowSec);
+      const quota = compactQuotaDisplay(item.profiles);
+      const hasWeekly = quota.weeklyPercent != null;
+      const fiveHourText = quota.lowFiveHour != null ? `5h ${quota.lowFiveHour}%` : "";
+      const quotaTitle = [
+        hasWeekly ? `周额度剩余 ${quota.weeklyPercent}%` : "暂无周额度数据",
+        fiveHourText,
+        "点击展开全部 Agent 监控与额度详情",
+      ].filter(Boolean).join(" · ");
       const glyphStateClass = running > 0 ? "is-running" : (queued > 0 ? "is-queued" : "");
-      return `<button type="button" class="telemetry-compact-pill ${running > 0 ? "is-running" : ""} ${isCurrent ? "is-current" : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="点击展开全部 Agent 监控与额度详情">`
+      return `<button type="button" class="telemetry-compact-pill ${running > 0 ? "is-running" : ""} ${isCurrent ? "is-current" : ""}${hasWeekly ? ` has-weekly-quota quota-${quota.tone}` : ""}" data-telemetry-item-key="${escapeAttrHtml(item.key)}" data-telemetry-toggle title="${escapeAttrHtml(quotaTitle)}">`
+        + (hasWeekly ? `<span class="telemetry-weekly-progress" aria-hidden="true"><span class="telemetry-weekly-fill" style="width:${quota.weeklyPercent}%"></span></span>` : "")
         + `<span class="telemetry-provider-glyph is-${escapeAttrHtml(meta.tone)}${glyphStateClass ? ` ${glyphStateClass}` : ""}">${providerIconSvg(prov, { size: 12 })}</span>`
         + `<span class="telemetry-compact-name">${escapeAttrHtml(item.shortTitle)}</span>`
         + (runText ? `<span class="telemetry-compact-run ${running > 0 ? "is-running" : "is-queued"}">${escapeAttrHtml(runText)}</span>` : "")
         + (tpsText ? `<span class="telemetry-compact-tps">${escapeAttrHtml(tpsText)}</span>` : "")
-        + `<span class="telemetry-compact-sep" aria-hidden="true">·</span>`
-        + `<span class="telemetry-compact-quota is-${escapeAttrHtml(tone)}">${escapeAttrHtml(summaryText)}</span>`
+        + (fiveHourText ? `<span class="telemetry-quota-alert is-${quota.lowFiveHour <= 5 ? "danger" : "warn"}">${escapeAttrHtml(fiveHourText)}</span>` : "")
+        + (quota.statusText ? `<span class="telemetry-compact-quota is-muted">${escapeAttrHtml(quota.statusText)}</span>` : "")
         + `</button>`;
     }).join("");
 
@@ -1373,6 +1259,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         <div class="telemetry-card-metrics">
           <span class="telemetry-run-badge ${running > 0 ? "is-running" : queued > 0 ? "is-queued" : ""}">${escapeAttrHtml(runLabel)}</span>
           <span class="telemetry-tps-badge ${hasTps ? "is-active" : ""}">${escapeAttrHtml(tpsText)} tok/s</span>
+          ${expanded ? `<button type="button" class="telemetry-card-filter ${isFiltered ? "is-active" : ""}" data-telemetry-filter-provider="${escapeAttrHtml(prov)}" title="${isFiltered ? "取消只看此 Agent" : "只看此 Agent"}">${isFiltered ? "取消筛选" : "只看"}</button>` : ""}
         </div>
       </div>
       <div class="telemetry-card-quotas">${chipsHtml}</div>
@@ -1410,7 +1297,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
     </div>
     ${pickerOpen && items.length ? renderTelemetryPickerPanelHtml(items, visibleSet) : ""}
     ${gridOrEmptyHtml}
-    ${expanded ? renderTelemetryDrawerHtml(safeProfiles, byProvider, { providerFilter, nowSec }) : ""}
+    ${expanded ? renderTelemetryDrawerHtml(safeProfiles, byProvider) : ""}
   </div>`;
 }
 
@@ -1567,24 +1454,24 @@ export function formatProfileIdentityHint(profile) {
   return "";
 }
 
-function compactAccountHandle(profile, maxLen = 8) {
+function compactAccountHandle(profile) {
   const email = String(profile?.account?.email || "").trim();
   if (email) {
     const atIdx = email.indexOf("@");
     const handle = (atIdx > 0 ? email.slice(0, atIdx) : email).trim();
-    if (handle) return abbreviateMiddleText(handle, { head: 3, tail: 3, maxLen });
+    if (handle) return handle;
   }
   const name = String(profile?.account?.name || profile?.identityLabel || "").trim();
   if (name && !/^(默认|default)$/i.test(name)) {
-    return abbreviateMiddleText(name, { head: 3, tail: 3, maxLen });
+    return name;
   }
   return "";
 }
 
-export function compactProfileChipText(profile, { maxLen = 8 } = {}) {
+export function compactProfileChipText(profile) {
   if (!profile) return "";
   const alias = String(profile.health?.alias || "").trim();
-  if (alias) return abbreviateMiddleText(alias, { head: 3, tail: 3, maxLen });
+  if (alias) return alias;
   const provider = String(profile.provider || "").trim().toLowerCase();
   const label = String(profile.label || "").trim();
   const stripped = label
@@ -1593,15 +1480,14 @@ export function compactProfileChipText(profile, { maxLen = 8 } = {}) {
   const isGenericStripped = !stripped
     || (provider && stripped.toLowerCase() === provider)
     || /^(默认|default)$/i.test(stripped);
-  if (!isGenericStripped) return abbreviateMiddleText(stripped, { head: 3, tail: 3, maxLen });
+  if (!isGenericStripped) return stripped;
   if (profile.id === "desktop") return "桌面";
   if (profile.id === "cli") return "CLI";
-  const accountHandle = compactAccountHandle(profile, maxLen);
+  const accountHandle = compactAccountHandle(profile);
   if (accountHandle) return accountHandle;
-  if (stripped) return abbreviateMiddleText(stripped, { head: 3, tail: 3, maxLen });
-  if (label) return abbreviateMiddleText(label, { head: 3, tail: 3, maxLen });
-  const fallback = String(profile.id || "默认").trim();
-  return abbreviateMiddleText(fallback, { head: 3, tail: 3, maxLen });
+  if (stripped) return stripped;
+  if (label) return label;
+  return String(profile.id || "默认").trim() || "默认";
 }
 
 function extractCompactVariantLabel(thread) {
@@ -1611,13 +1497,99 @@ function extractCompactVariantLabel(thread) {
   if (profileId === "desktop" || /桌面|desktop/i.test(rawLabel)) return "桌面";
   if (profileId === "cli" || /\bcli\b|命令行/i.test(rawLabel)) return "CLI";
 
-  let cleaned = rawLabel
+  const cleaned = rawLabel
     .replace(/^(Antigravity|Codex|Claude\s*Code|Claude|Grok)\s*[·:/\-]?\s*/i, "")
     .trim();
   if (!cleaned) return "";
   const lower = cleaned.toLowerCase();
   if (lower === provider || /^(默认|default)$/i.test(cleaned)) return "";
-  return abbreviateMiddleText(cleaned, { head: 3, tail: 3, maxLen: 8 });
+  return cleaned;
+}
+
+const KNOWN_EMAIL_DOMAIN_DISPLAY = Object.freeze({
+  icloud: "iCloud",
+  me: "iCloud",
+  hotmail: "Hotmail",
+  outlook: "Outlook",
+  live: "Outlook",
+  gmail: "Gmail",
+  googlemail: "Gmail",
+  qq: "QQ",
+  foxmail: "Foxmail",
+  163: "163",
+  126: "126",
+  yeah: "Yeah",
+});
+
+function formatDomainDisplayAlias(email = "") {
+  const clean = String(email || "").trim().toLowerCase();
+  const atIdx = clean.indexOf("@");
+  if (atIdx < 0) return "";
+  const firstLabel = (clean.slice(atIdx + 1).trim().split(".")[0] || "").trim();
+  if (!firstLabel) return "";
+  return KNOWN_EMAIL_DOMAIN_DISPLAY[firstLabel] || firstLabel.slice(0, 10);
+}
+
+function compactEmailOwnerHandle(email = "") {
+  const clean = String(email || "").trim();
+  const atIdx = clean.indexOf("@");
+  const rawLocal = (atIdx > 0 ? clean.slice(0, atIdx) : clean).trim();
+  if (!rawLocal) return "";
+  const alphaLead = rawLocal.match(/^([a-zA-Z][a-zA-Z._-]{1,10}?)\d{4,}$/);
+  if (alphaLead && alphaLead[1]) {
+    return alphaLead[1].replace(/[._-]+$/g, "") || rawLocal;
+  }
+  return rawLocal;
+}
+
+export function resolveDistinctProfileChipText(profile, scopedProfiles = []) {
+  if (!profile) return "";
+  const explicitAlias = String(profile.health?.alias || "").trim();
+  if (explicitAlias) return explicitAlias;
+  const baseText = compactProfileChipText(profile);
+  const installedSiblings = (Array.isArray(scopedProfiles) ? scopedProfiles : []).filter(
+    (p) => p && p.installed !== false && !p.health?.disabled,
+  );
+  if (installedSiblings.length < 2) return baseText;
+
+  const owner = compactEmailOwnerHandle(profile.account?.email || "");
+  const domainAlias = formatDomainDisplayAlias(profile.account?.email || "");
+  if (owner) {
+    let ownerCollisions = 0;
+    for (const sib of installedSiblings) {
+      if (compactEmailOwnerHandle(sib.account?.email || "").toLowerCase() === owner.toLowerCase()) {
+        ownerCollisions += 1;
+      }
+    }
+    if (ownerCollisions <= 1 && domainAlias) {
+      const ownerShort = owner.length <= 6 ? owner : (/^\d+$/.test(owner) ? owner.slice(-4) : owner.slice(0, 6));
+      return `${ownerShort}·${domainAlias}`.slice(0, 12);
+    }
+    if (ownerCollisions > 1 && domainAlias) {
+      return domainAlias;
+    }
+  }
+
+  let baseCollisions = 0;
+  for (const sib of installedSiblings) {
+    if (compactProfileChipText(sib).toLowerCase() === baseText.toLowerCase()) {
+      baseCollisions += 1;
+    }
+  }
+  if (baseCollisions <= 1 && !/^(默认|default)$/i.test(baseText)) {
+    return baseText;
+  }
+
+  if (domainAlias) return domainAlias;
+  const ep = String(profile.endpointLabel || "").trim();
+  if (ep) return ep.split(".")[0] || ep;
+  if (!profile.account?.email && /^(default|默认)$/i.test(String(profile.id || ""))) {
+    return "默认";
+  }
+  if (profile.id && !/^(default|默认)$/i.test(profile.id)) {
+    return profile.id === "desktop" ? "桌面" : (profile.id === "cli" ? "CLI" : String(profile.id));
+  }
+  return baseText;
 }
 
 export function compactThreadSourceChip(thread, {
@@ -1636,9 +1608,9 @@ export function compactThreadSourceChip(thread, {
   const shortVariant = extractCompactVariantLabel(thread);
   const hasMultiProfiles = scopedProfiles.length >= 2;
   const multiAccountChip = hasMultiProfiles
-    ? (compactProfileChipText(matchedProfile, { maxLen: 8 })
+    ? (resolveDistinctProfileChipText(matchedProfile, scopedProfiles)
       || shortVariant
-      || (/^(default|默认)$/i.test(String(thread?.profileId || "")) ? "默认" : abbreviateMiddleText(String(thread?.profileId || ""), { head: 3, tail: 3, maxLen: 8 }))
+      || (/^(default|默认)$/i.test(String(thread?.profileId || "")) ? "默认" : String(thread?.profileId || ""))
       || "默认")
     : "";
   const emailHint = String(matchedProfile?.account?.email || "").trim();
@@ -1648,18 +1620,19 @@ export function compactThreadSourceChip(thread, {
     : baseTitle;
 
   if (scopedProfiles.length === 1) {
-    return { glyph: "", iconSvg: meta.iconSvg, text: "", tone: meta.tone, title };
+    return null;
+  }
+
+  if (hasMultiProfiles) {
+    return {
+      glyph: "",
+      text: multiAccountChip,
+      tone: meta.tone,
+      title,
+    };
   }
 
   if (providerFilter && providerFilter !== "all") {
-    if (hasMultiProfiles) {
-      return {
-        glyph: "",
-        text: multiAccountChip,
-        tone: meta.tone,
-        title,
-      };
-    }
     if (!shortVariant) return null;
     if (scopedProfiles.length > 0 && scopedProfiles.length <= 1) return null;
     return {
@@ -1670,30 +1643,16 @@ export function compactThreadSourceChip(thread, {
     };
   }
 
-  let text = meta.short;
-  if (provider === "antigravity") {
-    const hasMultiOrExplicitVariant = hasMultiProfiles
-      || /桌面|desktop|\bcli\b|命令行/i.test(String(thread?.profileLabel || ""));
-    text = (hasMultiOrExplicitVariant && (multiAccountChip || shortVariant))
-      ? (multiAccountChip || shortVariant)
-      : meta.short;
-  } else if (provider === "codex") {
-    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Codex");
-  } else if (provider === "claude") {
-    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Claude");
-  } else if (provider === "grok") {
-    text = hasMultiProfiles ? multiAccountChip : (shortVariant || "Grok");
-  } else if (hasMultiProfiles || shortVariant) {
-    text = multiAccountChip || shortVariant;
+  if (shortVariant) {
+    return {
+      glyph: "",
+      text: shortVariant,
+      tone: meta.tone,
+      title,
+    };
   }
 
-  return {
-    glyph: "",
-    iconSvg: meta.iconSvg,
-    text,
-    tone: meta.tone,
-    title,
-  };
+  return null;
 }
 
 export function profileOptionLabel(profile) {
@@ -1871,6 +1830,23 @@ export function pickDefaultModelForProvider(models = [], provider = "", preferre
     if (exact) return exact;
   }
   return scoped.find((m) => m.isDefault) || scoped[0];
+}
+
+export function formatQuotaResetDateCompact(resetsAtSec, nowSec = Math.floor(Date.now() / 1000)) {
+  const target = Number(resetsAtSec);
+  const now = Number(nowSec);
+  if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(now)) return "";
+  if (Math.floor(target - now) <= 0) return "";
+  const d = new Date(target * 1000);
+  const n = new Date(now * 1000);
+  const pad2 = (v) => String(v).padStart(2, "0");
+  const sameDay = d.getFullYear() === n.getFullYear()
+    && d.getMonth() === n.getMonth()
+    && d.getDate() === n.getDate();
+  if (sameDay) {
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+  return `${d.getMonth() + 1}/${pad2(d.getDate())}`;
 }
 
 export function formatQuotaResetRelative(resetsAtSec, nowSec = Math.floor(Date.now() / 1000)) {

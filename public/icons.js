@@ -3,6 +3,7 @@ const ICON_PATHS = Object.freeze({
   board: `<rect x="2.25" y="2.25" width="4.75" height="4.75" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2.25" width="4.75" height="4.75" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="2.25" y="9" width="4.75" height="4.75" rx="1.2" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="9" width="4.75" height="4.75" rx="1.2" stroke="currentColor" stroke-width="1.5"/>`,
   mic: `<rect x="5.75" y="1.75" width="4.5" height="7.5" rx="2.25" stroke="currentColor" stroke-width="1.5"/><path d="M3.25 7.5a4.75 4.75 0 0 0 9.5 0M8 12.25v2M5.75 14.25h4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
   stop: `<rect x="3.5" y="3.5" width="9" height="9" rx="1.8" fill="currentColor"/>`,
+  steer: `<path d="M3.25 4.25v3.5A2.25 2.25 0 0 0 5.5 10h7M9.75 7.25 12.75 10l-3 2.75" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>`,
   pause: `<rect x="4" y="3" width="2.75" height="10" rx="1" fill="currentColor"/><rect x="9.25" y="3" width="2.75" height="10" rx="1" fill="currentColor"/>`,
   more: `<circle cx="3.5" cy="8" r="1.25" fill="currentColor"/><circle cx="8" cy="8" r="1.25" fill="currentColor"/><circle cx="12.5" cy="8" r="1.25" fill="currentColor"/>`,
   close: `<path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>`,

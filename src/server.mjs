@@ -32,6 +32,7 @@ import {
 import { RemoteBridge } from "./remote-bridge.mjs";
 import { logRequestError } from "./request-logging.mjs";
 import { acquireRuntimeLease } from "./runtime-lease.mjs";
+import { UpdateService } from "./update-service.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -127,10 +128,12 @@ export async function createAgentControlServer({
   publicDir = PUBLIC_DIR,
   disableRelay = env.AGENT_CONTROL_DISABLE_RELAY === "1",
   disableTunnel = env.AGENT_CONTROL_DISABLE_TUNNEL === "1",
+  disableUpdateCheck = env.AGENT_CONTROL_DISABLE_AUTO_UPDATE === "1",
   requireAuth = env.AGENT_CONTROL_REQUIRE_AUTH === "1",
   providers = null,
   hub: customHub = null,
   remoteBridgeOptions = null,
+  updateServiceOptions = null,
   writeErrorLog,
 } = {}) {
   const identity = await ensureInstanceIdentity({ dataDir });
@@ -200,6 +203,28 @@ export async function createAgentControlServer({
     authGateway: tunnelAuth,
     disabled: disableTunnel,
   });
+
+  let closeServerResources = null;
+  const updateService = new UpdateService({
+    ...(updateServiceOptions || {}),
+    dataDir,
+    env,
+    canAutoUpdateIdle: async () => {
+      if (typeof updateServiceOptions?.canAutoUpdateIdle === "function") {
+        return updateServiceOptions.canAutoUpdateIdle();
+      }
+      const voiceStatus = voiceService.getCallDeliveryStatus?.({ callId: "" });
+      if (voiceStatus?.activeCount > 0) return false;
+      const tel = await hub.getTelemetry().catch(() => null);
+      if (Number(tel?.totals?.runningCount || 0) > 0) return false;
+      return (hub.allQueuedTurns()?.length || 0) === 0;
+    },
+    onUnattendedRestart: async () => {
+      await closeServerResources?.();
+    },
+    onStatusChange: (snap) => broadcastSse("update_status", snap),
+  });
+  await updateService.load();
 
   const heartbeat = setInterval(() => {
     for (const res of [...sseClients]) {
@@ -285,6 +310,7 @@ export async function createAgentControlServer({
           ...providerSummary,
           remote: canManageRemote ? remoteSnap : { ...remoteSnap, pairUrl: "" },
           tunnel: quickTunnel.statusSnapshot({ includeSecrets: canManageRemote }),
+          update: updateService.statusSnapshot(),
         }, { requestId });
         return;
       }
@@ -347,6 +373,14 @@ export async function createAgentControlServer({
           instanceId: identity.instanceId,
           label: identity.label,
         }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/executions" && request.method === "GET") {
+        sendJson(response, 200, hub.getExecutionStats({
+          days: Number(url.searchParams.get("days") ?? 7),
+          provider: url.searchParams.get("provider") || "all",
+        }), { requestId });
         return;
       }
 
@@ -446,7 +480,29 @@ export async function createAgentControlServer({
         const qualityParam = url.searchParams.get("q");
         const rawMode = url.searchParams.get("raw") === "1" || url.searchParams.get("raw") === "true";
         context.threadId = threadId;
-        const resolved = await hub.resolveThreadImageFile(threadId, rawPath);
+        let resolved;
+        try {
+          resolved = await hub.resolveThreadImageFile(threadId, rawPath);
+        } catch (err) {
+          if (Number(err?.status) === 404) {
+            const payloadBuf = Buffer.from(JSON.stringify({
+              error: {
+                code: err?.code || null,
+                message: err?.message || "图片文件不存在",
+              },
+            }), "utf8");
+            response.writeHead(404, {
+              "Cache-Control": "private, max-age=60",
+              "Content-Type": "application/json; charset=utf-8",
+              "Content-Length": String(payloadBuf.length),
+              "X-Content-Type-Options": "nosniff",
+              ...(requestId ? { "X-Request-Id": requestId } : {}),
+            });
+            response.end(request.method === "HEAD" ? undefined : payloadBuf);
+            return;
+          }
+          throw err;
+        }
         const out = await getCompressedImagePreview(resolved.filePath, {
           size: resolved.size,
           mtimeMs: resolved.mtimeMs,
@@ -457,7 +513,7 @@ export async function createAgentControlServer({
         });
         const etag = `W/"${out.size}-${Math.trunc(out.mtimeMs)}-${out.compressed ? 1 : 0}"`;
         const commonHeaders = {
-          "Cache-Control": "private, max-age=300",
+          "Cache-Control": "private, max-age=600, stale-while-revalidate=3600",
           ETag: etag,
           "X-Original-Bytes": String(out.originalSize || resolved.size),
           "X-Compressed": out.compressed ? "1" : "0",
@@ -648,6 +704,15 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/thread/queue/entry" && request.method === "GET") {
+        const threadId = url.searchParams.get("threadId") || "";
+        const entryId = url.searchParams.get("id") || "";
+        context.threadId = threadId;
+        const result = await hub.getQueuedTurnEntry(threadId, entryId);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/queue" && request.method === "POST") {
         const body = await readJsonBody(request);
         context.threadId = body.threadId || "";
@@ -665,10 +730,37 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/thread/queue/update" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        context.threadId = body.threadId || "";
+        const result = await hub.updateQueuedTurn(body.threadId, body.id, {
+          ...(Object.hasOwn(body, "text") || Object.hasOwn(body, "prompt")
+            ? { text: String(body.text ?? body.prompt ?? "") }
+            : {}),
+          ...(Object.hasOwn(body, "images") ? { images: Array.isArray(body.images) ? body.images : [] } : {}),
+          ...(Object.hasOwn(body, "model") ? { model: body.model || "" } : {}),
+          ...(Object.hasOwn(body, "effort") ? { effort: body.effort || "" } : {}),
+          ...(Object.hasOwn(body, "permissionMode") ? { permissionMode: body.permissionMode || "workspace" } : {}),
+          ...(Object.hasOwn(body, "goalMode") ? { goalMode: Boolean(body.goalMode) } : {}),
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/queue/cancel" && request.method === "POST") {
         const body = await readJsonBody(request);
         context.threadId = body.threadId || "";
         const result = await hub.cancelQueuedTurn(body.threadId, body.id);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/thread/queue/steer" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        context.threadId = body.threadId || "";
+        const result = await hub.steerQueuedTurn(body.threadId, body.id, {
+          expectedTurnId: body.expectedTurnId || "",
+        });
         sendJson(response, 200, result, { requestId });
         return;
       }
@@ -864,6 +956,7 @@ export async function createAgentControlServer({
           telemetry: await hub.getTelemetry().catch(() => null),
           remote: canManageRemote ? remoteSnap : { ...remoteSnap, pairUrl: "" },
           tunnel: quickTunnel.statusSnapshot({ includeSecrets: canManageRemote }),
+          update: updateService.statusSnapshot(),
         };
         if (clientClosed || response.writableEnded) return;
         response.write(`retry: 2000\n\nevent: ready\ndata: ${JSON.stringify(initial)}\n\n`);
@@ -999,6 +1092,42 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/update" && request.method === "GET") {
+        sendJson(response, 200, updateService.statusSnapshot(), { requestId });
+        return;
+      }
+
+      if (pathname === "/api/update/check" && request.method === "POST") {
+        await readJsonBody(request);
+        const status = await updateService.checkForUpdates({ silent: false });
+        sendJson(response, 200, status, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/update/config" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const status = await updateService.configure(body);
+        sendJson(response, 200, status, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/update/apply" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await updateService.applyUpdate({ reason: body?.reason || "manual" });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/update/desktop" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await updateService.applyDesktopUpdate({
+          reason: body?.reason || "manual",
+          relaunchIfRunning: body?.relaunchIfRunning !== false,
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname.startsWith("/api/")) {
         sendJson(response, 404, { error: { message: "API 路由不存在" } }, { requestId });
         return;
@@ -1023,12 +1152,33 @@ export async function createAgentControlServer({
     }
   });
 
+  const closeResources = async () => {
+    clearInterval(heartbeat);
+    updateService.close();
+    unsubscribeHub();
+    for (const res of [...sseClients]) {
+      try { res.end(); } catch {}
+    }
+    sseClients.clear();
+    await Promise.allSettled([
+      quickTunnel.close(),
+      bridge.close(),
+      voiceService.close(),
+      hub.close(),
+    ]);
+    await leaseHandle?.release().catch(() => {});
+    server.closeIdleConnections?.();
+    await new Promise((resolveClose) => server.close(() => resolveClose()));
+  };
+  closeServerResources = closeResources;
+
   return {
     server,
     hub,
     bridge,
     quickTunnel,
     tunnelAuth,
+    updateService,
     identity,
     get port() {
       return actualPort;
@@ -1051,6 +1201,9 @@ export async function createAgentControlServer({
       tailscaleFunnel.setTargetOrigin(localOrigin);
       bridge.setTargetOrigin(localOrigin);
       bridge.connect();
+      if (!disableUpdateCheck) {
+        updateService.start();
+      }
       leaseHandle = await acquireRuntimeLease({
         dataDir,
         host,
@@ -1061,21 +1214,7 @@ export async function createAgentControlServer({
       return this;
     },
     async close() {
-      clearInterval(heartbeat);
-      unsubscribeHub();
-      for (const res of [...sseClients]) {
-        try { res.end(); } catch {}
-      }
-      sseClients.clear();
-      await Promise.allSettled([
-        quickTunnel.close(),
-        bridge.close(),
-        voiceService.close(),
-        hub.close(),
-      ]);
-      await leaseHandle?.release().catch(() => {});
-      server.closeIdleConnections?.();
-      await new Promise((resolveClose) => server.close(() => resolveClose()));
+      await closeResources();
     },
   };
 }

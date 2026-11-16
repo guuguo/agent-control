@@ -151,7 +151,7 @@ export class ClaudeProvider {
       });
     });
 
-    this.#runner.on("turnCompleted", ({ profileId, rawId, turnId, status, lastAgentMessage, error, durationMs }) => {
+    this.#runner.on("turnCompleted", ({ profileId, rawId, turnId, status, lastAgentMessage, error, durationMs, result }) => {
       this.#onEvent({
         type: "turn_completed",
         provider: "claude",
@@ -163,6 +163,7 @@ export class ClaudeProvider {
         lastAgentMessage,
         error,
         durationMs,
+        usage: result?.usage || null,
       });
     });
   }

@@ -6,9 +6,24 @@ private let defaultPort = "43310"
 private let launchAgentLabel = "com.guuguo.agent-control"
 private let windowBgColor = NSColor(srgbRed: 8 / 255.0, green: 11 / 255.0, blue: 16 / 255.0, alpha: 1.0)
 
-final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+private let localFileContextMenuScript = #"""
+(() => {
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(location.hostname)) return;
+  document.addEventListener("contextmenu", (event) => {
+    const file = event.target.closest?.("[data-local-file-path]");
+    const path = file?.dataset.localFilePath;
+    if (!path?.startsWith("/") || path.startsWith("//")) return;
+    event.preventDefault();
+    window.webkit.messageHandlers.localFileContextMenu.postMessage(path);
+  });
+})();
+"""#
+
+final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
   private var window: NSWindow!
   private var webView: WKWebView!
+  private var backButton: NSButton!
+  private var navigationObservation: NSKeyValueObservation?
   private var statusOverlay: NSView!
   private var statusLabel: NSTextField!
   private var retryButton: NSButton!
@@ -98,19 +113,46 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     config.websiteDataStore = .default()
     config.preferences.isElementFullscreenEnabled = true
     config.preferences.javaScriptCanOpenWindowsAutomatically = true
+    config.userContentController.add(self, name: "localFileContextMenu")
+    config.userContentController.addUserScript(WKUserScript(
+      source: localFileContextMenuScript,
+      injectionTime: .atDocumentEnd,
+      forMainFrameOnly: true
+    ))
 
     webView = WKWebView(frame: contentView.bounds, configuration: config)
     webView.autoresizingMask = [.width, .height]
     webView.navigationDelegate = self
     webView.uiDelegate = self
-    webView.allowsBackForwardNavigationGestures = false
+    webView.allowsBackForwardNavigationGestures = true
     webView.setValue(false, forKey: "drawsBackground")
     if #available(macOS 13.3, *) {
       webView.isInspectable = true
     }
     contentView.addSubview(webView)
 
+    buildNavigationControls()
     buildStatusOverlay(inside: contentView)
+  }
+
+  private func buildNavigationControls() {
+    let accessory = NSTitlebarAccessoryViewController()
+    accessory.layoutAttribute = .left
+    accessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 76, height: 26))
+
+    backButton = NSButton(title: "返回", target: self, action: #selector(goBack(_:)))
+    backButton.frame = NSRect(x: 6, y: 2, width: 64, height: 22)
+    backButton.bezelStyle = .texturedRounded
+    backButton.controlSize = .small
+    backButton.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: "返回")
+    backButton.imagePosition = .imageLeading
+    backButton.toolTip = "返回上一页（⌘[）"
+    accessory.view.addSubview(backButton)
+    window.addTitlebarAccessoryViewController(accessory)
+
+    navigationObservation = webView.observe(\.canGoBack, options: [.initial, .new]) { [weak self] view, _ in
+      self?.backButton.isEnabled = view.canGoBack
+    }
   }
 
   private func buildStatusOverlay(inside container: NSView) {
@@ -189,6 +231,9 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     mainMenu.addItem(viewMenuItem)
     let viewMenu = NSMenu(title: "视图")
     viewMenuItem.submenu = viewMenu
+    let backItem = viewMenu.addItem(withTitle: "返回上一页", action: #selector(goBack(_:)), keyEquivalent: "[")
+    backItem.target = self
+    viewMenu.addItem(.separator())
     viewMenu.addItem(withTitle: "刷新界面", action: #selector(reloadWebView(_:)), keyEquivalent: "r")
     let hardReload = viewMenu.addItem(withTitle: "强制重新加载", action: #selector(hardReloadWebView(_:)), keyEquivalent: "r")
     hardReload.keyEquivalentModifierMask = [.command, .shift]
@@ -309,6 +354,17 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
 
   // MARK: - Menu Actions
 
+  @objc private func goBack(_ sender: Any?) {
+    webView.goBack()
+  }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    if menuItem.action == #selector(goBack(_:)) {
+      return webView?.canGoBack ?? false
+    }
+    return true
+  }
+
   @objc private func retryConnection(_ sender: Any?) {
     ensureServerAndLoad()
   }
@@ -363,6 +419,43 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         self.pollUntilHealthy(attemptsRemaining: 25)
       }
     }
+  }
+
+  // MARK: - Local File Context Menu
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    guard message.name == "localFileContextMenu",
+      message.frameInfo.isMainFrame,
+      let sourceURL = message.frameInfo.request.url,
+      ["127.0.0.1", "localhost", "::1", "[::1]"].contains(sourceURL.host?.lowercased() ?? ""),
+      isLocalAppURL(sourceURL),
+      let path = message.body as? String, path.hasPrefix("/"), !path.hasPrefix("//"),
+      !path.contains("\0")
+    else { return }
+
+    let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+    let menu = NSMenu()
+    let revealItem = menu.addItem(withTitle: "在 Finder 中显示", action: #selector(revealLocalFile(_:)), keyEquivalent: "")
+    revealItem.target = self
+    revealItem.representedObject = fileURL
+    revealItem.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+    let copyItem = menu.addItem(withTitle: "拷贝文件路径", action: #selector(copyLocalFilePath(_:)), keyEquivalent: "")
+    copyItem.target = self
+    copyItem.representedObject = fileURL
+    copyItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
+    let point = webView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+    menu.popUp(positioning: nil, at: point, in: webView)
+  }
+
+  @objc private func revealLocalFile(_ sender: NSMenuItem) {
+    guard let fileURL = sender.representedObject as? URL else { return }
+    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+  }
+
+  @objc private func copyLocalFilePath(_ sender: NSMenuItem) {
+    guard let fileURL = sender.representedObject as? URL else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(fileURL.path, forType: .string)
   }
 
   // MARK: - WKNavigationDelegate

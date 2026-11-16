@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261116p" />
+  <meta name="ac-ui-version" content="20261116quota" />
   <title>Agent Control · 多智能体远程控制台</title>
-  <link rel="stylesheet" href="./app.css?v=20261116p" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261116p" />
+  <link rel="stylesheet" href="./app.css?v=20261116quota" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261116quota" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -22,17 +22,17 @@
           <span class="host-pill" id="hostBadge">本机</span>
         </div>
         <div class="sidebar-actions">
-          <button type="button" id="newThreadBtn" class="btn-primary btn-sm">+ 新建会话</button>
-          <button type="button" id="remoteModalBtn" class="btn-secondary btn-sm remote-launch-btn">
+          <button type="button" id="newThreadBtn" class="btn-primary btn-sm sidebar-new-btn">+ 新建会话</button>
+          <button type="button" id="boardToggleBtn" class="btn-secondary btn-xs sidebar-view-btn" title="项目面板：查看所有项目会话" aria-pressed="true">
+            <span id="boardToggleIcon" class="btn-icon-glyph" data-icon="board" data-icon-size="11" aria-hidden="true"></span>
+            <span id="boardToggleLabel">面板</span>
+            <span id="boardAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
+          </button>
+          <button type="button" id="remoteModalBtn" class="btn-secondary btn-xs remote-launch-btn" title="打开手机远程控制">
             <span id="remoteActiveDot" class="remote-btn-dot" hidden aria-hidden="true"></span>
-            <span>手机远程</span>
+            <span>远程</span>
           </button>
         </div>
-        <button type="button" id="boardToggleBtn" class="btn-secondary btn-sm sidebar-view-btn" title="以项目面板查看会话" aria-pressed="true">
-          <span id="boardToggleIcon" class="btn-icon-glyph" data-icon="board" data-icon-size="14" aria-hidden="true"></span>
-          <span id="boardToggleLabel">项目面板</span>
-          <span id="boardAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
-        </button>
         <div id="localAppsStrip" class="local-apps-strip" aria-label="本机扩展工作台" hidden></div>
       </div>
 
@@ -52,7 +52,26 @@
       <div id="threadWarnings" class="thread-warnings" hidden></div>
       <div id="threadList" class="thread-list"></div>
       <div id="sidebarBatchBar" class="batch-action-bar is-sidebar" hidden></div>
+      <div id="sidebarFooterBar" class="sidebar-footer-bar">
+        <button type="button" id="sidebarUpdateBtn" class="sidebar-update-btn" title="查看版本状态与一键更新">
+          <span id="sidebarUpdateDot" class="update-indicator-dot" aria-hidden="true"></span>
+          <span class="btn-icon-glyph" data-icon="refresh" data-icon-size="12" aria-hidden="true"></span>
+          <span id="sidebarUpdateVersion" class="sidebar-update-version">v0.1.0</span>
+          <span id="sidebarUpdateBadge" class="sidebar-update-badge" hidden>有更新</span>
+        </button>
+        <span id="sidebarAutoUpdateTag" class="sidebar-auto-tag" hidden title="已开启闲时自动更新">自动更新</span>
+      </div>
     </aside>
+
+    <div
+      id="sidebarResizer"
+      class="sidebar-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="拖拽调整目录栏宽度"
+      title="左右拖拽调整目录栏宽度（双击恢复默认）"
+      tabindex="0"
+    ></div>
 
     <main id="mainArea" class="main-area">
       <header id="topbar" class="topbar">
@@ -105,8 +124,13 @@
               </div>
               <button type="button" id="goalToggleBtn" class="btn-secondary btn-sm" hidden>开启 Goal</button>
               <button type="button" id="renameThreadBtn" class="btn-secondary btn-sm" hidden>重命名</button>
+              <button type="button" id="toggleThreadImagesBtn" class="btn-secondary btn-sm" hidden>加载本会话预览图</button>
               <button type="button" id="archiveThreadBtn" class="btn-secondary btn-sm" hidden>归档</button>
               <button type="button" id="refreshThreadBtn" class="btn-secondary btn-sm" title="刷新当前视图">刷新</button>
+              <button type="button" id="openUpdateModalBtn" class="btn-secondary btn-sm topbar-update-menu-btn" title="检查版本更新与设置自动更新">
+                <span>版本与更新</span>
+                <span id="topbarMenuUpdateBadge" class="menu-update-badge" hidden>新</span>
+              </button>
             </div>
           </div>
         </div>
@@ -138,6 +162,7 @@
 
       <footer id="composerArea" class="composer-area" hidden>
         <div id="composerStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
+        <div id="composerEditBanner" class="composer-edit-banner" hidden></div>
         <div id="composerImages" class="composer-images" hidden></div>
         <div class="composer-box">
           <div class="composer-input-row">
@@ -174,24 +199,24 @@
                   <button type="button" id="composerConfigCloseBtn" class="icon-btn" aria-label="收起参数面板"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
                 </div>
                 <div class="composer-controls">
-                  <label class="cfg-field">
+                  <div class="cfg-field">
                     <span class="cfg-field-label mobile-only">智能体</span>
                     <select id="composerProviderSelect" class="ctrl-select" aria-label="智能体" title="选择智能体"></select>
-                  </label>
+                  </div>
                   <div class="cfg-field cfg-field-profile" id="composerProfileField">
                     <span class="cfg-field-label mobile-only">实例配置</span>
                     <select id="composerProfileSelect" class="ctrl-select" aria-label="实例" title="选择实例配置"></select>
                     <div id="composerProfilePills" class="profile-pills-strip"></div>
                   </div>
-                  <label class="cfg-field">
+                  <div class="cfg-field">
                     <span class="cfg-field-label mobile-only">模型</span>
                     <select id="modelSelect" class="ctrl-select ctrl-model" aria-label="模型" title="选择大模型"></select>
-                  </label>
-                  <label class="cfg-field">
+                  </div>
+                  <div class="cfg-field">
                     <span class="cfg-field-label mobile-only">思考强度</span>
                     <select id="effortSelect" class="ctrl-select ctrl-effort" aria-label="推理强度" title="选择推理思考强度" hidden></select>
-                  </label>
-                  <label class="cfg-field">
+                  </div>
+                  <div class="cfg-field">
                     <span class="cfg-field-label mobile-only">权限模式</span>
                     <select id="permissionSelect" class="ctrl-select ctrl-permission is-turbo" aria-label="权限模式" title="选择工具与命令执行权限">
                       <option value="turbo" selected>Turbo（自动批准）</option>
@@ -200,7 +225,7 @@
                       <option value="safe">只读 / 询问</option>
                       <option value="plan">仅规划 (Plan)</option>
                     </select>
-                  </label>
+                  </div>
                   <div class="cfg-field cfg-field-goal">
                     <span class="cfg-field-label mobile-only">目标自动推进</span>
                     <button type="button" id="composerGoalBtn" class="btn-toggle btn-xs" aria-pressed="false" title="开启后将在未出现完成标记时自动推进">/goal</button>
@@ -545,6 +570,68 @@
     </div>
   </dialog>
 
-  <script type="module" src="./app.js?v=20261116p"></script>
+  <dialog id="updateModal" class="modal-dialog" aria-label="版本与自动更新">
+    <div class="modal-card update-modal-card">
+      <div class="modal-head">
+        <h3>版本与自动更新</h3>
+        <button type="button" class="icon-btn" data-close-modal="updateModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body update-modal-body">
+        <section class="tunnel-card update-summary-card">
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="refresh" data-icon-size="13" aria-hidden="true"></span> 当前运行版本</strong>
+            <span id="updateStatePill" class="tunnel-state-pill">待检查</span>
+          </div>
+          <div id="updateCurrentInfo" class="update-meta-box">正在读取版本信息…</div>
+          <div id="updateRemoteInfo" class="update-meta-box" hidden></div>
+          <div id="updateDesktopInfo" class="update-meta-box update-desktop-box" hidden></div>
+          <div id="updateActionStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
+          <div id="updateDirtyWarning" class="update-dirty-box" hidden></div>
+        </section>
+
+        <section class="tunnel-card update-settings-card">
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="settings" data-icon-size="13" aria-hidden="true"></span> 自动更新策略</strong>
+          </div>
+          <label class="update-toggle-row">
+            <input id="autoCheckUpdateToggle" type="checkbox" checked />
+            <span class="update-toggle-copy">
+              <strong>定期自动检测新版本</strong>
+              <small>每 6 小时自动检查远端仓库是否有更新，手机端和桌面端同步展示提醒</small>
+            </span>
+          </label>
+          <label class="update-toggle-row">
+            <input id="autoUpdateToggle" type="checkbox" />
+            <span class="update-toggle-copy">
+              <strong>闲时自动更新并重启服务</strong>
+              <small>仅在本地工作区无未提交改动、且当前没有任何执行中的对话或语音通话时自动拉取并平滑重启</small>
+            </span>
+          </label>
+          <label class="update-toggle-row">
+            <input id="autoUpdateDesktopToggle" type="checkbox" checked />
+            <span class="update-toggle-copy">
+              <strong>同步更新 macOS 桌面 App 壳子</strong>
+              <small>服务端版本或桌面端代码变化时自动重新编译安装 /Applications/Agent Control.app</small>
+            </span>
+          </label>
+        </section>
+
+        <section id="updatePendingSection" class="tunnel-card update-pending-card" hidden>
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title">待更新内容</strong>
+            <span id="updatePendingCount" class="update-pending-count">0 条提交</span>
+          </div>
+          <ul id="updatePendingList" class="update-pending-list"></ul>
+        </section>
+      </div>
+      <div class="modal-foot update-modal-foot">
+        <button type="button" id="applyDesktopUpdateBtn" class="btn-secondary btn-sm" hidden>更新桌面 App</button>
+        <button type="button" id="checkUpdateBtn" class="btn-secondary btn-sm">立即检查</button>
+        <button type="button" id="applyUpdateBtn" class="btn-primary btn-sm" disabled>一键更新并重启</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js?v=20261116quota"></script>
 </body>
 </html>

@@ -370,7 +370,7 @@ export class AgentTelemetryService {
             : (st.size - cursor.size > DELTA_READ_CAP_BYTES ? st.size - DELTA_READ_CAP_BYTES : cursor.size);
           const text = await readFileSliceUtf8(rolloutPath, readOffset, st.size - readOffset);
           const lines = text.split("\n");
-          if (readOffset > 0) lines.shift();
+          if (readOffset > 0 && (isFirst || readOffset !== cursor.size)) lines.shift();
 
           for (const line of lines) {
             if (!line.trim()) continue;
@@ -390,7 +390,7 @@ export class AgentTelemetryService {
               cursor.running = false;
             } else if (!isFirst && !activeRawSet.has(rawId)) {
               if (pType === "token_count") {
-                const outTok = Number(payload.last_token_usage?.output_tokens || 0);
+                const outTok = Number(payload.info?.last_token_usage?.output_tokens ?? payload.last_token_usage?.output_tokens ?? 0);
                 if (outTok > 0) {
                   this.recordExactTokens("codex", compositeId, outTok, nowMs, 2000);
                 }

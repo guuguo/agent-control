@@ -93,6 +93,50 @@ function parsePreviewableCodePath(codeText = "") {
   return { cleanPath, startLine, endLine };
 }
 
+const FAILED_THREAD_IMAGE_CACHE_LIMIT = 400;
+const failedThreadImageKeys = new Set();
+
+function normalizeFailedThreadImageKey(rawSrc = "") {
+  const s = String(rawSrc || "").trim();
+  if (!s) return "";
+  const idx = s.indexOf("api/thread/image");
+  if (idx < 0) return "";
+  const qIdx = s.indexOf("?", idx);
+  if (qIdx < 0) return s.slice(idx);
+  const queryStr = s.slice(qIdx + 1).split("#")[0];
+  try {
+    const sp = new URLSearchParams(queryStr);
+    const tid = sp.get("threadId") || "";
+    const p = sp.get("path") || "";
+    if (tid || p) return `threadId=${tid}&path=${p}`;
+  } catch {
+    // Ignore malformed query string; fallback to raw slice.
+  }
+  return s.slice(idx);
+}
+
+export function markThreadImageFailed(src = "") {
+  const key = normalizeFailedThreadImageKey(src);
+  if (!key) return false;
+  if (failedThreadImageKeys.has(key)) {
+    failedThreadImageKeys.delete(key);
+  } else if (failedThreadImageKeys.size >= FAILED_THREAD_IMAGE_CACHE_LIMIT) {
+    const oldest = failedThreadImageKeys.values().next().value;
+    if (oldest !== undefined) failedThreadImageKeys.delete(oldest);
+  }
+  failedThreadImageKeys.add(key);
+  return true;
+}
+
+export function isThreadImageFailed(src = "") {
+  const key = normalizeFailedThreadImageKey(src);
+  return key ? failedThreadImageKeys.has(key) : false;
+}
+
+export function clearFailedThreadImages() {
+  failedThreadImageKeys.clear();
+}
+
 function buildThreadImageUrls(threadId, filePath) {
   const base = `./api/thread/image?threadId=${encodeURIComponent(threadId)}&path=${encodeURIComponent(filePath)}`;
   return {
@@ -143,7 +187,41 @@ function restoreInlineTokens(html, tokens) {
   return out;
 }
 
-function renderInlineMarkdown(text, { threadId = "" } = {}) {
+function renderDeferredOrEagerImageHtml({
+  className = "msg-image",
+  src = "",
+  alt = "图片",
+  title = "",
+  previewSrc = "",
+  previewRaw = "",
+  previewCaption = "",
+  deferImages = false,
+} = {}) {
+  const cleanSrc = String(src || "");
+  if (!cleanSrc) return "";
+  const shouldDefer = Boolean(deferImages && !cleanSrc.startsWith("data:"));
+  const cls = shouldDefer ? `${className} is-deferred-image` : className;
+  const srcAttr = shouldDefer
+    ? `data-lazy-src="${escapeHtml(cleanSrc)}" decoding="async"`
+    : `src="${escapeHtml(cleanSrc)}" loading="lazy"`;
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  const previewAttr = previewSrc ? ` data-preview-src="${escapeHtml(previewSrc)}"` : "";
+  const rawAttr = previewRaw ? ` data-preview-raw="${escapeHtml(previewRaw)}"` : "";
+  const capAttr = previewCaption ? ` data-preview-caption="${escapeHtml(previewCaption)}"` : "";
+  const imgTag = `<img class="${cls}" ${srcAttr}${previewAttr}${rawAttr}${capAttr} alt="${escapeHtml(alt)}"${titleAttr} />`;
+  if (shouldDefer && className === "md-inline-img") {
+    const label = alt || "图片";
+    const tip = previewCaption || title || label;
+    return `<span class="md-inline-img-wrap is-deferred"><button type="button" class="md-inline-img-trigger" data-reveal-inline-img="1" title="点击加载预览图：${escapeHtml(tip)}">${iconSvg("image", { size: 12 })}<span class="md-inline-img-label">${escapeHtml(label)}</span><span class="md-inline-img-hint">点击预览</span></button>${imgTag}</span>`;
+  }
+  return imgTag;
+}
+
+function renderRevealThreadImagesButtonHtml() {
+  return `<button type="button" class="msg-reveal-thread-images-btn" data-reveal-thread-images="1" title="加载并展示当前会话的全部预览图">${iconSvg("image", { size: 12 })}<span>加载本会话预览图</span></button>`;
+}
+
+function renderInlineMarkdown(text, { threadId = "", deferImages = false } = {}) {
   let working = String(text ?? "").replace(/\x00/g, "");
   if (!working) return "";
 
@@ -191,8 +269,15 @@ function renderInlineMarkdown(text, { threadId = "" } = {}) {
       const rawUrl = (bracketHref || plainHref || "").trim();
       const safeImg = sanitizeImageSrc(rawUrl);
       if (safeImg) {
-        const titleAttr = titleRaw ? ` title="${escapeHtml(titleRaw)}"` : "";
-        return stash(`<img class="md-inline-img" src="${escapeHtml(safeImg)}" alt="${escapeHtml(altRaw || "图片")}"${titleAttr} loading="lazy" />`);
+        return stash(
+          renderDeferredOrEagerImageHtml({
+            className: "md-inline-img",
+            src: safeImg,
+            alt: altRaw || "图片",
+            title: titleRaw || "",
+            deferImages,
+          }),
+        );
       }
       const ref = splitClientFileRefAndAnchor(rawUrl);
       const isFileProto = /^file:/i.test(rawUrl);
@@ -201,9 +286,19 @@ function renderInlineMarkdown(text, { threadId = "" } = {}) {
         const label = altRaw || clientPathBasename(ref.cleanPath) || "本地图片";
         if (threadId && CLIENT_RASTER_IMAGE_EXT_RE.test(ref.cleanPath)) {
           const urls = buildThreadImageUrls(threadId, ref.cleanPath);
-          return stash(
-            `<img class="md-inline-img" src="${escapeHtml(urls.inlineSrc)}" data-preview-src="${escapeHtml(urls.previewSrc)}" data-preview-raw="${escapeHtml(urls.rawSrc)}" data-preview-caption="${escapeHtml(ref.cleanPath)}" alt="${escapeHtml(label)}" loading="lazy" />`,
-          );
+          if (!isThreadImageFailed(urls.inlineSrc)) {
+            return stash(
+              renderDeferredOrEagerImageHtml({
+                className: "md-inline-img",
+                src: urls.inlineSrc,
+                previewSrc: urls.previewSrc,
+                previewRaw: urls.rawSrc,
+                previewCaption: ref.cleanPath,
+                alt: label,
+                deferImages,
+              }),
+            );
+          }
         }
         const safeHref = escapeHtml(isFileProto ? sanitizeHref(rawUrl) : localPathToFileHref(ref.cleanPath));
         const fileAttr = ` data-local-file-path="${escapeHtml(ref.cleanPath)}"`;
@@ -303,12 +398,12 @@ function parseTableAlignments(line) {
   return alignments;
 }
 
-function renderTableRowCells(tag, cells, colCount, alignments = [], { threadId = "" } = {}) {
+function renderTableRowCells(tag, cells, colCount, alignments = [], { threadId = "", deferImages = false } = {}) {
   const out = [];
   for (let c = 0; c < colCount; c += 1) {
     const align = alignments[c] || "";
     const alignAttr = align ? ` style="text-align:${align}"` : "";
-    out.push(`<${tag}${alignAttr}>${renderInlineMarkdown(cells[c] || "", { threadId })}</${tag}>`);
+    out.push(`<${tag}${alignAttr}>${renderInlineMarkdown(cells[c] || "", { threadId, deferImages })}</${tag}>`);
   }
   return `<tr>${out.join("")}</tr>`;
 }
@@ -326,7 +421,7 @@ const HR_RE = /^\s*(?:-\s*){3,}$|^\s*(?:\*\s*){3,}$|^\s*(?:_\s*){3,}$/;
 const HEADING_RE = /^\s*(#{1,6})\s+(.+?)(?:\s+#+\s*)?$/;
 const FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})(.*)$/;
 
-function renderListItemsHtml(items, { threadId = "" } = {}) {
+function renderListItemsHtml(items, { threadId = "", deferImages = false } = {}) {
   if (!items.length) return "";
   const html = [];
   const stack = [];
@@ -360,7 +455,7 @@ function renderListItemsHtml(items, { threadId = "" } = {}) {
       }
     }
 
-    const bodyHtml = item.lines.map((ln) => renderInlineMarkdown(ln, { threadId })).join("<br />");
+    const bodyHtml = item.lines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />");
     if (item.taskChecked !== null) {
       const checkedCls = item.taskChecked ? " is-checked" : "";
       html.push(
@@ -398,7 +493,7 @@ function isBlockBoundaryLine(lines, index) {
   return false;
 }
 
-export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
+export function renderMarkdown(source, { depth = 0, threadId = "", deferImages = false } = {}) {
   const text = String(source || "")
     .replace(/<!--\s*GOAL_COMPLETE\s*-->/g, "")
     .replace(/\r\n/g, "\n");
@@ -487,10 +582,10 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
             innerLines.splice(firstNonEmptyIdx, 1);
           }
         }
-        const bodyHtml = renderMarkdown(innerLines.join("\n"), { depth: depth + 1, threadId });
+        const bodyHtml = renderMarkdown(innerLines.join("\n"), { depth: depth + 1, threadId, deferImages });
         const openAttr = detailsOpen[1] ? " open" : "";
         html.push(
-          `<details class="md-details"${openAttr}><summary>${renderInlineMarkdown(summaryText, { threadId })}</summary><div class="md-details-body">${bodyHtml}</div></details>`,
+          `<details class="md-details"${openAttr}><summary>${renderInlineMarkdown(summaryText, { threadId, deferImages })}</summary><div class="md-details-body">${bodyHtml}</div></details>`,
         );
         i = closeIdx + 1;
         continue;
@@ -522,9 +617,9 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
           bodyRows.push(splitTableCells(rowLine));
           i += 1;
         }
-        const thead = `<thead>${renderTableRowCells("th", headerCells, colCount, nextAligns, { threadId })}</thead>`;
+        const thead = `<thead>${renderTableRowCells("th", headerCells, colCount, nextAligns, { threadId, deferImages })}</thead>`;
         const tbody = bodyRows.length
-          ? `<tbody>${bodyRows.map((cells) => renderTableRowCells("td", cells, colCount, nextAligns, { threadId })).join("")}</tbody>`
+          ? `<tbody>${bodyRows.map((cells) => renderTableRowCells("td", cells, colCount, nextAligns, { threadId, deferImages })).join("")}</tbody>`
           : "";
         html.push(`<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`);
         continue;
@@ -547,7 +642,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
         rows.push(cells);
         i += 1;
       }
-      const tbody = `<tbody>${rows.map((cells) => renderTableRowCells("td", cells, colCount, [], { threadId })).join("")}</tbody>`;
+      const tbody = `<tbody>${rows.map((cells) => renderTableRowCells("td", cells, colCount, [], { threadId, deferImages })).join("")}</tbody>`;
       html.push(`<div class="md-table-wrap"><table class="md-table is-headless">${tbody}</table></div>`);
       continue;
     }
@@ -563,7 +658,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
     const headingMatch = line.match(HEADING_RE);
     if (headingMatch) {
       const level = headingMatch[1].length;
-      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2], { threadId })}</h${level}>`);
+      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2], { threadId, deferImages })}</h${level}>`);
       i += 1;
       continue;
     }
@@ -584,15 +679,15 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
           ...quoteLines.slice(1),
         ];
         const bodyHtml = restLines.join("\n").trim()
-          ? renderMarkdown(restLines.join("\n"), { depth: depth + 1, threadId })
+          ? renderMarkdown(restLines.join("\n"), { depth: depth + 1, threadId, deferImages })
           : "";
         html.push(
           `<div class="md-alert is-${kind}"><div class="md-alert-title"><span class="md-alert-icon" aria-hidden="true">${meta.icon}</span><span>${meta.label}</span></div>${bodyHtml ? `<div class="md-alert-body">${bodyHtml}</div>` : ""}</div>`,
         );
       } else {
         const innerHtml = depth < 4
-          ? renderMarkdown(quoteLines.join("\n"), { depth: depth + 1, threadId })
-          : `<p>${quoteLines.map((ln) => renderInlineMarkdown(ln, { threadId })).join("<br />")}</p>`;
+          ? renderMarkdown(quoteLines.join("\n"), { depth: depth + 1, threadId, deferImages })
+          : `<p>${quoteLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />")}</p>`;
         html.push(`<blockquote>${innerHtml}</blockquote>`);
       }
       continue;
@@ -633,7 +728,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
         }
         break;
       }
-      html.push(renderListItemsHtml(listItems, { threadId }));
+      html.push(renderListItemsHtml(listItems, { threadId, deferImages }));
       continue;
     }
 
@@ -644,10 +739,10 @@ export function renderMarkdown(source, { depth = 0, threadId = "" } = {}) {
       i += 1;
     }
     if (paraLines.length) {
-      html.push(`<p>${paraLines.map((ln) => renderInlineMarkdown(ln, { threadId })).join("<br />")}</p>`);
+      html.push(`<p>${paraLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />")}</p>`);
     } else {
       // Defensive advance if a non-empty line wasn't claimed above (e.g. unclosed <details>).
-      html.push(`<p>${renderInlineMarkdown(lines[i], { threadId })}</p>`);
+      html.push(`<p>${renderInlineMarkdown(lines[i], { threadId, deferImages })}</p>`);
       i += 1;
     }
   }
@@ -1324,7 +1419,13 @@ function renderSlashCommandCard(cmd) {
   `;
 }
 
-function renderUserItem(item, { threadId = "" } = {}) {
+export function renderMessageCopyButton(text = "") {
+  const content = String(text).replace(/<!--\s*GOAL_COMPLETE\s*-->/g, "");
+  if (!content.trim()) return "";
+  return `<button type="button" class="msg-copy-btn" data-copy-message="${escapeHtml(content)}" title="复制消息文字（Markdown）" aria-label="复制消息文字">${iconSvg("clipboard", { size: 12 })}<span>复制</span></button>`;
+}
+
+function renderUserItem(item, { threadId = "", deferImages = false } = {}) {
   const {
     textParts,
     images,
@@ -1350,11 +1451,12 @@ function renderUserItem(item, { threadId = "" } = {}) {
     return eventCards.join("");
   }
   const imageParts = [];
+  let deferredImageCount = 0;
   for (const part of images) {
     const label = part.name || (part.path ? clientPathBasename(part.path) : "") || "图片";
     const directSrc = part.url && (part.url.startsWith("data:") || part.url.startsWith("http")) ? part.url : "";
     const urls = buildThreadImageUrls(threadId, part.path);
-    const localSrc = (!directSrc && part.path && threadId && !part.missingFile && !isPlaceholderImagePathClient(part.path))
+    const localSrc = (!directSrc && part.path && threadId && !part.missingFile && !isPlaceholderImagePathClient(part.path) && !isThreadImageFailed(urls.thumbSrc))
       ? urls.thumbSrc
       : "";
     const previewSrc = directSrc || (localSrc ? urls.previewSrc : "");
@@ -1362,10 +1464,14 @@ function renderUserItem(item, { threadId = "" } = {}) {
     const src = directSrc || localSrc;
     const tip = part.path || label;
     if (src) {
+      const cardDeferred = Boolean(deferImages && !src.startsWith("data:"));
+      if (cardDeferred) deferredImageCount += 1;
+      const btnTitle = cardDeferred ? `点击加载预览图：${tip}` : `点击放大预览：${tip}`;
       imageParts.push(`
-        <div class="msg-image-card">
-          <button type="button" class="msg-image-btn" data-preview-src="${escapeHtml(previewSrc)}"${rawAttr} data-preview-caption="${escapeHtml(tip)}" title="点击放大预览：${escapeHtml(tip)}">
-            <img class="msg-image" src="${escapeHtml(src)}" alt="${escapeHtml(label)}" loading="lazy" />
+        <div class="msg-image-card${cardDeferred ? " is-deferred" : ""}">
+          <button type="button" class="msg-image-btn" data-preview-src="${escapeHtml(previewSrc)}"${rawAttr} data-preview-caption="${escapeHtml(tip)}" title="${escapeHtml(btnTitle)}">
+            <span class="msg-image-deferred-lead" aria-hidden="true">${iconSvg("image", { size: 13 })}</span>
+            ${renderDeferredOrEagerImageHtml({ className: "msg-image", src, alt: label, deferImages: cardDeferred })}
             <span class="msg-image-caption">${escapeHtml(label)}</span>
           </button>
           ${part.path ? `<div class="msg-file-chip is-fallback" hidden title="${escapeHtml(part.path)}">${iconSvg("image", { size: 12 })}<span>${escapeHtml(label)}</span></div>` : ""}
@@ -1375,6 +1481,7 @@ function renderUserItem(item, { threadId = "" } = {}) {
       imageParts.push(`<div class="msg-file-chip" title="${escapeHtml(tip)}">${iconSvg("image", { size: 12 })}<span>${escapeHtml(isPlaceholderImagePathClient(part.path) ? part.path : label)}</span></div>`);
     }
   }
+  const revealUserImagesBtnHtml = deferredImageCount > 0 ? renderRevealThreadImagesButtonHtml() : "";
   const fileChips = files.map((file) => (
     threadId
       ? `<button type="button" class="msg-file-chip is-clickable" data-local-file-path="${escapeHtml(file.path)}" title="点击查看：${escapeHtml(file.path)}">${iconSvg("paperclip", { size: 12 })}<span>${escapeHtml(file.name)}</span></button>`
@@ -1394,12 +1501,15 @@ function renderUserItem(item, { threadId = "" } = {}) {
     : "";
   return `${eventCards.join("")}
     <div class="msg-row msg-user">
-      <div class="msg-meta"><span class="msg-role">你</span></div>
+      <div class="msg-meta"><span class="msg-role">你</span>${renderMessageCopyButton([
+        ...questionReplies.map((qr) => [qr.question, qr.answer].filter(Boolean).join("\n")),
+        textParts.join("\n"),
+      ].filter(Boolean).join("\n\n"))}</div>
       <div class="msg-bubble user-bubble">
-        ${imageParts.length ? `<div class="msg-images">${imageParts.join("")}</div>` : ""}
+        ${imageParts.length ? `<div class="msg-images">${imageParts.join("")}${revealUserImagesBtnHtml}</div>` : ""}
         ${fileChips.length ? `<div class="msg-files">${fileChips.join("")}</div>` : ""}
         ${repliesHtml}
-        ${textParts.length ? `<div class="md-body">${renderMarkdown(textParts.join("\n"), { threadId })}</div>` : ""}
+        ${textParts.length ? `<div class="md-body">${renderMarkdown(textParts.join("\n"), { threadId, deferImages })}</div>` : ""}
       </div>
     </div>
   `;
@@ -1900,7 +2010,7 @@ export function formatTurnModelBadge(turnOrModel, fallbackModel = "", fallbackEf
   return { label, title };
 }
 
-function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null } = {}) {
+function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null, deferImages = false } = {}) {
   const rawText = String(item.text || "");
   const parsedHb = item.heartbeat || parseClientHeartbeatAgentReply(rawText, { allowIncomplete: false });
   const text = item.heartbeat
@@ -1909,22 +2019,32 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
   const goalComplete = text.includes("<!-- GOAL_COMPLETE -->");
   const isCommentary = !forcePrimary && item.phase === "commentary";
   const outputImagePaths = (!isCommentary && threadId) ? extractAgentOutputImagePaths(text, 6) : [];
-  const outputThumbsHtml = outputImagePaths.length
-    ? `
-      <div class="msg-images agent-output-images">
-        ${outputImagePaths.map((imgPath) => {
-          const label = clientPathBasename(imgPath) || "图片";
-          const urls = buildThreadImageUrls(threadId, imgPath);
-          return `
-            <div class="msg-image-card">
-              <button type="button" class="msg-image-btn" data-preview-src="${escapeHtml(urls.previewSrc)}" data-preview-raw="${escapeHtml(urls.rawSrc)}" data-preview-caption="${escapeHtml(imgPath)}" title="点击放大预览：${escapeHtml(imgPath)}">
-                <img class="msg-image" src="${escapeHtml(urls.thumbSrc)}" alt="${escapeHtml(label)}" loading="lazy" />
+  let deferredOutputCount = 0;
+  const outputThumbsInner = outputImagePaths.map((imgPath) => {
+    const label = clientPathBasename(imgPath) || "图片";
+    const urls = buildThreadImageUrls(threadId, imgPath);
+    if (isThreadImageFailed(urls.thumbSrc)) {
+      return `<div class="msg-file-chip" title="${escapeHtml(imgPath)}">${iconSvg("image", { size: 12 })}<span>${escapeHtml(label)}</span></div>`;
+    }
+    if (deferImages) deferredOutputCount += 1;
+    const btnTitle = deferImages ? `点击加载预览图：${imgPath}` : `点击放大预览：${imgPath}`;
+    return `
+            <div class="msg-image-card${deferImages ? " is-deferred" : ""}">
+              <button type="button" class="msg-image-btn" data-preview-src="${escapeHtml(urls.previewSrc)}" data-preview-raw="${escapeHtml(urls.rawSrc)}" data-preview-caption="${escapeHtml(imgPath)}" title="${escapeHtml(btnTitle)}">
+                <span class="msg-image-deferred-lead" aria-hidden="true">${iconSvg("image", { size: 13 })}</span>
+                ${renderDeferredOrEagerImageHtml({ className: "msg-image", src: urls.thumbSrc, alt: label, deferImages })}
                 <span class="msg-image-caption">${escapeHtml(label)}</span>
               </button>
               <div class="msg-file-chip is-fallback" hidden title="${escapeHtml(imgPath)}">${iconSvg("image", { size: 12 })}<span>${escapeHtml(label)}</span></div>
             </div>
           `;
-        }).join("")}
+  }).join("");
+  const revealOutputBtnHtml = deferredOutputCount > 0 ? renderRevealThreadImagesButtonHtml() : "";
+  const outputThumbsHtml = outputImagePaths.length
+    ? `
+      <div class="msg-images agent-output-images">
+        ${outputThumbsInner}
+        ${revealOutputBtnHtml}
       </div>
     `
     : "";
@@ -1941,9 +2061,10 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
         ${hbTagHtml}
         ${isCommentary ? `<span class="phase-tag">过程汇报</span>` : ""}
         ${goalComplete ? `<span class="goal-done-tag">目标已达成</span>` : ""}
+        ${renderMessageCopyButton(text)}
       </div>
       <div class="msg-bubble agent-bubble md-body">
-        ${renderMarkdown(text, { threadId })}
+        ${renderMarkdown(text, { threadId, deferImages })}
         ${outputThumbsHtml}
       </div>
     </div>
@@ -2773,6 +2894,7 @@ export function renderTurnHtml(turn, {
   fallbackModel = "",
   fallbackEffort = "",
   goalSuspended = false,
+  deferImages = false,
 } = {}) {
   const { normalizedTurn, cleanItems, primaryAgentIndexes } = classifyTurnItems(turn, { hideSyntheticLiveReply });
   const isRunning = suppressRunning
@@ -2815,10 +2937,10 @@ export function renderTurnHtml(turn, {
     if (!item || typeof item !== "object") continue;
     if (item.type === "userMessage") {
       flushProcessGroup(false, false);
-      parts.push(renderUserItem(item, { threadId }));
+      parts.push(renderUserItem(item, { threadId, deferImages }));
     } else if (item.type === "agentMessage" && primaryAgentIndexes.has(i)) {
       flushProcessGroup(false, false);
-      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge }));
+      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge, deferImages }));
     } else if (isTurnProcessItem(item)) {
       pendingProcessItems.push(item);
     }

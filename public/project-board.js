@@ -400,26 +400,18 @@ function resolveThreadDotClass(thread, recentCompletedByThread = null) {
 
 function renderThreadStatusMarkerHtml(thread, recentCompletedByThread = null) {
   const dotClass = resolveThreadDotClass(thread, recentCompletedByThread);
-  if ((thread?.pendingCount || 0) === 0 && thread?.live) {
-    const provider = String(thread.provider || "antigravity");
-    const meta = providerVisualMeta(provider);
-    return `<span class="thread-status-dot is-live is-agent-live is-${escapeHtml(meta.tone)}" aria-hidden="true">${providerIconSvg(provider, { size: 12 })}</span>`;
-  }
-  return `<span class="thread-status-dot ${dotClass}" aria-hidden="true"></span>`;
+  const provider = String(thread?.provider || "antigravity");
+  const meta = providerVisualMeta(provider);
+  const isLiveRunning = (thread?.pendingCount || 0) === 0 && Boolean(thread?.live);
+  const stateClasses = isLiveRunning ? "is-live is-agent-live" : dotClass;
+  return `<span class="thread-status-dot ${stateClasses} is-agent-marker is-${escapeHtml(meta.tone)}" aria-hidden="true">${providerIconSvg(provider, { size: 12 })}</span>`;
 }
 
 function renderThreadCompactChipHtml(thread, chip) {
   if (!chip) return "";
-  const isLive = Boolean(thread?.live) && (thread?.pendingCount || 0) === 0;
   const text = String(chip.text || "").trim();
-  const hasGlyph = Boolean(chip.iconSvg || chip.glyph);
-  if (isLive && !text) return "";
-  const glyphHtml = (!isLive && hasGlyph)
-    ? `<span class="micro-glyph" aria-hidden="true">${chip.iconSvg || escapeHtml(chip.glyph)}</span>`
-    : "";
-  const iconOnlyClass = (!text && glyphHtml) ? " is-icon-only" : "";
-  const textOnlyClass = (text && !glyphHtml) ? " is-text-only" : "";
-  return `<span class="thread-micro-tag is-${escapeHtml(chip.tone)}${iconOnlyClass}${textOnlyClass}" title="${escapeHtml(chip.title)}">${glyphHtml}${escapeHtml(text)}</span>`;
+  if (!text) return "";
+  return `<span class="thread-micro-tag is-text-only is-${escapeHtml(chip.tone)}" title="${escapeHtml(chip.title)}">${escapeHtml(text)}</span>`;
 }
 
 function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [] } = {}) {
@@ -602,23 +594,26 @@ function renderSidebarProjectGroupHtml(group, {
           isRecentDone ? "is-recent-done" : "",
         ].filter(Boolean).join(" ");
 
+        const tagsHtml = [
+          pendingCount ? `<span class="thread-pending-pill" title="待确认 ${pendingCount} 项">${pendingCount}</span>` : "",
+          queuedCount ? `<span class="thread-queued-pill" title="排队中 ${queuedCount} 条">排队 ${queuedCount}</span>` : "",
+          t.goalState?.active ? `<span class="goal-micro-tag" title="Goal 自动推进中">${iconSvg("target", { size: 11 })}</span>` : "",
+          chipHtml,
+        ].filter(Boolean).join("");
+        const timeHtml = !t.live ? `<span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>` : "";
+
         return `
           <button type="button" class="${itemClasses}" data-thread-id="${escapeHtml(t.id)}"${selectionMode ? ` aria-pressed="${isBatchChecked ? "true" : "false"}"` : ""}>
             <span class="thread-item-top">
               ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
               ${markerHtml}
               <span class="thread-item-title">${escapeHtml(title)}</span>
-              ${!t.live ? `<span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>` : ""}
+              ${!subText && (tagsHtml || timeHtml) ? `<span class="thread-item-right">${tagsHtml}${timeHtml}</span>` : timeHtml}
             </span>
-            ${subText || pendingCount || queuedCount || t.goalState?.active || chipHtml ? `
+            ${subText ? `
               <span class="thread-item-secondary">
-                ${subText ? `<span class="thread-item-sub ${isLiveSub ? "is-live-sub" : ""}" title="${escapeHtml(subText)}">${escapeHtml(subText)}</span>` : ""}
-                ${pendingCount || queuedCount || t.goalState?.active || chipHtml ? `<span class="thread-item-tags">
-                ${pendingCount ? `<span class="thread-pending-pill" title="待确认 ${pendingCount} 项">${pendingCount}</span>` : ""}
-                ${queuedCount ? `<span class="thread-queued-pill" title="排队中 ${queuedCount} 条">排队 ${queuedCount}</span>` : ""}
-                ${t.goalState?.active ? `<span class="goal-micro-tag" title="Goal 自动推进中">${iconSvg("target", { size: 11 })}</span>` : ""}
-                ${chipHtml}
-                </span>` : ""}
+                <span class="thread-item-sub ${isLiveSub ? "is-live-sub" : ""}" title="${escapeHtml(subText)}">${escapeHtml(subText)}</span>
+                ${tagsHtml ? `<span class="thread-item-tags">${tagsHtml}</span>` : ""}
               </span>
             ` : ""}
           </button>

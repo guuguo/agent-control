@@ -89,27 +89,60 @@ export function humanizeLiveActivity(activity = {}, { isStreamingText = false } 
 
 export function bindFollowIntent(target, { pause, settle }) {
   if (!target) return () => {};
-  const pauseAndSettle = () => {
-    pause();
+  let lastUpwardScrollAt = 0;
+  let scrollSettleTimer = null;
+  const settledUnlessRecentlyScrollingUp = () => {
+    if (Date.now() - lastUpwardScrollAt < 280) return;
     settle();
   };
-  const settleFromKeyboard = (event) => {
-    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
-      settle();
+  const onWheel = (event) => {
+    const dy = Number(event?.deltaY) || 0;
+    if (dy < -1) {
+      lastUpwardScrollAt = Date.now();
+      if (scrollSettleTimer) {
+        clearTimeout(scrollSettleTimer);
+        scrollSettleTimer = null;
+      }
+      pause();
+      return;
+    }
+    pause();
+    if (dy > 1) {
+      settledUnlessRecentlyScrollingUp();
     }
   };
-  target.addEventListener("wheel", pauseAndSettle, { passive: true });
+  const onScroll = () => {
+    if (scrollSettleTimer) clearTimeout(scrollSettleTimer);
+    scrollSettleTimer = setTimeout(() => {
+      scrollSettleTimer = null;
+      settledUnlessRecentlyScrollingUp();
+    }, 60);
+  };
+  const settleFromKeyboard = (event) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key)) {
+      lastUpwardScrollAt = Date.now();
+      pause();
+      return;
+    }
+    if (["ArrowDown", "PageDown", "End", " "].includes(event.key)) {
+      settledUnlessRecentlyScrollingUp();
+    }
+  };
+  target.addEventListener("wheel", onWheel, { passive: true });
+  target.addEventListener("scroll", onScroll, { passive: true });
   target.addEventListener("touchstart", pause, { passive: true });
-  target.addEventListener("touchend", settle, { passive: true });
+  target.addEventListener("touchend", settledUnlessRecentlyScrollingUp, { passive: true });
   target.addEventListener("pointerdown", pause, { passive: true });
-  target.addEventListener("pointerup", settle, { passive: true });
+  target.addEventListener("pointerup", settledUnlessRecentlyScrollingUp, { passive: true });
   target.addEventListener("keyup", settleFromKeyboard);
   return () => {
-    target.removeEventListener("wheel", pauseAndSettle);
+    if (scrollSettleTimer) clearTimeout(scrollSettleTimer);
+    target.removeEventListener("wheel", onWheel);
+    target.removeEventListener("scroll", onScroll);
     target.removeEventListener("touchstart", pause);
-    target.removeEventListener("touchend", settle);
+    target.removeEventListener("touchend", settledUnlessRecentlyScrollingUp);
     target.removeEventListener("pointerdown", pause);
-    target.removeEventListener("pointerup", settle);
+    target.removeEventListener("pointerup", settledUnlessRecentlyScrollingUp);
     target.removeEventListener("keyup", settleFromKeyboard);
   };
 }

@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { submitComposerRequest } from "../public/composer-mode.js";
+import { renderQueuedTurnsPanelHtml, resolveComposerSubmission, submitComposerRequest } from "../public/composer-mode.js";
+import { isIgnorableTurnError, normalizeProfileHealth } from "../src/profile-health.mjs";
 import { ProviderHub } from "../src/provider-hub.mjs";
 
 test("页面未识别运行态时，thread_busy 转入排队并保留图片与参数", async () => {
@@ -46,7 +47,28 @@ test("正常发送、主动排队和插话保留原请求，其他错误不自�
       body: action === "queue" ? payload : { ...payload, steer: action === "steer" },
     }]);
   }
-  for (const [action, code, status] of [["turn", "writer_conflict", 409], ["turn", "timeout", 504], ["steer", "thread_busy", 409]]) {
+  for (const [action, code, status, msg] of [
+    ["turn", "writer_conflict", 409, "会话正被本地客户端占用"],
+    ["turn", "rpc_error", 500, "thread 01a178b2 already has an active writer"],
+  ]) {
+    const queued = { items: [{ id: "q-writer", text: payload.text }] };
+    const calls = [];
+    const res = await submitComposerRequest(async (path, body) => {
+      calls.push({ path, body });
+      if (path === "api/turn") {
+        throw Object.assign(new Error(msg), { code, status });
+      }
+      return queued;
+    }, { action, payload });
+    assert.deepEqual(res, { action: "queue", result: queued });
+    assert.equal(calls.length, 2);
+  }
+  assert.equal(isIgnorableTurnError(new Error("thread 01a178b2 already has an active writer")), true);
+  assert.equal(
+    normalizeProfileHealth({ status: "unavailable", detail: "thread 01a178b2 already has an active writer" }).status,
+    "unknown",
+  );
+  for (const [action, code, status] of [["turn", "timeout", 504], ["steer", "thread_busy", 409]]) {
     let count = 0;
     const error = Object.assign(new Error(code), { code, status });
     await assert.rejects(submitComposerRequest(async () => {
@@ -102,4 +124,35 @@ test("Codex Mock 协议的忙碌错误转入控制端队列，前一轮结束后
   }
   assert.ok(delivered, "排队消息应在前一轮结束后通过 Mock CLI 执行完成");
   assert.equal((await hub.listQueuedTurns(started.thread.id)).length, 0);
+});
+
+test("编辑排队消息模式：返回 update_queue 动作且高亮编辑中的条目", () => {
+  const sub = resolveComposerSubmission({
+    hasActiveThread: true,
+    isRunning: true,
+    isSubmitting: false,
+    isEditingQueue: true,
+    mode: "queue",
+    text: "补充图片说明",
+    imageCount: 1,
+  });
+  assert.deepEqual(sub, { action: "update_queue", canSubmit: true, buttonLabel: "保存更新" });
+
+  const emptySub = resolveComposerSubmission({
+    hasActiveThread: true,
+    isRunning: true,
+    isSubmitting: false,
+    isEditingQueue: true,
+    mode: "queue",
+    text: "   ",
+    imageCount: 0,
+  });
+  assert.deepEqual(emptySub, { action: "noop", canSubmit: false, buttonLabel: "保存更新" });
+
+  const html = renderQueuedTurnsPanelHtml([
+    { id: "q-1", position: 1, text: "第一条", imageCount: 1, source: "control", canCancel: true },
+    { id: "q-2", position: 2, text: "第二条", imageCount: 0, source: "control", canCancel: true },
+  ], { editingId: "q-1" });
+  assert.match(html, /class="queued-item\s+[^"]*is-editing"/);
+  assert.match(html, /编辑中/);
 });

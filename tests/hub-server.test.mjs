@@ -659,3 +659,47 @@ test("POST /api/threads/archive batch-archives and unarchives cross-provider thr
     assert.equal(restoredList.data.threads.some((th) => th.id === id && !th.archived), true);
   }
 });
+
+test("GET /api/thread/image returns cacheable 404 without throwing server errors on missing files", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-hub-img-404-"));
+  const dataDir = resolve(root, "data");
+  const codexHome = resolve(root, "codex");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+  ]);
+
+  const errorLogs = [];
+  const srv = await createAgentControlServer({
+    port: 0,
+    disableRelay: true,
+    dataDir,
+    writeErrorLog: (line) => errorLogs.push(String(line || "")),
+    env: {
+      ...process.env,
+      CODEX_BIN: MOCK_CODEX_BIN,
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", label: "Codex 默认", home: codexHome }]),
+      AGENT_CONTROL_CLAUDE_CONFIG_DIRS: "[]",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: "[]",
+      AGENT_CONTROL_GROK_HOMES: "[]",
+    },
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close().catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const created = await jsonReq(srv.url, "/api/thread/new", {
+    method: "POST",
+    body: { provider: "codex", profileId: "default", cwd: root, text: "图片 404 测试" },
+  });
+  assert.equal(created.status, 200);
+
+  const missingUrl = `/api/thread/image?threadId=${encodeURIComponent(created.data.thread.id)}&path=${encodeURIComponent("not-exist-icon128.png")}&w=480&q=68`;
+  const missRes = await rawGet(srv.url + missingUrl);
+  assert.equal(missRes.status, 404);
+  assert.equal(missRes.headers["cache-control"], "private, max-age=60");
+  assert.match(missRes.body.toString("utf8"), /图片文件不存在/);
+  assert.equal(errorLogs.length, 0);
+});

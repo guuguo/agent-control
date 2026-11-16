@@ -2,6 +2,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
+import { mockVoiceCoordinatorResponse } from "./mock-voice-coordinator.mjs";
 
 const args = process.argv.slice(2);
 const skipPermissionsFlag = args.includes("--dangerously-skip-permissions");
@@ -183,6 +184,13 @@ rl.on("line", async (line) => {
     const text = (params.prompt || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
 
     if (text.includes("[AC_VOICE_CALL]")) {
+      if (process.env.MOCK_VOICE_COORDINATOR_RESPONSE) {
+        send({ method: "session/update", params: { sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.MOCK_VOICE_COORDINATOR_RESPONSE } },
+        } });
+        send({ id, result: { stopReason: "end_turn" } });
+        return;
+      }
       const readMatch = text.match(/read_file\("([^"]+)"\)/);
       let audioValid = true;
       let audioError = "";
@@ -217,7 +225,10 @@ rl.on("line", async (line) => {
       }
 
       let plan;
-      if (!audioValid) {
+      const cannedPlan = mockVoiceCoordinatorResponse(text, snapshot);
+      if (cannedPlan) {
+        plan = cannedPlan;
+      } else if (!audioValid) {
         plan = {
           heardText: "",
           intent: "summarize_progress",
@@ -293,6 +304,68 @@ rl.on("line", async (line) => {
           writeFileSync(outMatch[1], `bg_approved:${optId}:${skipPermissionsFlag}`);
         }
       }, 20);
+      return;
+    }
+
+    if (text.includes("[LARGE_TOOL_UPDATE]")) {
+      send({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tc-large-1",
+            title: "读取桌面大图",
+            kind: "read",
+            status: `completed:${"S".repeat(800)}`,
+            rawOutput: `data:image/png;base64,${"B".repeat(50_000)}`,
+            rawInput: { blob: "I".repeat(50_000) },
+            content: [{ type: "image", data: "C".repeat(40_000) }],
+            locations: [{ path: "/tmp/big.png" }],
+          },
+        },
+      });
+      send({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "大图工具已精简完成。" } },
+        },
+      });
+      send({ id, result: { stopReason: "end_turn" } });
+      return;
+    }
+
+    if (text.includes("[STALE_AFTER_DONE]")) {
+      send({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "主回合完成。" } },
+        },
+      });
+      send({ id, result: { stopReason: "end_turn" } });
+      setTimeout(() => {
+        send({
+          method: "session/update",
+          params: {
+            sessionId,
+            update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "STALE_IDLE_DELTA_SHOULD_NOT_BROADCAST" } },
+          },
+        });
+        send({
+          method: "session/update",
+          params: {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: "tc-stale-1",
+              title: "STALE_IDLE_TOOL_SHOULD_NOT_BROADCAST",
+              status: "completed",
+            },
+          },
+        });
+      }, 40);
       return;
     }
 

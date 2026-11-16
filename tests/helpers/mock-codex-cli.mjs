@@ -243,6 +243,11 @@ rl.on("line", (line) => {
   }
 
   if (method === "turn/start") {
+    const errorFile = resolve(process.env.CODEX_HOME || "", ".mock-turn-start-error");
+    if (existsSync(errorFile)) {
+      send({ id, error: { code: -32000, message: readFileSync(errorFile, "utf8").trim() } });
+      return;
+    }
     const thread = ensureThread(params.threadId);
     const text = (params.input || []).filter((i) => i.type === "text").map((i) => i.text).join("\n");
     const turnId = `turn-${Date.now()}-${thread.turns.length + 1}`;

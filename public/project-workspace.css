@@ -247,11 +247,12 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 13.5px;
+  margin-left: 21px;
   min-width: 0;
-  max-width: calc(100% - 13.5px);
+  max-width: calc(100% - 21px);
 }
 
+.thread-item-right,
 .thread-item-tags {
   display: inline-flex;
   align-items: center;
@@ -331,14 +332,92 @@
   will-change: transform, opacity;
 }
 
-.thread-status-dot.is-live.is-agent-live {
-  width: 14px;
-  height: 14px;
+.thread-status-dot.is-agent-marker {
+  width: 16px;
+  height: 16px;
   background: transparent;
+  border: 0;
   box-shadow: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.thread-status-dot.is-agent-marker.is-antigravity {
+  color: #a78bfa;
+}
+
+.thread-status-dot.is-agent-marker.is-codex {
+  color: #34d399;
+}
+
+.thread-status-dot.is-agent-marker.is-claude {
+  color: #fbbf24;
+}
+
+.thread-status-dot.is-agent-marker.is-grok {
+  color: #38bdf8;
+}
+
+.thread-status-dot.is-agent-marker svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  transform-origin: center;
+}
+
+.thread-status-dot.is-agent-marker.is-done {
+  width: 16px;
+  height: 16px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  opacity: 0.78;
+}
+
+.thread-item:hover .thread-status-dot.is-agent-marker.is-done,
+.thread-item.is-selected .thread-status-dot.is-agent-marker.is-done {
+  opacity: 1;
+}
+
+.thread-status-dot.is-agent-marker.is-done.is-recent {
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid #4c8dff;
+  background: rgba(76, 141, 255, 0.14);
+  box-shadow: 0 0 0 2px rgba(76, 141, 255, 0.15), 0 0 8px rgba(76, 141, 255, 0.45);
+  opacity: 1;
+}
+
+.thread-status-dot.is-agent-marker.is-done.is-recent svg {
+  width: 10px;
+  height: 10px;
+}
+
+.thread-status-dot.is-agent-marker.is-pending {
+  width: 17px;
+  height: 17px;
+  border: 1.5px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.14);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.45);
+  animation: acPendingPulse 1.6s var(--ease-spring, ease-in-out) infinite;
+}
+
+.thread-status-dot.is-agent-marker.is-pending svg {
+  width: 10px;
+  height: 10px;
+}
+
+.thread-status-dot.is-live.is-agent-live {
+  width: 16px;
+  height: 16px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
 }
 
 .thread-status-dot.is-live.is-agent-live::after {
