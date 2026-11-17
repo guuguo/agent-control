@@ -21,6 +21,7 @@ import { ExecutionStats } from "./execution-stats.mjs";
 import { ForkStore, buildForkContextPrompt, stripForkContextPrefix } from "./fork-store.mjs";
 import { isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
+import { CliMaintenanceManager } from "./providers/cli-maintenance.mjs";
 import { QoderProvider } from "./providers/qoder-provider.mjs";
 import { isTurboPermissionMode, normalizePermissionMode } from "./permissions.mjs";
 import { isSubpathOrEqual, isUserHomePath, resolveUserHome } from "./platform.mjs";
@@ -589,6 +590,8 @@ export class ProviderHub {
   #env;
   #callLightweightProfileAi = null;
   #autoAliasInFlight = new Set();
+  #cliMaintenance;
+  #autoMaintainClis = false;
   #closed = false;
 
   constructor({
@@ -600,6 +603,8 @@ export class ProviderHub {
     inflightStore = null,
     quotaService = null,
     telemetryService = null,
+    cliMaintenance = null,
+    autoMaintainClis = null,
     enableQueueDrain = true,
     callLightweightProfileAi = null,
   } = {}) {
@@ -633,6 +638,13 @@ export class ProviderHub {
       },
     });
     this.#telemetry = telemetryService || new AgentTelemetryService({ env });
+    this.#autoMaintainClis = typeof autoMaintainClis === "boolean"
+      ? autoMaintainClis
+      : (!Array.isArray(providers) && env.AGENT_CONTROL_AUTO_INSTALL_CLI !== "0");
+    this.#cliMaintenance = cliMaintenance || new CliMaintenanceManager({
+      env,
+      onUpdated: () => this.refreshProfiles(),
+    });
     for (const provider of list) {
       if (Array.isArray(providers)) {
         provider.setCallbacks?.({ onEvent: emitEvent, onServerRequest: emitServerRequest });
@@ -1393,13 +1405,32 @@ export class ProviderHub {
       || profiles.find((p) => p.installed)
       || profiles[0]
       || null;
+    if (this.#autoMaintainClis && this.#cliMaintenance) {
+      this.#cliMaintenance.ensureMissingClis(profiles);
+    }
+    const cliStatus = this.#cliMaintenance ? this.#cliMaintenance.inspect(profiles) : {};
     return {
       providers,
       profiles,
+      cliStatus,
       defaultProvider: defaultProfile?.provider || "codex",
       defaultProfileId: defaultProfile?.id || "default",
       quotasUpdatedAt: quotaResult?.updatedAt || null,
     };
+  }
+
+  async getCliStatus() {
+    let rawProfiles = this.#cachedRawProfiles;
+    if (!Array.isArray(rawProfiles)) {
+      const groups = await this.#collectProfileGroups().catch(() => []);
+      rawProfiles = groups.flatMap((g) => g.profiles);
+    }
+    return this.#cliMaintenance ? this.#cliMaintenance.inspect(rawProfiles) : {};
+  }
+
+  async repairCli(provider, { force = true } = {}) {
+    if (!this.#cliMaintenance) throw new Error("CLI maintenance unavailable");
+    return this.#cliMaintenance.installCli(provider, { force });
   }
 
   getExecutionStats(options = {}) {

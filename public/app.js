@@ -1,5 +1,13 @@
 import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117qoder";
-import { loadHiddenProviderTabs, saveHiddenProviderTabs, renderProviderTabsHtml, renderProviderTabsSettingsHtml, visibleProviderFilter } from "./provider-tabs.js?v=20261117qoder";
+import {
+  computeDefaultHiddenProviderTabs,
+  hasSavedProviderTabsPref,
+  loadHiddenProviderTabs,
+  saveHiddenProviderTabs,
+  renderProviderTabsHtml,
+  renderProviderTabsSettingsHtml,
+  visibleProviderFilter,
+} from "./provider-tabs.js?v=20261118tabs";
 import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117qoder";
 import {
   extractGoalDirective,
@@ -467,6 +475,7 @@ const state = {
   threads: [],
   projectsMeta: {},
   warnings: [],
+  cliStatus: {},
   providerFilter: "all",
   hiddenProviderTabs: loadHiddenProviderTabs(),
   profileFilter: "all",
@@ -563,6 +572,7 @@ const state = {
     isMuted: false,
     isRecording: false,
     isSpeaking: false,
+    speakingStartedAt: 0,
     isProcessing: false,
     audioCtx: null,
     micStream: null,
@@ -741,7 +751,9 @@ function syncThreadSummaryIntoList(thread) {
   if (!target) return;
   if (typeof thread.live === "boolean") target.live = thread.live;
   if (typeof thread.queuedCount === "number") target.queuedCount = thread.queuedCount;
-  if (thread.updatedAt) target.updatedAt = thread.updatedAt;
+  if (Number(thread.updatedAt) > Number(target.updatedAt || 0)) {
+    target.updatedAt = Number(thread.updatedAt);
+  }
   if (thread.title) target.title = thread.title;
   if (thread.preview) target.preview = thread.preview;
 }
@@ -2207,6 +2219,67 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
       }
     }
   });
+}
+
+let cliMaintenancePollTimer = 0;
+
+function renderCliMaintenanceBanner() {
+  const el = $("cliMaintenanceBanner");
+  if (!el) return;
+  const items = Object.values(state.cliStatus || {}).filter(
+    (item) => item && ["installing", "missing_auto", "error", "missing_manual"].includes(item.status),
+  );
+  if (!items.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    if (cliMaintenancePollTimer) {
+      clearTimeout(cliMaintenancePollTimer);
+      cliMaintenancePollTimer = 0;
+    }
+    return;
+  }
+
+  el.hidden = false;
+  el.innerHTML = items.map((item) => {
+    const isBusy = item.status === "installing" || item.status === "missing_auto";
+    const isError = item.status === "error";
+    const statusText = isBusy
+      ? `正在后台安装 ${escapeHtml(item.label || item.provider)}...`
+      : isError
+        ? `${escapeHtml(item.label || item.provider)} 安装失败`
+        : `${escapeHtml(item.label || item.provider)} 未检测到命令行`;
+    const descText = isBusy
+      ? "检测到登录态有效，正在后台静默安装，完成后即可直接使用。"
+      : escapeHtml(item.lastError || item.manualHint || "");
+    const actionHtml = !isBusy && item.autoInstallable
+      ? `<button type="button" class="cli-maintenance-retry" data-cli-retry="${escapeHtml(item.provider)}">重试安装</button>`
+      : "";
+    const progressHtml = isBusy ? `<div class="cli-maintenance-progress" aria-hidden="true"></div>` : "";
+    return `<div class="cli-maintenance-item">
+      <div class="cli-maintenance-row">
+        <span class="cli-maintenance-title">${statusText}</span>
+        ${actionHtml}
+      </div>
+      ${progressHtml}
+      ${descText ? `<div class="cli-maintenance-desc">${descText}</div>` : ""}
+    </div>`;
+  }).join("");
+
+  const hasBusy = items.some((item) => item.status === "installing" || item.status === "missing_auto");
+  if (hasBusy && !cliMaintenancePollTimer) {
+    cliMaintenancePollTimer = setTimeout(async () => {
+      cliMaintenancePollTimer = 0;
+      try {
+        const res = await apiGet("api/cli/status");
+        if (res?.cliStatus) {
+          state.cliStatus = res.cliStatus;
+          renderCliMaintenanceBanner();
+          const stillBusy = Object.values(state.cliStatus).some((i) => i?.status === "installing" || i?.status === "missing_auto");
+          if (!stillBusy) void loadProviders();
+        }
+      } catch {}
+    }, 2500);
+  }
 }
 
 function renderThreadList() {
@@ -3755,6 +3828,12 @@ async function refreshProviders() {
     state.defaultProfileId = resolvedProv.defaultProfileId || (state.defaultProvider === "antigravity" ? (agyAvailable?.id || "desktop") : "default");
   }
   if (resolvedProv.label) $("hostBadge").textContent = resolvedProv.label;
+  state.cliStatus = resolvedProv.cliStatus || {};
+  renderCliMaintenanceBanner();
+  if (!hasSavedProviderTabsPref()) {
+    state.hiddenProviderTabs = computeDefaultHiddenProviderTabs(state.profiles);
+    state.providerFilter = visibleProviderFilter(state.providerFilter, state.hiddenProviderTabs);
+  }
   syncProfileSelectors();
 }
 
@@ -3813,7 +3892,7 @@ function markThreadUnread(threadId, { status = "completed", summary = "", update
 }
 
 function markThreadRead(threadId, updatedAtSec = 0) {
-  if (!threadId) return;
+  if (!threadId) return false;
   const hadUnread = state.recentCompletedByThread.has(threadId) || Boolean(threadReadState.unreadById[threadId]);
   state.recentCompletedByThread.delete(threadId);
   delete threadReadState.unreadById[threadId];
@@ -3823,6 +3902,7 @@ function markThreadRead(threadId, updatedAtSec = 0) {
     threadReadState.seenById[threadId] = nextSeen;
     persistThreadReadState();
   }
+  return hadUnread;
 }
 
 function reconcileThreadStatusTrackers(prevThreads = [], nextThreads = []) {
@@ -3862,7 +3942,7 @@ function reconcileThreadStatusTrackers(prevThreads = [], nextThreads = []) {
     const prev = prevById.get(t.id);
     const seenAt = Number(threadReadState.seenById[t.id] || 0);
     const finishedFromLive = Boolean(prev?.live);
-    const updatedSincePrev = Boolean(prev && updatedAt > Number(prev.updatedAt || 0));
+    const updatedSincePrev = Boolean(prev && updatedAt > Number(prev.updatedAt || 0) && (!seenAt || updatedAt > seenAt));
     const updatedSinceSeen = Boolean(seenAt > 0 && updatedAt > seenAt);
     const freshOnInitialLoad = Boolean(
       !threadReadState.initialized
@@ -4274,12 +4354,15 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   }
 
   const cachedSummary = state.threads.find((t) => t.id === compositeId);
-  markThreadRead(compositeId, cachedSummary?.updatedAt || 0);
+  const clearedUnreadOnOpen = markThreadRead(compositeId, cachedSummary?.updatedAt || 0);
   if (cachedSummary?.cwd) {
     setSidebarGroupManualPref(cachedSummary.cwd, "expand");
   }
 
   const isSwitchingThread = compositeId !== prevThreadId || !state.activeThread;
+  if (!isSwitchingThread && clearedUnreadOnOpen) {
+    renderThreadList();
+  }
   if (isSwitchingThread) {
     resetTurnListRenderCache();
     resetDeferredImageObserver({ resetRevealed: false });
@@ -4661,6 +4744,14 @@ function applyProfileSnapshotPayload(payload = {}) {
   if (Array.isArray(payload.profiles)) state.profiles = payload.profiles;
   if (payload.defaultProvider) state.defaultProvider = payload.defaultProvider;
   if (payload.defaultProfileId) state.defaultProfileId = payload.defaultProfileId;
+  if (payload.cliStatus && typeof payload.cliStatus === "object") {
+    state.cliStatus = payload.cliStatus;
+    renderCliMaintenanceBanner();
+  }
+  if (!hasSavedProviderTabsPref()) {
+    state.hiddenProviderTabs = computeDefaultHiddenProviderTabs(state.profiles);
+    state.providerFilter = visibleProviderFilter(state.providerFilter, state.hiddenProviderTabs);
+  }
   syncProfileSelectors();
   renderTopbarAndControls();
   renderThreadList();
@@ -6550,6 +6641,7 @@ function stopVoicePlayback({ scheduleResume = false, abortReason = "superseded" 
   state.voice.isSpeaking = false;
   if (state.voice.audioEl) {
     try {
+      state.voice.audioEl.volume = 1;
       state.voice.audioEl.onplaying = null;
       state.voice.audioEl.ontimeupdate = null;
       state.voice.audioEl.onended = null;
@@ -7073,8 +7165,9 @@ async function startVoiceCallMicPipeline() {
     });
 
     processor.onaudioprocess = (ev) => {
-      state.voice.lastAudioFrameAt = Date.now();
-      if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking) {
+      const nowMs = Date.now();
+      state.voice.lastAudioFrameAt = nowMs;
+      if (!state.voice.callActive || state.voice.isMuted) {
         state.voice.currentRms = 0;
         return;
       }
@@ -7101,22 +7194,51 @@ async function startVoiceCallMicPipeline() {
           }
           return;
         }
-        const rms = computeRmsLevel(input);
-        state.voice.currentRms = rms;
+        const rawRms = computeRmsLevel(input);
+        const speakingNow = Boolean(state.voice.isSpeaking);
+        if (speakingNow && state.voice.speakingStartedAt > 0 && (nowMs - state.voice.speakingStartedAt) < 350) {
+          state.voice.currentRms = 0;
+          return;
+        }
+        // Full-duplex echo guard: while bot is speaking, attenuate residual speaker leakage below 0.035 unless already recording user speech.
+        const effectiveRms = (speakingNow && !state.voice.isRecording && rawRms < 0.035) ? 0 : rawRms;
+        state.voice.currentRms = effectiveRms;
         const int16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-        const evt = detector.pushSamples(int16, rms);
+        const evt = detector.pushSamples(int16, effectiveRms);
         if (evt.type === "speech_start") {
           state.voice.isRecording = true;
+          state.voice.bargeInActiveSamples = speakingNow ? int16.length : 0;
+          if (speakingNow && state.voice.audioEl) {
+            try { state.voice.audioEl.volume = 0.25; } catch {}
+          }
           renderVoiceCallUi();
         } else if (evt.type === "utterance") {
           state.voice.isRecording = false;
+          state.voice.bargeInActiveSamples = 0;
           state.voice.currentRms = 0;
+          if (state.voice.isSpeaking && typeof stopVoicePlayback === "function") {
+            stopVoicePlayback({ scheduleResume: false, abortReason: "user_barge_in" });
+          }
           const wavBytes = encodePcm16SamplesToWav(evt.samples, 16000);
           void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
         } else if (evt.type === "discarded_short" || evt.type === "discarded_noise") {
           state.voice.isRecording = false;
+          state.voice.bargeInActiveSamples = 0;
           state.voice.currentRms = 0;
+          if (state.voice.audioEl) {
+            try { state.voice.audioEl.volume = 1; } catch {}
+          }
           renderVoiceCallUi();
+        } else if (speakingNow && state.voice.isRecording) {
+          const sustainThreshold = Math.max(0.02, Number(detector?.threshold) || 0);
+          if (effectiveRms >= sustainThreshold) {
+            state.voice.bargeInActiveSamples = (state.voice.bargeInActiveSamples || 0) + int16.length;
+          }
+          // After ~200ms of sustained user speech following speech_start (3200 samples @ 16kHz, ~340ms total onset), interrupt bot playback immediately while keeping VAD recording active so pre-barge-in speech is preserved.
+          if ((state.voice.bargeInActiveSamples || 0) >= 3200 && typeof stopVoicePlayback === "function") {
+            state.voice.bargeInActiveSamples = 0;
+            stopVoicePlayback({ scheduleResume: false, abortReason: "user_barge_in" });
+          }
         }
       } catch {
         state.voice.currentRms = 0;
@@ -7387,8 +7509,11 @@ async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0, playbackTok
 
   let audioBuffer = null;
   try {
-    if (ctx.state === "suspended") {
-      await ctx.resume().catch(() => {});
+    if (ctx.state === "suspended" || ctx.state === "interrupted") {
+      await Promise.race([
+        ctx.resume().catch(() => {}),
+        new Promise((r) => setTimeout(r, 1200)),
+      ]);
     }
     if (ctx.state !== "running" || playbackToken !== state.voice.playbackToken) {
       return null;
@@ -7602,7 +7727,7 @@ function playAudioBufferViaElement(tts, text, expectedMs = 0, playbackToken = st
         try { audio.pause(); } catch {}
         finish({ outcome: "error", reason: "stalled" });
       }
-    }, 3000);
+    }, 5000);
 
     endTimer = setTimeout(() => {
       if (!settled) {
@@ -7612,7 +7737,12 @@ function playAudioBufferViaElement(tts, text, expectedMs = 0, playbackToken = st
     }, Math.max(8000, effExpected + 8000));
 
     audio.src = url;
-    audio.play().catch((err) => {
+    try {
+      audio.currentTime = 0;
+    } catch {}
+    audio.play().then(() => {
+      if (!settled) markPlaying();
+    }).catch((err) => {
       const msg = `${err?.name || ""} ${err?.message || ""}`;
       const isAutoplay = /NotAllowedError|autoplay|gesture|interact/i.test(msg);
       finish({ outcome: "error", reason: isAutoplay ? "autoplay_blocked" : "playback_failed" });
@@ -7645,6 +7775,10 @@ async function playVoiceTtsResult({
 
   updateVoiceTranscriptEntry(effUtteranceId, { deliveryStatus: "playing", deliveryReason: "" });
   state.voice.isSpeaking = true;
+  state.voice.speakingStartedAt = Date.now();
+  if (state.voice.audioEl) {
+    try { state.voice.audioEl.volume = 1; } catch {}
+  }
   state.voice.vadDetector?.reset?.();
   renderVoiceCallUi();
 
@@ -7652,8 +7786,14 @@ async function playVoiceTtsResult({
   let lastProvider = norm.provider || "none";
 
   if (norm.hasAudio) {
-    const rawAudio = (await playAudioBufferViaWebAudio(norm, clean, norm.expectedMs, myToken))
-      || (await playAudioBufferViaElement(norm, clean, norm.expectedMs, myToken));
+    let rawAudio = await playAudioBufferViaElement(norm, clean, norm.expectedMs, myToken);
+    if (
+      myToken === state.voice.playbackToken
+      && (!rawAudio || (rawAudio.outcome === "error" && rawAudio.reason !== "autoplay_blocked"))
+    ) {
+      const webAudioRes = await playAudioBufferViaWebAudio(norm, clean, norm.expectedMs, myToken);
+      if (webAudioRes) rawAudio = webAudioRes;
+    }
     if (myToken !== state.voice.playbackToken) {
       return { status: "interrupted", heard: false, reason: "superseded", playedMs: 0, expectedMs: norm.expectedMs, utteranceId: effUtteranceId };
     }
@@ -7694,8 +7834,14 @@ async function playVoiceTtsResult({
     if (offlineTts?.hasAudio) {
       if (!norm.hasAudio) updateVoiceTranscriptEntry(effUtteranceId, { ttsCache: offlineTts });
       lastProvider = offlineTts.provider || "macos-say";
-      const rawOffline = (await playAudioBufferViaWebAudio(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken))
-        || (await playAudioBufferViaElement(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken));
+      let rawOffline = await playAudioBufferViaElement(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken);
+      if (
+        myToken === state.voice.playbackToken
+        && (!rawOffline || (rawOffline.outcome === "error" && rawOffline.reason !== "autoplay_blocked"))
+      ) {
+        const webAudioOff = await playAudioBufferViaWebAudio(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken);
+        if (webAudioOff) rawOffline = webAudioOff;
+      }
       if (myToken !== state.voice.playbackToken) {
         return { status: "interrupted", heard: false, reason: "superseded", playedMs: 0, expectedMs: norm.expectedMs, utteranceId: effUtteranceId };
       }
@@ -8041,13 +8187,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
     clearApprovalVoiceReminder();
   }
   if (state.voice.backendMissing) {
-    appendVoiceTranscriptEntry({
-      id: nextVoiceUtteranceId("unavailable"),
-      heardText: transcriptText,
-      spokenReply: "语音理解服务暂不可用，未执行任何操作，请检查本机服务。",
-      actionTag: "模型未处理",
-    });
-    return;
+    state.voice.backendMissing = false;
   }
 
   state.voice.isProcessing = true;
@@ -8080,6 +8220,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
       asyncDispatch: true,
       tts: true,
     });
+    state.voice.backendMissing = false;
     clearVoiceProcessingStageTimer();
     if (res?.asrEngine) state.voice.asrEngine = res.asrEngine;
     if (res?.noSpeech) {
@@ -8662,10 +8803,72 @@ function bindEvents() {
   $("menuBtn").addEventListener("click", () => setSidebarOpen(true));
   $("sidebarBackdrop").addEventListener("click", () => setSidebarOpen(false));
 
+  const setProviderTabsSettingsOpen = (open) => {
+    const panel = $("providerTabsSettings");
+    if (!panel) return;
+    panel.hidden = !open;
+  };
+  let providerTabsLongPressTimer = 0;
+  let providerTabsLongPressOrigin = null;
+  let suppressNextProviderTabClick = false;
+  const clearProviderTabsLongPress = () => {
+    if (providerTabsLongPressTimer) {
+      clearTimeout(providerTabsLongPressTimer);
+      providerTabsLongPressTimer = 0;
+    }
+    providerTabsLongPressOrigin = null;
+  };
+  $("providerTabs").addEventListener("pointerdown", (e) => {
+    if (e.button && e.button !== 0) return;
+    clearProviderTabsLongPress();
+    providerTabsLongPressOrigin = { x: e.clientX, y: e.clientY };
+    providerTabsLongPressTimer = setTimeout(() => {
+      providerTabsLongPressTimer = 0;
+      suppressNextProviderTabClick = true;
+      setProviderTabsSettingsOpen(true);
+    }, 480);
+  });
+  $("providerTabs").addEventListener("pointermove", (e) => {
+    if (!providerTabsLongPressTimer || !providerTabsLongPressOrigin) return;
+    if (Math.hypot(e.clientX - providerTabsLongPressOrigin.x, e.clientY - providerTabsLongPressOrigin.y) > 8) {
+      clearProviderTabsLongPress();
+    }
+  });
+  $("providerTabs").addEventListener("pointerup", clearProviderTabsLongPress);
+  $("providerTabs").addEventListener("pointercancel", clearProviderTabsLongPress);
+  $("providerTabs").addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    clearProviderTabsLongPress();
+    setProviderTabsSettingsOpen($("providerTabsSettings")?.hidden);
+  });
+  $("providerTabs").addEventListener("wheel", (e) => {
+    const el = $("providerTabs");
+    if (!el || el.scrollWidth <= el.clientWidth) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    }
+  }, { passive: false });
   $("providerTabs").addEventListener("click", (e) => {
+    if (suppressNextProviderTabClick) {
+      suppressNextProviderTabClick = false;
+      e.preventDefault();
+      return;
+    }
     const btn = e.target.closest("[data-provider]");
     if (!btn) return;
     setProviderFilter(btn.dataset.provider);
+  });
+  document.addEventListener("pointerdown", (e) => {
+    const panel = $("providerTabsSettings");
+    if (!panel || panel.hidden) return;
+    if (panel.contains(e.target)) return;
+    setProviderTabsSettingsOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const panel = $("providerTabsSettings");
+    if (panel && !panel.hidden) setProviderTabsSettingsOpen(false);
   });
   $("providerTabsSettingsMenu").addEventListener("change", (e) => {
     const input = e.target.closest("[data-provider-tab-visible]");
@@ -8681,6 +8884,25 @@ function bindEvents() {
     state.hiddenProviderTabs = [];
     saveHiddenProviderTabs([]);
     setProviderFilter(state.providerFilter);
+    const panel = $("providerTabsSettings");
+    if (panel) panel.hidden = true;
+  });
+
+  $("cliMaintenanceBanner")?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-cli-retry]");
+    if (!btn) return;
+    const provider = btn.dataset.cliRetry;
+    if (!provider) return;
+    if (state.cliStatus?.[provider]) {
+      state.cliStatus[provider] = { ...state.cliStatus[provider], status: "installing", installing: true };
+      renderCliMaintenanceBanner();
+    }
+    try {
+      const res = await apiPost("api/cli/install", { provider, force: true });
+      if (res?.cliStatus) state.cliStatus = res.cliStatus;
+      renderCliMaintenanceBanner();
+      void loadProviders();
+    } catch {}
   });
 
   $("agentQuotaStrip")?.addEventListener("click", (e) => {

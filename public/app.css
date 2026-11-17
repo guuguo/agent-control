@@ -251,6 +251,7 @@ body.is-resizing-sidebar * {
 }
 
 .sidebar-filter-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -262,23 +263,30 @@ body.is-resizing-sidebar * {
   flex: 1;
   min-width: 0;
   display: flex;
+  align-items: center;
   gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+.provider-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .provider-tab {
-  flex: 1;
-  min-width: 0;
+  flex: 1 0 auto;
+  min-width: fit-content;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
-  padding: 5px 3px;
+  padding: 5px 8px;
   border-radius: 7px;
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 500;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   transition: background 0.15s, color 0.15s;
 }
 
@@ -293,12 +301,10 @@ body.is-resizing-sidebar * {
   color: var(--text);
 }
 
-.provider-tab[data-provider="all"] { flex: 0 0 auto; padding-inline: 6px; }
-.provider-tabs-settings { position: relative; flex-shrink: 0; }
-.provider-tabs-settings > summary { display: flex; padding: 6px; color: var(--text-muted); cursor: pointer; list-style: none; border-radius: 6px; }
-.provider-tabs-settings > summary::-webkit-details-marker { display: none; }
-.provider-tabs-settings[open] > summary, .provider-tabs-settings > summary:hover { color: var(--text); background: var(--bg-hover); }
-.provider-tabs-settings-menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 50; width: 205px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-surface); box-shadow: 0 10px 30px #0006; }
+.provider-tab[data-provider="all"] { flex: 0 0 auto; padding-inline: 8px; }
+.provider-tabs-settings { position: absolute; top: calc(100% + 4px); left: 10px; z-index: 60; }
+.provider-tabs-settings[hidden] { display: none; }
+.provider-tabs-settings-menu { width: 205px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-surface); box-shadow: 0 10px 30px #0006; }
 .provider-tabs-settings-menu strong { display: block; font-size: 12px; margin-bottom: 7px; }
 .provider-tabs-settings-menu label { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; cursor: pointer; }
 .provider-tabs-settings-menu input { accent-color: var(--accent); }
@@ -330,6 +336,72 @@ body.is-resizing-sidebar * {
   border-color: rgba(76, 141, 255, 0.55);
   color: #cfe1ff;
 }
+
+.cli-maintenance-banner {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(76, 141, 255, 0.1);
+  border: 1px solid rgba(76, 141, 255, 0.28);
+  color: var(--text);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cli-maintenance-banner[hidden] { display: none; }
+.cli-maintenance-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cli-maintenance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cli-maintenance-title {
+  font-weight: 500;
+  font-size: 11.5px;
+}
+.cli-maintenance-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  word-break: break-word;
+}
+.cli-maintenance-progress {
+  position: relative;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.cli-maintenance-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: cli-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes cli-progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+.cli-maintenance-retry {
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--text);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.cli-maintenance-retry:hover { background: var(--bg-hover); }
 
 .thread-warnings {
   margin: 8px 12px 0;

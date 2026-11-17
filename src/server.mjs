@@ -363,6 +363,25 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/cli/status" && request.method === "GET") {
+        const cliStatus = await hub.getCliStatus();
+        sendJson(response, 200, { cliStatus }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/cli/install" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const provider = String(body.provider || "").trim();
+        if (!provider) {
+          sendJson(response, 400, { error: { code: "BAD_REQUEST", message: "provider 不能为空" } }, { requestId });
+          return;
+        }
+        const result = await hub.repairCli(provider, { force: body.force !== false });
+        const cliStatus = await hub.getCliStatus();
+        sendJson(response, 200, { ...result, cliStatus }, { requestId });
+        return;
+      }
+
       if (pathname === "/api/quotas" && request.method === "GET") {
         const refresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
         const quotaSummary = await hub.listQuotas({ refresh });

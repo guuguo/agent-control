@@ -3,6 +3,19 @@ import { PROVIDER_META } from "./instance-switcher.js?v=20261117qoder";
 export const PROVIDER_TABS_PREF_KEY = "agentControl.hiddenProviderTabs.v1";
 const providers = Object.keys(PROVIDER_META).filter((id) => id !== "all");
 
+export function hasSavedProviderTabsPref(storage) {
+  try {
+    return (storage || globalThis.localStorage).getItem(PROVIDER_TABS_PREF_KEY) !== null;
+  } catch { return false; }
+}
+
+export function computeDefaultHiddenProviderTabs(profiles = []) {
+  if (!Array.isArray(profiles) || profiles.length === 0) return [];
+  return providers.filter((id) => !profiles.some(
+    (profile) => profile?.provider === id && Boolean(profile?.account?.signedIn || profile?.authenticated),
+  ));
+}
+
 export function loadHiddenProviderTabs(storage) {
   try {
     const value = JSON.parse((storage || globalThis.localStorage).getItem(PROVIDER_TABS_PREF_KEY) || "[]");

@@ -424,6 +424,7 @@ export function providerCandidatePaths(tool, {
     }
     if (tool === "antigravity") {
       return [
+        p.join(localAppData, "agy", "bin", "agy.exe"),
         p.join(home, ".local", "bin", "agy.cmd"),
         p.join(home, ".local", "bin", "agy.exe"),
         p.join(localAppData, "Programs", "Antigravity", "bin", "agy.cmd"),

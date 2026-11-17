@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
-import { PROVIDER_TABS_PREF_KEY, loadHiddenProviderTabs, saveHiddenProviderTabs, renderProviderTabsHtml, renderProviderTabsSettingsHtml, visibleProviderFilter } from "../public/provider-tabs.js";
+import {
+  PROVIDER_TABS_PREF_KEY,
+  computeDefaultHiddenProviderTabs,
+  hasSavedProviderTabsPref,
+  loadHiddenProviderTabs,
+  saveHiddenProviderTabs,
+  renderProviderTabsHtml,
+  renderProviderTabsSettingsHtml,
+  visibleProviderFilter,
+} from "../public/provider-tabs.js";
 import { renderProviderPillsHtml, resolveModelsForProvider } from "../public/instance-switcher.js";
 
 test("Agent 筛选入口可隐藏并保存，全部固定保留且隐藏选中项回到全部", () => {
@@ -51,4 +60,19 @@ test("页面勾选处理保存显示偏好，隐藏当前 Agent 时重置筛选�
   handlers.click({ target: { closest: () => ({}) } });
   assert.deepEqual(saved, []);
   assert.equal(state.threads.length, 1);
+});
+
+test("未保存偏好时按登录态默认隐藏无账号智能体", () => {
+  const store = new Map();
+  const storage = { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) };
+  assert.equal(hasSavedProviderTabsPref(storage), false);
+  const hidden = computeDefaultHiddenProviderTabs([
+    { provider: "codex", account: { signedIn: true } },
+    { provider: "claude", account: { signedIn: false } },
+    { provider: "antigravity", account: { signedIn: true } },
+    { provider: "grok", authenticated: true },
+  ]);
+  assert.deepEqual(hidden, ["claude", "qoder"]);
+  saveHiddenProviderTabs(hidden, storage);
+  assert.equal(hasSavedProviderTabsPref(storage), true);
 });
