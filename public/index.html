@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261116quota" />
+  <meta name="ac-ui-version" content="20261117draft" />
   <title>Agent Control · 多智能体远程控制台</title>
-  <link rel="stylesheet" href="./app.css?v=20261116quota" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261116quota" />
+  <link rel="stylesheet" href="./app.css?v=20261117draft" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261117draft" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -127,6 +127,10 @@
               <button type="button" id="toggleThreadImagesBtn" class="btn-secondary btn-sm" hidden>加载本会话预览图</button>
               <button type="button" id="archiveThreadBtn" class="btn-secondary btn-sm" hidden>归档</button>
               <button type="button" id="refreshThreadBtn" class="btn-secondary btn-sm" title="刷新当前视图">刷新</button>
+              <button type="button" id="openAutomationsModalBtn" class="btn-secondary btn-sm topbar-update-menu-btn" title="查看与托管各个 Agent 的定时计划任务">
+                <span>定时任务</span>
+                <span id="topbarMenuAutomationsBadge" class="menu-update-badge" hidden>0</span>
+              </button>
               <button type="button" id="openUpdateModalBtn" class="btn-secondary btn-sm topbar-update-menu-btn" title="检查版本更新与设置自动更新">
                 <span>版本与更新</span>
                 <span id="topbarMenuUpdateBadge" class="menu-update-badge" hidden>新</span>
@@ -136,6 +140,7 @@
         </div>
       </header>
 
+      <div id="telemetryBackdrop" class="telemetry-backdrop" hidden aria-hidden="true"></div>
       <div id="agentTelemetryBar" class="agent-telemetry-bar" aria-label="智能体实时运行与额度监控"></div>
       <div id="projectTaskStrip" class="project-task-strip" hidden></div>
 
@@ -161,6 +166,7 @@
       <div id="queuedTurnsBar" class="queued-turns-bar" hidden></div>
 
       <footer id="composerArea" class="composer-area" hidden>
+        <div id="slashCommandMenu" class="slash-command-menu" role="listbox" hidden></div>
         <div id="composerStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
         <div id="composerEditBanner" class="composer-edit-banner" hidden></div>
         <div id="composerImages" class="composer-images" hidden></div>
@@ -184,6 +190,10 @@
               <button type="button" id="composerVoiceBtn" class="btn-secondary btn-xs composer-icon-btn composer-voice-btn" title="语音输入转文字（点击开始/停止）" aria-pressed="false">
                 <span id="composerVoiceIcon" class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
                 <span id="composerVoiceLabel" class="btn-label-desktop">语音</span>
+              </button>
+              <button type="button" id="composerSlashBtn" class="btn-secondary btn-xs composer-icon-btn composer-slash-btn" title="插入常用指令 (/)" aria-expanded="false">
+                <span class="composer-slash-glyph" aria-hidden="true">/</span>
+                <span class="btn-label-desktop">指令</span>
               </button>
               <button type="button" id="composerConfigBtn" class="composer-config-chip tone-turbo mobile-only" aria-expanded="false" title="模型、权限与高级参数设置">
                 <span id="cfgChipPermIcon" class="cfg-chip-perm" data-icon="bolt" data-icon-size="12" aria-hidden="true"></span>
@@ -477,6 +487,17 @@
         </div>
       </div>
 
+      <div id="voiceScopeBar" class="voice-scope-bar" role="tablist" aria-label="语音通话模式">
+        <button type="button" id="voiceScopeThreadBtn" class="voice-scope-pill" data-voice-scope="thread" title="仅针对当前对话极速回复或派发任务">
+          <span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span>
+          <span id="voiceScopeThreadLabel">当前对话</span>
+        </button>
+        <button type="button" id="voiceScopeGlobalBtn" class="voice-scope-pill is-active" data-voice-scope="global" title="跨项目查询进展、切换会话与全局派单">
+          <span class="btn-icon-glyph" data-icon="radio" data-icon-size="12" aria-hidden="true"></span>
+          <span>全局总控</span>
+        </button>
+      </div>
+
       <div class="voice-call-body">
         <div class="voice-call-stage">
           <div class="voice-orb-wrap">
@@ -494,7 +515,7 @@
 
         <section id="voiceLiveProgressSection" class="voice-progress-section" aria-label="实时任务动态">
           <div class="voice-progress-head">
-            <span class="voice-progress-heading"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> 实时任务动态</span>
+            <span class="voice-progress-heading"><span class="btn-icon-glyph" data-icon="radio" data-icon-size="13" aria-hidden="true"></span> <span id="voiceProgressHeadingText">实时任务动态</span></span>
             <span id="voiceLiveSummaryBadge" class="voice-live-summary-badge">实时同步</span>
           </div>
           <div id="voiceLiveProgressList" class="voice-live-progress-list"></div>
@@ -540,12 +561,13 @@
           <span id="imagePreviewMeta" class="image-preview-meta" hidden></span>
         </div>
         <div class="image-preview-actions">
+          <button type="button" id="imagePreviewZoomBtn" class="btn-secondary btn-xs" title="重置缩放" hidden>100%</button>
           <button type="button" id="imagePreviewLoadRawBtn" class="btn-secondary btn-xs" hidden>加载原图</button>
           <a id="imagePreviewOpenRaw" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>原图新窗</a>
           <button type="button" class="icon-btn" data-close-modal="imagePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
         </div>
       </div>
-      <div class="image-preview-stage">
+      <div id="imagePreviewStage" class="image-preview-stage">
         <img id="imagePreviewImg" src="" alt="图片预览" />
       </div>
     </div>
@@ -632,6 +654,80 @@
     </div>
   </dialog>
 
-  <script type="module" src="./app.js?v=20261116quota"></script>
+  <dialog id="automationsModal" class="modal-dialog" aria-label="Agent 定时任务托管">
+    <div class="modal-card automations-modal-card">
+      <div class="modal-head">
+        <h3>Agent 定时任务与后台唤起</h3>
+        <button type="button" class="icon-btn" data-close-modal="automationsModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body automations-modal-body">
+        <section class="tunnel-card">
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="clock" data-icon-size="13" aria-hidden="true"></span> 后台自动唤起托管</strong>
+            <span id="automationsSummaryBadge" class="tunnel-state-pill">加载中…</span>
+          </div>
+          <label class="update-toggle-row">
+            <input id="automationsGlobalToggle" type="checkbox" checked />
+            <span class="update-toggle-copy">
+              <strong>原 App 未开启时，由 Agent Control 到点自动唤起执行</strong>
+              <small>每 30 秒检查一次 Codex / Claude / 自定义计划任务；若原客户端已运行过则自动跳过，绝不重复触发或篡改原库。</small>
+            </span>
+          </label>
+          <div id="automationsStatusBar" class="composer-status" role="status" aria-live="polite" hidden></div>
+        </section>
+
+        <details id="automationCreateDetails" class="tunnel-card">
+          <summary class="automation-create-summary">+ 新建通用定时任务（支持 Codex / Claude / Antigravity / Grok）</summary>
+          <form id="automationCreateForm" class="automation-create-form">
+            <label class="field">
+              <span>任务名称</span>
+              <input id="autoNameInput" type="text" placeholder="例如：每天早报 / 自动巡检日志" />
+            </label>
+            <div class="automation-form-row">
+              <label class="field">
+                <span>智能体</span>
+                <select id="autoProviderSelect">
+                  <option value="codex">Codex</option>
+                  <option value="claude">Claude Code</option>
+                  <option value="antigravity">Antigravity</option>
+                  <option value="grok">Grok</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>执行周期</span>
+                <select id="autoScheduleSelect">
+                  <option value="FREQ=HOURLY;INTERVAL=1;BYMINUTE=0">每小时整点</option>
+                  <option value="FREQ=MINUTELY;INTERVAL=30">每 30 分钟</option>
+                  <option value="FREQ=DAILY;BYHOUR=9;BYMINUTE=0" selected>每天 09:00</option>
+                  <option value="FREQ=DAILY;BYHOUR=21;BYMINUTE=0">每天 21:00</option>
+                  <option value="FREQ=WEEKLY;BYDAY=MO,WE,FR;BYHOUR=10;BYMINUTE=0">每周一/三/五 10:00</option>
+                </select>
+              </label>
+            </div>
+            <label class="field">
+              <span>工作目录</span>
+              <input id="autoCwdInput" type="text" placeholder="留空使用用户主目录" />
+            </label>
+            <label class="field">
+              <span>执行指令</span>
+              <textarea id="autoPromptInput" rows="3" placeholder="到点时自动发送给智能体的指令…" required></textarea>
+            </label>
+            <div class="automation-form-actions">
+              <button type="submit" class="btn-primary btn-sm">保存并启用托管</button>
+            </div>
+          </form>
+        </details>
+
+        <div id="automationsList" class="automations-list">
+          <div class="empty-state">正在扫描本机定时任务…</div>
+        </div>
+      </div>
+      <div class="modal-foot update-modal-foot">
+        <button type="button" id="refreshAutomationsBtn" class="btn-secondary btn-sm">刷新列表</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./app.js?v=20261117draft"></script>
 </body>
 </html>

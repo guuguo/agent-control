@@ -143,11 +143,16 @@ export function renderQueuedTurnsPanelHtml(items = [], { collapsed = false, edit
             `
             : `<span class="queued-readonly-hint" title="本地客户端原生排队，请在对应客户端中编辑或取消">只读</span>`;
 
+          const blockedHtml = item.blockedReason
+            ? `<div class="queued-item-blocked" title="${escapeQueuedHtml(item.blockedReason)}">${escapeQueuedHtml(item.blockedReason)}</div>`
+            : "";
+
           return `
             <div class="queued-item ${isControl ? "is-control" : "is-native"}${isEditing ? " is-editing" : ""}" data-queue-id="${escapeQueuedHtml(item.id)}">
               <span class="queued-item-index" aria-hidden="true">${pos}</span>
               <div class="queued-item-body">
                 <div class="queued-item-text" title="${escapeQueuedHtml(rawText || displayText)}">${escapeQueuedHtml(displayText)}</div>
+                ${blockedHtml}
                 <div class="queued-item-meta">${tags.join("")}</div>
               </div>
               <div class="queued-item-actions">${actionsHtml}</div>

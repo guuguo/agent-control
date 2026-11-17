@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -26,13 +26,15 @@ import { discoverAntigravityProfiles } from "./providers/profile-discovery.mjs";
 export const VOICE_CALL_TAG = "[AC_VOICE_CALL]";
 export const DEFAULT_VOICE_TTS_NAME = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_VOICE_HYDROGEN_MODEL = "gemini-4-hydrogen-low";
+export const DEFAULT_VOICE_CLAUDE_MODEL = "claude-sonnet-5-5";
+export const DEFAULT_VOICE_CODEX_MODEL = "gpt-6.1-terra";
 const MAX_ACTIVE_CALL_SESSIONS = 6;
 const MAX_CALL_STATES = 12;
 const MAX_UTTERANCES_PER_CALL = 24;
 const UNHEARD_TTL_MS = 180_000;
 const STALE_PENDING_MS = 15_000;
 const MODEL_CACHE_TTL_MS = 120_000;
-const EDGE_TTS_TIMEOUT_MS = 3_500;
+const EDGE_TTS_TIMEOUT_MS = 6_500;
 const VOICE_PROMPT_TIMEOUT_MS = 60_000;
 
 export function resolveEdgeTtsExecutable(env = process.env, {
@@ -138,7 +140,10 @@ export function pickPreferredHydrogenModel(models = [], preferredOverride = "") 
   ];
   for (const matcher of matchers) {
     const hit = list.find(matcher);
-    if (hit?.id) return hit.id;
+    if (hit?.id) {
+      if (hit.id === "gemini-4-hydrogen") return DEFAULT_VOICE_HYDROGEN_MODEL;
+      return hit.id;
+    }
   }
   return DEFAULT_VOICE_HYDROGEN_MODEL;
 }
@@ -158,17 +163,21 @@ function voiceModelScoreForProvider(provider, item) {
     return 500;
   }
   if (provider === "claude") {
-    if (id === "claude-haiku-5-5") return 960;
-    if (id === "claude-haiku-4-5") return 940;
-    if (text.includes("haiku")) return 920;
-    if (/\b(fast|mini|flash|lite)\b/.test(text)) return 800;
-    if (text.includes("sonnet")) return 600;
-    if (text.includes("opus")) return 250;
+    if (id === "claude-sonnet-5-5") return 980;
+    if (id === "claude-sonnet-4-6") return 960;
+    if (id === "claude-sonnet-4-5") return 950;
+    if (text.includes("sonnet")) return 930;
+    if (text.includes("haiku")) return 820;
+    if (/\b(fast|mini|flash|lite)\b/.test(text)) return 780;
+    if (text.includes("opus") || text.includes("fable")) return 250;
     return 450;
   }
   if (provider === "codex") {
-    if (/\bmini\b/.test(text) && !text.includes("preview")) return 950;
-    if (/\b(mini|spark|nano|fast|lite)\b/.test(text)) return 900;
+    if (id === "gpt-6.1-terra") return 990;
+    if (text.includes("6.1") && text.includes("terra")) return 980;
+    if (text.includes("terra")) return 940;
+    if (/\bmini\b/.test(text) && !text.includes("preview")) return 880;
+    if (/\b(mini|spark|nano|fast|lite)\b/.test(text)) return 850;
     if (effort === "low") return 760;
     if (item?.isDefault) return 680;
     if (/\bmax\b|\bxhigh\b|\bpro\b/.test(text)) return 300;
@@ -202,10 +211,22 @@ export function pickPreferredVoiceModel(provider, models = [], preferredOverride
     const ranked = [...list].sort((a, b) => voiceModelScoreForProvider(prov, b) - voiceModelScoreForProvider(prov, a));
     return ranked[0].id;
   }
-  if (prov === "claude") return "claude-haiku-4-5";
-  if (prov === "codex") return "gpt-5.4-mini";
+  if (prov === "claude") return DEFAULT_VOICE_CLAUDE_MODEL;
+  if (prov === "codex") return DEFAULT_VOICE_CODEX_MODEL;
   if (prov === "grok") return "grok-3-mini";
   return "";
+}
+
+function resolveVoiceEffort(provider, model = "") {
+  const prov = String(provider || "").trim().toLowerCase();
+  if (prov === "claude" || prov === "codex") {
+    return "low";
+  }
+  const cleanModel = String(model || "").trim();
+  if (prov === "antigravity") {
+    return /\b(low|fast|lite)\b|-low\b/i.test(cleanModel) ? "low" : "";
+  }
+  return /\b(low|fast|lite|mini|spark)\b|-low\b/i.test(cleanModel) ? "low" : "";
 }
 
 function voiceProviderDisplayName(provider) {
@@ -228,7 +249,15 @@ function formatVoiceModelShortName(provider, model) {
   const raw = String(model || "").trim();
   if (!raw) return voiceProviderDisplayName(prov);
   if (/hydrogen/i.test(raw)) return "Hydrogen";
-  if (/haiku/i.test(raw)) return raw.replace(/^claude-/i, "").replace(/-(\d)/g, " $1");
+  if (/^gpt-6\.1-terra$/i.test(raw)) return "GPT-6.1 Terra";
+  if (/sonnet/i.test(raw)) {
+    const m = raw.match(/sonnet[-_ ]?(\d+(?:[-.]\d+)?)/i);
+    return m ? `Sonnet ${m[1].replace(/-/g, ".")}` : "Sonnet";
+  }
+  if (/haiku/i.test(raw)) {
+    const m = raw.match(/haiku[-_ ]?(\d+(?:[-.]\d+)?)/i);
+    return m ? `Haiku ${m[1].replace(/-/g, ".")}` : "Haiku";
+  }
   return raw.replace(/^gemini-\d+(?:\.\d+)?-/i, "");
 }
 
@@ -366,12 +395,14 @@ export function analyzeWavPcm16Activity(
   }
 
   const durationMs = Math.round((frameCount / sampleRate) * 1000);
-  const samplesPerWindow = Math.max(1, Math.round((sampleRate * channels * frameMs) / 1000));
+  const windowMs = Math.max(1, Number(frameMs) || 20);
+  const samplesPerWindow = Math.max(1, Math.round((sampleRate * channels * windowMs) / 1000));
   let peak = 0;
   let sumSq = 0;
   let winSumSq = 0;
   let winCount = 0;
   let maxFrameRms = 0;
+  const frameRmsList = [];
 
   for (let i = 0; i < totalSamples; i += 1) {
     const sample = buf.readInt16LE(dataStart + i * 2) / 32768;
@@ -383,6 +414,7 @@ export function analyzeWavPcm16Activity(
     winCount += 1;
     if (winCount >= samplesPerWindow) {
       const frameRms = Math.sqrt(winSumSq / winCount);
+      frameRmsList.push(frameRms);
       if (frameRms > maxFrameRms) maxFrameRms = frameRms;
       winSumSq = 0;
       winCount = 0;
@@ -390,6 +422,7 @@ export function analyzeWavPcm16Activity(
   }
   if (winCount > 0) {
     const frameRms = Math.sqrt(winSumSq / winCount);
+    frameRmsList.push(frameRms);
     if (frameRms > maxFrameRms) maxFrameRms = frameRms;
   }
   const rms = Math.sqrt(sumSq / totalSamples);
@@ -451,6 +484,36 @@ export function analyzeWavPcm16Activity(
       peak,
       maxFrameRms,
     };
+  }
+
+  if (durationMs >= 320 && frameRmsList.length > 0) {
+    const sorted = [...frameRmsList].sort((a, b) => a - b);
+    const p25 = sorted[Math.floor(sorted.length * 0.25)] || 0;
+    const voiceFrameThr = Math.max(minMaxFrameRms, Math.min(0.015, p25 * 2.0));
+    let maxContiguousWindows = 0;
+    let curContiguous = 0;
+    for (const v of frameRmsList) {
+      if (v >= voiceFrameThr) {
+        curContiguous += 1;
+        if (curContiguous > maxContiguousWindows) maxContiguousWindows = curContiguous;
+      } else {
+        curContiguous = 0;
+      }
+    }
+    if (maxContiguousWindows * windowMs < 100) {
+      return {
+        inspected: true,
+        hasSpeech: false,
+        reason: "transient_clicks_only",
+        durationMs,
+        sampleCount: frameCount,
+        sampleRate,
+        channels,
+        rms,
+        peak,
+        maxFrameRms,
+      };
+    }
   }
 
   return {
@@ -520,6 +583,235 @@ function parseCoordinatorJson(rawText = "", fallbackTranscript = "") {
   throw new Error("语音理解模型返回的 JSON 格式无效，未执行任何操作，请重试。");
 }
 
+function normalizeVoiceCallScope(callScope = "", activeThreadId = "") {
+  const raw = String(callScope || "").trim().toLowerCase();
+  if (raw === "thread" && String(activeThreadId || "").trim()) return "thread";
+  return "global";
+}
+
+function parseThreadScopedCoordinatorJson(rawText = "", fallbackTranscript = "", {
+  activeThreadId = "",
+  activeProjectCwd = "",
+  defaultRequestId = "",
+} = {}) {
+  const raw = String(rawText || "").trim();
+  const candidates = [];
+  const unfenced = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  if (unfenced) candidates.push(unfenced);
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    candidates.push(raw.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const actionRaw = String(parsed.action || parsed.intent || "").trim().toLowerCase();
+      const spokenReply = stripSpeechNoise(parsed.spokenReply || "", 360);
+      const heardText = String(parsed.heardText || fallbackTranscript || "").trim();
+      const instruction = String(parsed.instruction || "").trim();
+      const decisionRaw = String(parsed.decision || "").trim().toLowerCase();
+
+      if (actionRaw === "no_speech") {
+        return {
+          heardText: "",
+          intent: "no_speech",
+          noSpeech: true,
+          silenceReason: "model_no_speech",
+          explicitFastHydrogen: false,
+          executionTier: "self_simple",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: "",
+          model: "",
+          dispatchMode: "",
+          instruction: "",
+          requestId: "",
+          decision: "",
+          spokenReply: "",
+        };
+      }
+      if (!spokenReply) continue;
+
+      if (actionRaw === "reply" || actionRaw === "summarize_progress" || actionRaw === "wake_ping") {
+        return {
+          heardText,
+          intent: "summarize_progress",
+          noSpeech: false,
+          silenceReason: "",
+          explicitFastHydrogen: false,
+          executionTier: "self_simple",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: "",
+          model: "",
+          dispatchMode: "",
+          instruction: "",
+          requestId: "",
+          decision: "",
+          spokenReply,
+        };
+      }
+      if (actionRaw === "repeat_last") {
+        return {
+          heardText,
+          intent: "repeat_last",
+          noSpeech: false,
+          silenceReason: "",
+          explicitFastHydrogen: false,
+          executionTier: "self_simple",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: "",
+          model: "",
+          dispatchMode: "",
+          instruction: "",
+          requestId: "",
+          decision: "",
+          spokenReply,
+        };
+      }
+      if (actionRaw === "interrupt" || actionRaw === "interrupt_thread") {
+        return {
+          heardText,
+          intent: "interrupt_thread",
+          noSpeech: false,
+          silenceReason: "",
+          explicitFastHydrogen: false,
+          executionTier: "external_thread",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: "",
+          model: "",
+          dispatchMode: "",
+          instruction: "",
+          requestId: "",
+          decision: "",
+          spokenReply,
+        };
+      }
+      if (actionRaw === "approve" || actionRaw === "approve_request") {
+        return {
+          heardText,
+          intent: "approve_request",
+          noSpeech: false,
+          silenceReason: "",
+          explicitFastHydrogen: false,
+          executionTier: "self_simple",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: "",
+          model: "",
+          dispatchMode: "",
+          instruction: "",
+          requestId: String(parsed.requestId || defaultRequestId || "").trim(),
+          decision: decisionRaw === "decline" ? "decline" : "accept",
+          spokenReply,
+        };
+      }
+      if (actionRaw === "send" || actionRaw === "queue" || actionRaw === "steer" || actionRaw === "send_turn") {
+        const dispatchMode = actionRaw === "steer" || String(parsed.dispatchMode || "").toLowerCase() === "immediate"
+          ? "immediate"
+          : "queue";
+        return {
+          heardText,
+          intent: "send_turn",
+          noSpeech: false,
+          silenceReason: "",
+          explicitFastHydrogen: false,
+          executionTier: "external_thread",
+          targetProjectCwd: activeProjectCwd,
+          targetThreadId: activeThreadId,
+          provider: String(parsed.provider || "").trim(),
+          model: String(parsed.model || "").trim(),
+          dispatchMode,
+          instruction: instruction || heardText,
+          requestId: "",
+          decision: "",
+          spokenReply,
+        };
+      }
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return parseCoordinatorJson(rawText, fallbackTranscript);
+}
+
+function matchDeterministicThreadShortcut(transcriptText = "", snapshot = {}) {
+  const clean = String(transcriptText || "").trim().replace(/[。！？!?.，,、\s]+$/g, "").trim();
+  if (!clean || clean.length > 10) return null;
+  if (/^(?:再说一遍|重播|重播一遍|没听清|重复一遍)$/.test(clean)) {
+    return {
+      heardText: transcriptText,
+      intent: "repeat_last",
+      noSpeech: false,
+      silenceReason: "",
+      explicitFastHydrogen: false,
+      executionTier: "self_simple",
+      targetProjectCwd: snapshot.activeProjectCwd || "",
+      targetThreadId: snapshot.activeThreadId || "",
+      provider: "",
+      model: "",
+      dispatchMode: "",
+      instruction: "",
+      requestId: "",
+      decision: "",
+      spokenReply: "好的，再给你播报一遍。",
+    };
+  }
+  const activeLive = Boolean(snapshot?.currentThread?.live);
+  if (activeLive && /^(?:停一下|停止执行|先停下|先停一下|别跑了|中断任务)$/.test(clean)) {
+    return {
+      heardText: transcriptText,
+      intent: "interrupt_thread",
+      noSpeech: false,
+      silenceReason: "",
+      explicitFastHydrogen: false,
+      executionTier: "external_thread",
+      targetProjectCwd: snapshot.activeProjectCwd || "",
+      targetThreadId: snapshot.activeThreadId || "",
+      provider: "",
+      model: "",
+      dispatchMode: "",
+      instruction: "",
+      requestId: "",
+      decision: "",
+      spokenReply: "好的，马上停止当前对话任务。",
+    };
+  }
+  return null;
+}
+
+function extractCompactRecentTurns(turns = [], maxTurns = 6) {
+  const slice = (Array.isArray(turns) ? turns : []).slice(-maxTurns);
+  return slice.map((turn, idx) => {
+    const users = [];
+    const replies = [];
+    for (const item of turn?.items || []) {
+      if (!item || typeof item !== "object") continue;
+      if (item.type === "userMessage") {
+        const txt = (item.content || [])
+          .filter((p) => p?.type === "text" && typeof p.text === "string")
+          .map((p) => p.text.trim())
+          .filter(Boolean)
+          .join(" ");
+        if (txt) users.push(cleanPreviewText(txt, 220));
+      } else if (item.type === "agentMessage" && item.text) {
+        replies.push(cleanPreviewText(String(item.text), 320));
+      }
+    }
+    return {
+      turnIndex: idx,
+      status: turn?.status || "completed",
+      user: users.join(" / "),
+      assistant: replies.length ? replies[replies.length - 1] : "",
+    };
+  }).filter((t) => t.user || t.assistant);
+}
+
 function pickLatestAssistantText(threadReadResult) {
   const turns = threadReadResult?.thread?.turns || [];
   for (let i = turns.length - 1; i >= 0; i -= 1) {
@@ -587,6 +879,14 @@ export class VoiceCallService {
   #asrReadyPromise = null;
   #asrStdoutBuf = "";
   #asrPending = new Map();
+  #edgeTtsChild = null;
+  #edgeTtsReadyPromise = null;
+  #edgeTtsStdoutBuf = "";
+  #edgeTtsPending = new Map();
+  #kokoroChild = null;
+  #kokoroReadyPromise = null;
+  #kokoroStdoutBuf = "";
+  #kokoroPending = new Map();
   #closed = false;
 
   constructor({
@@ -718,7 +1018,7 @@ export class VoiceCallService {
         model: "",
         label: "自动优选轻量模型",
         shortLabel: "自动轻量",
-        description: "优先使用本机已登录的轻量模型（Hydrogen / Haiku / Mini）",
+        description: "优先使用本机已登录的低延迟模型（Hydrogen / Claude Sonnet 低思考 / GPT-6.1 Terra 低思考）",
       },
     ];
 
@@ -738,7 +1038,7 @@ export class VoiceCallService {
           id: preferredModelId,
           displayName: hit?.displayName || formatVoiceModelShortName(prov, preferredModelId),
           isLight: true,
-          effort: /\b(low|fast|lite|mini|haiku|spark)\b/i.test(preferredModelId) ? "low" : "",
+          effort: resolveVoiceEffort(prov, preferredModelId),
         });
       }
       const ranked = [...rawModels].sort((a, b) => voiceModelScoreForProvider(prov, b) - voiceModelScoreForProvider(prov, a));
@@ -750,7 +1050,7 @@ export class VoiceCallService {
           id,
           displayName: m?.displayName || formatVoiceModelShortName(prov, id),
           isLight: voiceModelScoreForProvider(prov, m) >= 750,
-          effort: String(m?.defaultReasoningEffort || ""),
+          effort: resolveVoiceEffort(prov, id) || String(m?.defaultReasoningEffort || ""),
         });
         if (deduped.length >= 6) break;
       }
@@ -840,7 +1140,7 @@ export class VoiceCallService {
       const chosenModel = rawProvider === "antigravity"
         ? (rawModel || await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL))
         : pickPreferredVoiceModel(rawProvider, models, rawModel);
-      const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
+      const effort = resolveVoiceEffort(rawProvider, chosenModel);
       const shortName = formatVoiceModelShortName(rawProvider, chosenModel);
       return {
         selectionKey: `${rawProvider}:${prof?.id || rawProfileId || "default"}:${chosenModel}`,
@@ -856,9 +1156,9 @@ export class VoiceCallService {
     if (rawModel) {
       const inferredProvider = /claude|haiku|sonnet|opus/i.test(rawModel)
         ? "claude"
-        : (/gpt|codex|o1|o3|o4|spark/i.test(rawModel) ? "codex" : (/grok/i.test(rawModel) ? "grok" : "antigravity"));
+        : (/gpt|codex|terra|o1|o3|o4|spark/i.test(rawModel) ? "codex" : (/grok/i.test(rawModel) ? "grok" : "antigravity"));
       const prof = pickProfileFor(inferredProvider);
-      const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(rawModel) ? "low" : "";
+      const effort = resolveVoiceEffort(inferredProvider, rawModel);
       const shortName = formatVoiceModelShortName(inferredProvider, rawModel);
       return {
         selectionKey: `${inferredProvider}:${prof?.id || "default"}:${rawModel}`,
@@ -874,48 +1174,40 @@ export class VoiceCallService {
     // "auto": pick best available authenticated lightweight provider
     const hasExplicitOrMockAgy = basename(agyExecutable(this.#env) || "").includes("mock-agy");
     if (hasProviderList) {
-      // First pass: prefer authenticated providers in priority order
-      for (const prov of VOICE_LIGHT_PROVIDER_PRIORITY) {
-        const candidates = installedProfiles.filter((p) => String(p?.provider || "").toLowerCase() === prov);
-        const authed = candidates.find((p) => p.authenticated !== false);
-        if (authed) {
-          const models = await getModelsFor(prov);
-          const chosenModel = prov === "antigravity"
-            ? await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL)
-            : pickPreferredVoiceModel(prov, models, "");
-          const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
-          const shortName = formatVoiceModelShortName(prov, chosenModel);
-          return {
-            selectionKey: "auto",
-            provider: prov,
-            profileId: authed.id || (prov === "antigravity" ? "cli" : "default"),
-            model: chosenModel,
-            effort,
-            shortLabel: prov === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(prov)} · ${shortName}`,
-            displayName: `${voiceProviderDisplayName(prov)} (${shortName})`,
-          };
+      const isKnownAuthed = (p) => p?.authenticated === true || (p?.authenticated !== false && p?.account?.signedIn === true);
+      const isNotUnavailable = (p) => p?.health?.status !== "unavailable" && p?.health?.available !== false;
+      const pickAutoCandidate = (predicate) => {
+        for (const prov of VOICE_LIGHT_PROVIDER_PRIORITY) {
+          const candidates = installedProfiles.filter((p) => String(p?.provider || "").toLowerCase() === prov);
+          const healthyMatch = candidates.find((p) => p.health?.status === "healthy" && predicate(p));
+          if (healthyMatch) return { prov, prof: healthyMatch };
+          const matched = candidates.find(predicate);
+          if (matched) return { prov, prof: matched };
         }
-      }
-      // Second pass: installed even if auth metadata unknown
-      for (const prov of VOICE_LIGHT_PROVIDER_PRIORITY) {
-        const first = installedProfiles.find((p) => String(p?.provider || "").toLowerCase() === prov);
-        if (first) {
-          const models = await getModelsFor(prov);
-          const chosenModel = prov === "antigravity"
-            ? await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL)
-            : pickPreferredVoiceModel(prov, models, "");
-          const effort = /\b(low|fast|lite|mini|haiku|spark)\b|-low\b/i.test(chosenModel) ? "low" : "";
-          const shortName = formatVoiceModelShortName(prov, chosenModel);
-          return {
-            selectionKey: "auto",
-            provider: prov,
-            profileId: first.id || (prov === "antigravity" ? "cli" : "default"),
-            model: chosenModel,
-            effort,
-            shortLabel: prov === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(prov)} · ${shortName}`,
-            displayName: `${voiceProviderDisplayName(prov)} (${shortName})`,
-          };
-        }
+        return null;
+      };
+      const picked = pickAutoCandidate((p) => isKnownAuthed(p) && isNotUnavailable(p))
+        || pickAutoCandidate((p) => isKnownAuthed(p))
+        || pickAutoCandidate((p) => p.authenticated !== false && isNotUnavailable(p))
+        || pickAutoCandidate((p) => p.authenticated !== false)
+        || pickAutoCandidate(() => true);
+      if (picked) {
+        const { prov, prof } = picked;
+        const models = await getModelsFor(prov);
+        const chosenModel = prov === "antigravity"
+          ? await this.resolveHydrogenModel().catch(() => DEFAULT_VOICE_HYDROGEN_MODEL)
+          : pickPreferredVoiceModel(prov, models, "");
+        const effort = resolveVoiceEffort(prov, chosenModel);
+        const shortName = formatVoiceModelShortName(prov, chosenModel);
+        return {
+          selectionKey: "auto",
+          provider: prov,
+          profileId: prof.id || (prov === "antigravity" ? "cli" : "default"),
+          model: chosenModel,
+          effort,
+          shortLabel: prov === "antigravity" && /hydrogen/i.test(chosenModel) ? "Hydrogen" : `${voiceProviderDisplayName(prov)} · ${shortName}`,
+          displayName: `${voiceProviderDisplayName(prov)} (${shortName})`,
+        };
       }
     }
 
@@ -1334,14 +1626,49 @@ export class VoiceCallService {
     };
   }
 
+  async #warmCoordinatorSession(callId, dispatchModel) {
+    const client = await this.#ensureClient();
+    let entry = this.#calls.get(callId);
+    if (!entry) {
+      const created = await client.newSession({ cwd: this.#workspaceDir });
+      const sessionId = String(created?.sessionId || "");
+      if (!sessionId) throw new Error("Antigravity 未返回语音通话会话 ID");
+      await client.configureSession(sessionId, {
+        model: dispatchModel,
+        effort: "low",
+        permissionMode: "plan",
+      });
+      entry = {
+        callId,
+        sessionId,
+        model: dispatchModel,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now(),
+      };
+      this.#calls.set(callId, entry);
+      this.#trimCallCache();
+    } else {
+      entry.lastUsedAt = Date.now();
+    }
+    return entry;
+  }
+
   async startCall({
     callId = "",
+    callScope = "",
+    activeThreadId = "",
     voiceProvider = "",
     voiceModel = "",
     voiceProfileId = "",
   } = {}) {
     const cleanCallId = String(callId || "").trim() || `call-${randomUUID().slice(0, 8)}`;
     const callState = this.#ensureCallState(cleanCallId);
+    const effectiveScope = normalizeVoiceCallScope(callScope, activeThreadId);
+    callState.callScope = effectiveScope;
+    if (activeThreadId) callState.activeThreadId = String(activeThreadId).trim();
+    if (effectiveScope === "thread" && activeThreadId) {
+      void this.#hub?.readThread?.(activeThreadId, { limit: 6 }).catch(() => null);
+    }
     if (voiceProvider || voiceModel || voiceProfileId) {
       callState.voicePref = {
         voiceProvider: String(voiceProvider || "").trim(),
@@ -1413,6 +1740,9 @@ export class VoiceCallService {
           }
           modelOptions = catalog?.options || [];
           warmed = asrWarmResult === "ok";
+          if (dispatchProvider === "antigravity" && dispatchModel) {
+            void this.#warmCoordinatorSession(cleanCallId, dispatchModel).catch(() => null);
+          }
           if (asrWarmResult === "timeout") {
             warning = "本地语音识别正在加载，稍候片刻即可使用";
           }
@@ -1448,29 +1778,7 @@ export class VoiceCallService {
       asrEngine = "multimodal-acp";
       if (dispatchProvider === "antigravity") {
         try {
-          const client = await this.#ensureClient();
-          let entry = this.#calls.get(cleanCallId);
-          if (!entry) {
-            const created = await client.newSession({ cwd: this.#workspaceDir });
-            const sessionId = String(created?.sessionId || "");
-            if (!sessionId) throw new Error("Antigravity 未返回语音通话会话 ID");
-            await client.configureSession(sessionId, {
-              model: dispatchModel,
-              effort: "low",
-              permissionMode: "plan",
-            });
-            entry = {
-              callId: cleanCallId,
-              sessionId,
-              model: dispatchModel,
-              createdAt: Date.now(),
-              lastUsedAt: Date.now(),
-            };
-            this.#calls.set(cleanCallId, entry);
-            this.#trimCallCache();
-          } else {
-            entry.lastUsedAt = Date.now();
-          }
+          await this.#warmCoordinatorSession(cleanCallId, dispatchModel);
           warmed = true;
         } catch (error) {
           warning = error?.message || "Hydrogen 预热暂不可用";
@@ -1481,6 +1789,12 @@ export class VoiceCallService {
     }
 
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
+    if (ttsBin && this.#resolveEdgeTtsPython(ttsBin)) {
+      void this.#ensureEdgeTtsWorker(ttsBin).catch(() => {});
+    }
+    if (this.#hasLocalKokoroRuntime()) {
+      void this.#ensureKokoroWorker().catch(() => {});
+    }
     const sayBin = resolveMacSayExecutable(this.#env);
     callState.resolvedTarget = {
       provider: dispatchProvider,
@@ -1491,6 +1805,7 @@ export class VoiceCallService {
     return {
       ok: true,
       callId: cleanCallId,
+      callScope: effectiveScope,
       model,
       dispatchProvider,
       dispatchProfileId,
@@ -1512,7 +1827,86 @@ export class VoiceCallService {
       this.#calls.delete(cleanCallId);
       this.#callStates.delete(cleanCallId);
     }
+    if (this.#calls.size === 0 && this.#callStates.size === 0) {
+      this.#resetEdgeTtsWorker("通话已结束");
+      this.#resetKokoroWorker("通话已结束");
+    }
     return { ok: true, callId: cleanCallId };
+  }
+
+  async buildThreadScopedSnapshot({ activeThreadId = "", callId = "" } = {}) {
+    const cleanThreadId = String(activeThreadId || "").trim();
+    if (!cleanThreadId) {
+      return this.buildLiveSnapshot({ activeThreadId: "", callId });
+    }
+    const cleanCallId = String(callId || "").trim();
+    const callState = cleanCallId ? this.#callStates.get(cleanCallId) : null;
+    const [readRes, activityRes, allPending] = await Promise.all([
+      this.#hub.readThread(cleanThreadId, { limit: 6 }).catch(() => null),
+      typeof this.#hub.getActivity === "function"
+        ? this.#hub.getActivity(cleanThreadId).catch(() => null)
+        : Promise.resolve(null),
+      Promise.resolve(this.#hub.allPendingRequests?.() || []),
+    ]);
+    const thread = readRes?.thread;
+    if (!thread) {
+      return this.buildLiveSnapshot({ activeThreadId: cleanThreadId, callId });
+    }
+    const cwd = String(thread.cwd || "").trim() || os.homedir();
+    const projectName = basename(cwd) || cwd;
+    const threadPending = allPending
+      .filter((r) => r.threadId === cleanThreadId)
+      .slice(0, 4)
+      .map((r) => ({
+        requestId: r.id,
+        threadId: r.threadId,
+        provider: r.provider,
+        projectCwd: cwd,
+        projectName,
+        title: String(r.title || "").slice(0, 80),
+        question: String(r.question || "").slice(0, 80),
+        command: String(r.command || "").slice(0, 80),
+      }));
+    const live = Boolean(activityRes?.live || thread.live);
+    const queuedCount = Number(activityRes?.queuedCount ?? readRes?.queuedTurns?.length ?? 0) || 0;
+    const recentTurns = extractCompactRecentTurns(thread.turns || [], 6);
+    const activeThreadReply = pickLatestAssistantSnippet(readRes);
+    const slimThread = {
+      id: cleanThreadId,
+      cwd,
+      title: String(thread.title || thread.name || "当前对话").slice(0, 64),
+      provider: thread.provider || cleanThreadId.split(":")[0] || "",
+      model: String(thread.model || ""),
+      live,
+      queuedCount,
+      pendingCount: threadPending.length,
+      goalActive: Boolean(thread.goalState?.active),
+      livePhase: cleanPreviewText(activityRes?.phase || "", 80),
+      liveThought: cleanPreviewText(activityRes?.streaming?.thought || "", 160),
+    };
+    return {
+      callScope: "thread",
+      activeThreadId: cleanThreadId,
+      activeProjectCwd: cwd,
+      activeThreadReply,
+      currentThread: slimThread,
+      recentTurns,
+      availableProfiles: [],
+      pendingRequests: threadPending,
+      projects: [{
+        cwd,
+        name: projectName,
+        alias: "",
+        pinned: false,
+        liveCount: live ? 1 : 0,
+        pendingCount: threadPending.length,
+        updatedAt: Number(thread.updatedAt) || 0,
+        threads: [slimThread],
+      }],
+      completedResults: [...(callState?.completedResults || [])].filter((r) => !r.threadId || r.threadId === cleanThreadId),
+      delegatedTasks: [...(callState?.delegatedTasks?.values() || [])].filter((t) => !t.threadId || t.threadId === cleanThreadId),
+      threads: [slimThread],
+    };
   }
 
   async buildLiveSnapshot({ activeThreadId = "", callId = "" } = {}) {
@@ -1660,6 +2054,12 @@ export class VoiceCallService {
     let mimeType = "";
     let provider = "none";
     const ttsBin = resolveEdgeTtsExecutable(this.#env);
+    if (ttsBin && this.#resolveEdgeTtsPython(ttsBin)) {
+      void this.#ensureEdgeTtsWorker(ttsBin).catch(() => {});
+    }
+    if (this.#hasLocalKokoroRuntime()) {
+      void this.#ensureKokoroWorker().catch(() => {});
+    }
     const sayBin = resolveMacSayExecutable(this.#env);
     const cacheKey = cleanText.length <= 120
       ? `${String(voice || DEFAULT_VOICE_TTS_NAME)}|${ttsBin}|${sayBin}|${preferOffline ? "off" : "auto"}|${cleanText}`
@@ -1671,39 +2071,86 @@ export class VoiceCallService {
       provider = cached.provider;
     }
 
-    if (!audioBase64 && !preferOffline && ttsBin) {
-      await mkdir(this.#utterancesDir, { recursive: true });
-      const outPath = resolve(this.#utterancesDir, `tts-${randomUUID()}.mp3`);
+    const preferKokoroPrimary = String(this.#env?.AGENT_CONTROL_TTS_ENGINE || "").trim().toLowerCase() === "kokoro";
+    if (!audioBase64 && preferKokoroPrimary && this.#hasLocalKokoroRuntime()) {
       try {
-        await this.#execFile(
-          ttsBin,
-          [
-            "--voice",
-            String(voice || DEFAULT_VOICE_TTS_NAME),
-            "--rate=+8%",
-            "--text",
-            cleanText,
-            "--write-media",
-            outPath,
-          ],
-          {
-            env: this.#env,
-            cwd: this.#workspaceDir,
-            shell: false,
-            timeout: EDGE_TTS_TIMEOUT_MS,
-            maxBuffer: 128 * 1024,
-          },
-        );
-        const mp3Buf = await readFile(outPath);
-        if (mp3Buf.length > 0) {
-          audioBase64 = mp3Buf.toString("base64");
-          mimeType = "audio/mpeg";
-          provider = "edge-tts";
+        const kokoroRes = await this.#synthesizeViaKokoroWorker({ text: cleanText });
+        if (kokoroRes?.audioBase64) {
+          audioBase64 = kokoroRes.audioBase64;
+          mimeType = kokoroRes.mimeType || "audio/wav";
+          provider = "kokoro";
         }
       } catch {
-        // Fall through to offline macOS say or browser synthesis.
-      } finally {
-        await unlink(outPath).catch(() => {});
+        // Fall through to Edge TTS / macOS say.
+      }
+    }
+
+    if (!audioBase64 && !preferOffline && ttsBin) {
+      const workerPy = this.#resolveEdgeTtsPython(ttsBin);
+      if (workerPy) {
+        try {
+          const workerRes = await this.#synthesizeViaEdgeTtsWorker({
+            ttsBin,
+            text: cleanText,
+            voice: String(voice || DEFAULT_VOICE_TTS_NAME),
+            rate: "+8%",
+          });
+          if (workerRes?.audioBase64) {
+            audioBase64 = workerRes.audioBase64;
+            mimeType = workerRes.mimeType || "audio/mpeg";
+            provider = "edge-tts";
+          }
+        } catch {
+          // Fall back to one-shot edge-tts CLI below.
+        }
+      }
+      if (!audioBase64) {
+        await mkdir(this.#utterancesDir, { recursive: true });
+        const outPath = resolve(this.#utterancesDir, `tts-${randomUUID()}.mp3`);
+        try {
+          await this.#execFile(
+            ttsBin,
+            [
+              "--voice",
+              String(voice || DEFAULT_VOICE_TTS_NAME),
+              "--rate=+8%",
+              "--text",
+              cleanText,
+              "--write-media",
+              outPath,
+            ],
+            {
+              env: this.#env,
+              cwd: this.#workspaceDir,
+              shell: false,
+              timeout: EDGE_TTS_TIMEOUT_MS,
+              maxBuffer: 128 * 1024,
+            },
+          );
+          const mp3Buf = await readFile(outPath);
+          if (mp3Buf.length > 0) {
+            audioBase64 = mp3Buf.toString("base64");
+            mimeType = "audio/mpeg";
+            provider = "edge-tts";
+          }
+        } catch {
+          // Fall through to offline macOS say or browser synthesis.
+        } finally {
+          await unlink(outPath).catch(() => {});
+        }
+      }
+    }
+
+    if (!audioBase64 && this.#hasLocalKokoroRuntime()) {
+      try {
+        const kokoroRes = await this.#synthesizeViaKokoroWorker({ text: cleanText });
+        if (kokoroRes?.audioBase64) {
+          audioBase64 = kokoroRes.audioBase64;
+          mimeType = kokoroRes.mimeType || "audio/wav";
+          provider = "kokoro";
+        }
+      } catch {
+        // Fall through to macOS say below.
       }
     }
 
@@ -1734,16 +2181,26 @@ export class VoiceCallService {
               },
             );
           };
-          try {
-            if (preferredVoice) {
-              await runSay(["-v", preferredVoice]);
-            } else {
-              await runSay([]);
+          const voiceCandidates = [
+            preferredVoice,
+            "Shelley (中文（中国大陆）)",
+            "Sandy (中文（中国大陆）)",
+            "Flo (中文（中国大陆）)",
+            "Meijia",
+            "Sinji",
+          ].filter((v, idx, arr) => v && arr.indexOf(v) === idx);
+          let synthesized = false;
+          for (const candidate of voiceCandidates) {
+            try {
+              await runSay(["-v", candidate]);
+              synthesized = true;
+              break;
+            } catch {
+              // Try next Chinese voice candidate.
             }
-          } catch {
-            if (preferredVoice) {
-              await runSay([]);
-            }
+          }
+          if (!synthesized) {
+            await runSay([]);
           }
           const wavBuf = await readFile(outWavPath).catch(() => Buffer.alloc(0));
           if (wavBuf.length > 0) {
@@ -1828,6 +2285,44 @@ export class VoiceCallService {
     return this.#runSerializedPrompt(entry.sessionId, promptText);
   }
 
+  #buildThreadScopedCoordinatorPrompt({
+    snapshot,
+    transcriptText = "",
+    mode = "turn",
+    unheardUtterances = [],
+    lastUtterance = null,
+  }) {
+    const contextPayload = {
+      thread: snapshot.currentThread || null,
+      recentTurns: snapshot.recentTurns || [],
+      pendingRequests: snapshot.pendingRequests || [],
+      completedResults: snapshot.completedResults || [],
+    };
+    const lines = [
+      `${VOICE_CALL_TAG} 你是【当前对话专属】极速语音副驾。只围绕下方这一个当前会话服务，以最快速度回答或把任务交给当前会话。`,
+      "决策规则（三选一，绝不调用工具）：",
+      "1. 能直接根据 <CURRENT_THREAD_CONTEXT> 回答的追问、解释、总结、方案讨论、进展询问、闲聊，一律设 action=\"reply\"，由你直接用 1~3 句精炼电话口语回答（最快响应）。",
+      "2. 需要修改代码、读取未展示文件、运行命令/测试、继续推进具体实现的任务，交给当前会话执行：若当前会话空闲或允许排队设 action=\"send\"（或 \"queue\"）；只有用户明确说“别等了/停下重做/立即改/直接插话”才设 action=\"steer\"。instruction 写清楚整理后的书面任务指令，spokenReply 用 1 句简短口语确认已交给当前对话。",
+      "3. 明确同意/拒绝当前会话待确认请求设 action=\"approve\" 且 decision=\"accept\" 或 \"decline\"；明确要求停止当前运行任务设 action=\"interrupt\"；要求重播设 action=\"repeat_last\"；纯背景杂音/乱码设 action=\"no_speech\" 且 spokenReply=\"\"。",
+      "4. spokenReply 严禁念出路径、斜杠、代码块、Markdown 符号或长 ID。只输出唯一合法 JSON：",
+      "{\"heardText\":\"用户原话\",\"action\":\"reply|send|queue|steer|approve|interrupt|repeat_last|no_speech\",\"instruction\":\"\",\"decision\":\"\",\"spokenReply\":\"简短自然中文口语\"}",
+      "<CURRENT_THREAD_CONTEXT>",
+      JSON.stringify(contextPayload),
+      "</CURRENT_THREAD_CONTEXT>",
+      `<LAST_REPLY>${JSON.stringify(lastUtterance ? { text: lastUtterance.text, intent: lastUtterance.intent } : null)}</LAST_REPLY>`,
+    ];
+    if (Array.isArray(unheardUtterances) && unheardUtterances.length > 0) {
+      lines.push("若下方 <UNHEARD> 中有刚才未播完的内容，且对用户依然重要（未被本次新话覆盖），请把核心信息与本次新回复自然融合成一句连贯的口语一起说出，严禁使用“另外补播刚才未听到的提醒”等生硬套话。");
+      lines.push(`<UNHEARD>${JSON.stringify(unheardUtterances.map((u) => ({ text: u.text })))}</UNHEARD>`);
+    }
+    if (mode === "briefing") {
+      lines.push("用户点击【播报最新进度】：用 1~2 句口语播报当前对话最新进展或结果，action=\"reply\"。");
+    } else if (transcriptText) {
+      lines.push(`用户说：${transcriptText}`);
+    }
+    return lines.join("\n");
+  }
+
   #buildCoordinatorPrompt({
     snapshot,
     transcriptText = "",
@@ -1842,8 +2337,8 @@ export class VoiceCallService {
       "1. 依据完整原话、上下文和控制快照理解语义、指代、否定、疑问、转述及同音误识别，由你决定意图、目标、模型与排队方式。严禁调用工具、执行命令、读写文件或直接操作任务；只返回计划，由控制台执行。",
       "2. 只能从下方实时控制快照 JSON 中挑选真实存在的 `cwd`、`threads[].id`、`pendingRequests[].requestId`，绝不编造。",
       "3. 先判断指令复杂度与归属：（a）简单查询/打开项目/审批/重播/唤醒由你自己直接完成，`executionTier` 设为 `self_simple`；（b）你自己可做但需要较长耗时分析/排查/梳理/总结上下文/对比方案的任务，`intent` 设为 `subagent_hydrogen`、`executionTier` 设为 `subagent_hydrogen`；（c）需要交由其他项目或会话执行的任务，`intent` 设为 `send_turn`（或 `create_thread`）、`executionTier` 设为 `external_thread`（若用户要求直接出结果、给结论、停止等待、别等了、立即发送或别排队，`dispatchMode` 设为 `immediate`，否则设为 `queue`）；若仅停止任务设 `interrupt_thread`；若用户没听清要求再说一遍，设 `intent` 为 `repeat_last`。",
-      "询问原因、否认授权、引用别人说的话，均不等于要求执行其中的动作。比如询问为什么停止任务，应只读解释记录，不能再次停止任务。自然问答可以直接回答；无法确定指代或操作范围时，先口头询问，intent=summarize_progress，不得猜选第一个任务或审批。操作目标必须复制快照中完整的 ID/CWD；新建任务必须指定项目，停止任务必须指定单个会话，审批必须指定 requestId 和明确 decision。",
-      "只有明确并非面向你的背景对白或识别噪声才设 intent=no_speech、spokenReply 留空；不要因为口头表达短、没有固定词语就忽略。repeat_last 应根据最近播报和未听到的记录重新组织回复。provider/model 只在用户明确要求切换任务执行模型时填写；否则保留已有会话配置。",
+      "询问原因、否认授权、引用别人说的话，均不等于要求执行其中的动作。比如询问为什么停止任务，应只读解释记录，不能再次停止任务。自然问答、闲聊咨询或询问你当前使用的是什么模型/为何没回答时，必须设 intent=summarize_progress、executionTier=self_simple 并直接礼貌回答（严禁当成 no_speech 忽略）；无法确定指代或操作范围时，先口头询问，intent=summarize_progress，不得猜选第一个任务或审批。操作目标必须复制快照中完整的 ID/CWD；新建任务必须指定项目，停止任务必须指定单个会话，审批必须指定 requestId 和明确 decision。",
+      "只有明确并非面向你的背景电视声/环境旁白或无意义识别乱码才设 intent=no_speech、spokenReply 留空；只要用户明确在与语音助手对话提问（哪怕只问你是什么模型、在吗、为什么不说话），一律正常回复，不得设为 no_speech。repeat_last 应根据最近播报和未听到的记录重新组织回复。provider/model 只在用户明确要求切换任务执行模型时填写；否则保留已有会话配置。",
       "4. `spokenReply` 用 1~3 句自然简洁的电话口语回复（像电话里的得力副驾），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
       "5. 最终回复必须且只能输出一个合法 JSON 对象，格式如下：",
       '{"heardText":"听到的用户原话","intent":"no_speech|wake_ping|summarize_progress|open_thread|open_project|subagent_hydrogen|send_turn|create_thread|approve_request|interrupt_thread|repeat_last","executionTier":"self_simple|subagent_hydrogen|external_thread","targetProjectCwd":"","targetThreadId":"","provider":"","model":"","dispatchMode":"immediate|queue","instruction":"","requestId":"","decision":"accept|decline|","spokenReply":"用于电话朗读的简短自然中文回复"}',
@@ -1855,6 +2350,7 @@ export class VoiceCallService {
     ];
 
     if (Array.isArray(unheardUtterances) && unheardUtterances.length > 0) {
+      rules.push("若下方 <UNHEARD_PREVIOUS_REPLIES> 中存在刚才未播完或被打断的内容，且对当前仍然重要（未被用户本次新话覆盖或取消），请将其核心意思与用户这次的新问题/指令自然融合成一句连贯、自然的电话口语回复；严禁使用“另外补播刚才未听到的提醒”等生硬机械套话。");
       rules.push("<UNHEARD_PREVIOUS_REPLIES>");
       rules.push(JSON.stringify(unheardUtterances.map((u) => ({
         utteranceId: u.utteranceId,
@@ -2628,12 +3124,14 @@ export class VoiceCallService {
 
   async #runHubVoicePrompt({ target, text, cwd = "" }) {
     if (typeof this.#hub?.startThread !== "function") throw new Error("当前模型不支持语音理解请求，未执行任何操作。");
+    const targetCwd = cwd || this.#workspaceDir;
+    await mkdir(targetCwd, { recursive: true }).catch(() => {});
     const started = await this.#hub.startThread({
       provider: target.provider,
       profileId: target.profileId || "default",
-      cwd: cwd || this.#workspaceDir,
+      cwd: targetCwd,
       model: target.model || undefined,
-      ...(target.effort ? { effort: target.effort } : {}),
+      effort: target.effort || "low",
       text,
       permissionMode: "plan",
     });
@@ -2722,7 +3220,7 @@ export class VoiceCallService {
       voiceProfileId: preferredProfileId,
     });
     const model = target.model || DEFAULT_VOICE_HYDROGEN_MODEL;
-    const effort = target.effort || (/\b(low|fast|lite)\b|-low\b/i.test(model) ? "low" : "");
+    const effort = target.effort || resolveVoiceEffort(target.provider, model);
     const targetCwd = projectCwd && existsSync(projectCwd) ? projectCwd : this.#workspaceDir;
     let threadSnippet = "";
     if (activeThreadId && typeof this.#hub?.readThread === "function") {
@@ -3025,6 +3523,323 @@ export class VoiceCallService {
     });
   }
 
+  #resolveEdgeTtsPython(ttsBin = "") {
+    const clean = String(ttsBin || "").trim();
+    if (!clean || !existsSync(clean)) return "";
+    try {
+      const head = readFileSync(clean, "utf8").slice(0, 256);
+      const firstLine = head.split(/\r?\n/, 1)[0] || "";
+      const match = firstLine.match(/^#!\s*([^\s]+)/);
+      if (!match?.[1]) return "";
+      const interp = match[1];
+      if (!/python/i.test(basename(interp))) return "";
+      if (interp === "/usr/bin/env") {
+        const parts = firstLine.slice(2).trim().split(/\s+/);
+        return parts[1] && /python/i.test(parts[1]) ? parts[1] : "";
+      }
+      return existsSync(interp) ? interp : "";
+    } catch {
+      return "";
+    }
+  }
+
+  #resetEdgeTtsWorker(reason = "Edge TTS 常驻进程已关闭") {
+    if (this.#edgeTtsChild) {
+      const child = this.#edgeTtsChild;
+      this.#edgeTtsChild = null;
+      try { child.kill("SIGTERM"); } catch {}
+    }
+    this.#edgeTtsReadyPromise = null;
+    this.#edgeTtsStdoutBuf = "";
+    for (const [, pending] of this.#edgeTtsPending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.#edgeTtsPending.clear();
+  }
+
+  #ensureEdgeTtsWorker(ttsBin = "") {
+    if (this.#closed) {
+      return Promise.reject(Object.assign(new Error("语音服务已关闭"), { status: 503 }));
+    }
+    if (this.#edgeTtsReadyPromise && this.#edgeTtsChild && !this.#edgeTtsChild.killed) {
+      return this.#edgeTtsReadyPromise;
+    }
+    const pythonBin = this.#resolveEdgeTtsPython(ttsBin || resolveEdgeTtsExecutable(this.#env));
+    if (!pythonBin) {
+      return Promise.reject(new Error("未检测到 Edge TTS Python 环境"));
+    }
+
+    this.#edgeTtsReadyPromise = new Promise((resolveReady, rejectReady) => {
+      const moduleDir = dirname(fileURLToPath(import.meta.url));
+      const workerScript = resolve(moduleDir, "voice-edge-tts-worker.py");
+      let settledReady = false;
+      const readyTimer = setTimeout(() => {
+        if (!settledReady) {
+          settledReady = true;
+          this.#resetEdgeTtsWorker("Edge TTS 常驻进程启动超时");
+          rejectReady(new Error("Edge TTS 常驻进程启动超时"));
+        }
+      }, 10_000);
+
+      let child;
+      try {
+        child = spawn(pythonBin, [workerScript], {
+          env: { ...this.#env },
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (error) {
+        clearTimeout(readyTimer);
+        rejectReady(error);
+        return;
+      }
+
+      this.#edgeTtsChild = child;
+      let stderrTail = "";
+
+      child.stderr.on("data", (chunk) => {
+        stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-600);
+      });
+
+      child.stdout.on("data", (chunk) => {
+        this.#edgeTtsStdoutBuf += chunk.toString("utf8");
+        while (true) {
+          const nl = this.#edgeTtsStdoutBuf.indexOf("\n");
+          if (nl === -1) break;
+          const line = this.#edgeTtsStdoutBuf.slice(0, nl).trim();
+          this.#edgeTtsStdoutBuf = this.#edgeTtsStdoutBuf.slice(nl + 1);
+          if (!line) continue;
+          let msg;
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (Object.hasOwn(msg, "ready") && !settledReady) {
+            settledReady = true;
+            clearTimeout(readyTimer);
+            if (msg.ready) {
+              resolveReady(child);
+            } else {
+              this.#resetEdgeTtsWorker(msg.error || "Edge TTS 初始化失败");
+              rejectReady(new Error(msg.error || "Edge TTS 初始化失败"));
+            }
+            continue;
+          }
+          const reqId = String(msg?.id || "");
+          if (reqId && this.#edgeTtsPending.has(reqId)) {
+            const pending = this.#edgeTtsPending.get(reqId);
+            this.#edgeTtsPending.delete(reqId);
+            clearTimeout(pending.timer);
+            if (msg.ok) {
+              pending.resolve(msg);
+            } else {
+              pending.reject(new Error(msg.error || "Edge TTS 合成失败"));
+            }
+          }
+        }
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(readyTimer);
+        if (!settledReady) {
+          settledReady = true;
+          rejectReady(err);
+        }
+        this.#resetEdgeTtsWorker(err?.message || "Edge TTS 进程启动失败");
+      });
+
+      child.on("exit", (code, signal) => {
+        clearTimeout(readyTimer);
+        const reason = stderrTail.trim() || `Edge TTS 进程退出 (${code ?? signal ?? "unknown"})`;
+        if (!settledReady) {
+          settledReady = true;
+          rejectReady(new Error(reason));
+        }
+        this.#resetEdgeTtsWorker(reason);
+      });
+    });
+
+    return this.#edgeTtsReadyPromise;
+  }
+
+  async #synthesizeViaEdgeTtsWorker({ ttsBin = "", text = "", voice = DEFAULT_VOICE_TTS_NAME, rate = "+8%" } = {}) {
+    const child = await this.#ensureEdgeTtsWorker(ttsBin);
+    const reqId = `tts-${randomUUID().slice(0, 10)}`;
+    const payload = JSON.stringify({ id: reqId, text, voice, rate }) + "\n";
+    return new Promise((resolveDone, rejectDone) => {
+      const timer = setTimeout(() => {
+        this.#edgeTtsPending.delete(reqId);
+        this.#resetEdgeTtsWorker("Edge TTS 合成超时");
+        rejectDone(new Error("Edge TTS 合成超时"));
+      }, EDGE_TTS_TIMEOUT_MS);
+      this.#edgeTtsPending.set(reqId, { resolve: resolveDone, reject: rejectDone, timer });
+      try {
+        child.stdin.write(payload);
+      } catch (err) {
+        clearTimeout(timer);
+        this.#edgeTtsPending.delete(reqId);
+        rejectDone(err);
+      }
+    });
+  }
+
+  #hasLocalKokoroRuntime() {
+    const explicitBin = String(this.#env?.VOICE_KOKORO_BIN || "").trim();
+    if (explicitBin && existsSync(explicitBin)) return true;
+    const pyBin = String(this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12").trim();
+    if (!existsSync(pyBin)) return false;
+    const explicitDir = String(this.#env?.VOICE_KOKORO_MODEL_DIR || "").trim();
+    if (explicitDir && existsSync(explicitDir)) return true;
+    const home = String(this.#env?.HOME || os.homedir()).trim();
+    return existsSync(resolve(home, ".cache", "huggingface", "hub", "models--mlx-community--Kokoro-82M-bf16", "snapshots"));
+  }
+
+  #resetKokoroWorker(reason = "Kokoro 常驻进程已关闭") {
+    if (this.#kokoroChild) {
+      const child = this.#kokoroChild;
+      this.#kokoroChild = null;
+      try { child.kill("SIGTERM"); } catch {}
+    }
+    this.#kokoroReadyPromise = null;
+    this.#kokoroStdoutBuf = "";
+    for (const [, pending] of this.#kokoroPending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.#kokoroPending.clear();
+  }
+
+  #ensureKokoroWorker() {
+    if (this.#closed) {
+      return Promise.reject(Object.assign(new Error("语音服务已关闭"), { status: 503 }));
+    }
+    if (this.#kokoroReadyPromise && this.#kokoroChild && !this.#kokoroChild.killed) {
+      return this.#kokoroReadyPromise;
+    }
+
+    this.#kokoroReadyPromise = new Promise((resolveReady, rejectReady) => {
+      const explicitBin = String(this.#env?.VOICE_KOKORO_BIN || "").trim();
+      const moduleDir = dirname(fileURLToPath(import.meta.url));
+      const workerScript = resolve(moduleDir, "voice-kokoro-tts-worker.py");
+      const cmd = explicitBin || (this.#env?.VOICE_PYTHON_BIN || "/opt/homebrew/bin/python3.12");
+      const args = explicitBin ? [] : [workerScript];
+
+      let settledReady = false;
+      const readyTimer = setTimeout(() => {
+        if (!settledReady) {
+          settledReady = true;
+          this.#resetKokoroWorker("Kokoro 启动超时");
+          rejectReady(new Error("Kokoro 启动超时"));
+        }
+      }, 45_000);
+
+      let child;
+      try {
+        child = spawn(cmd, args, {
+          env: {
+            ...this.#env,
+            HF_HUB_OFFLINE: "1",
+            TRANSFORMERS_OFFLINE: "1",
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch (error) {
+        clearTimeout(readyTimer);
+        rejectReady(error);
+        return;
+      }
+
+      this.#kokoroChild = child;
+      let stderrTail = "";
+
+      child.stderr.on("data", (chunk) => {
+        stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-600);
+      });
+
+      child.stdout.on("data", (chunk) => {
+        this.#kokoroStdoutBuf += chunk.toString("utf8");
+        while (true) {
+          const nl = this.#kokoroStdoutBuf.indexOf("\n");
+          if (nl === -1) break;
+          const line = this.#kokoroStdoutBuf.slice(0, nl).trim();
+          this.#kokoroStdoutBuf = this.#kokoroStdoutBuf.slice(nl + 1);
+          if (!line) continue;
+          let msg;
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (Object.hasOwn(msg, "ready") && !settledReady) {
+            settledReady = true;
+            clearTimeout(readyTimer);
+            if (msg.ready) {
+              resolveReady(child);
+            } else {
+              this.#resetKokoroWorker(msg.error || "Kokoro 初始化失败");
+              rejectReady(new Error(msg.error || "Kokoro 初始化失败"));
+            }
+            continue;
+          }
+          const reqId = String(msg?.id || "");
+          if (reqId && this.#kokoroPending.has(reqId)) {
+            const pending = this.#kokoroPending.get(reqId);
+            this.#kokoroPending.delete(reqId);
+            clearTimeout(pending.timer);
+            if (msg.ok) {
+              pending.resolve(msg);
+            } else {
+              pending.reject(new Error(msg.error || "Kokoro 合成失败"));
+            }
+          }
+        }
+      });
+
+      child.on("error", (err) => {
+        clearTimeout(readyTimer);
+        if (!settledReady) {
+          settledReady = true;
+          rejectReady(err);
+        }
+        this.#resetKokoroWorker(err?.message || "Kokoro 进程启动失败");
+      });
+
+      child.on("exit", (code, signal) => {
+        clearTimeout(readyTimer);
+        const reason = stderrTail.trim() || `Kokoro 进程退出 (${code ?? signal ?? "unknown"})`;
+        if (!settledReady) {
+          settledReady = true;
+          rejectReady(new Error(reason));
+        }
+        this.#resetKokoroWorker(reason);
+      });
+    });
+
+    return this.#kokoroReadyPromise;
+  }
+
+  async #synthesizeViaKokoroWorker({ text = "", voice = "zf_xiaoxiao", speed = 1.06 } = {}) {
+    const child = await this.#ensureKokoroWorker();
+    const reqId = `kokoro-${randomUUID().slice(0, 10)}`;
+    const payload = JSON.stringify({ id: reqId, text, voice, speed }) + "\n";
+    return new Promise((resolveDone, rejectDone) => {
+      const timer = setTimeout(() => {
+        this.#kokoroPending.delete(reqId);
+        this.#resetKokoroWorker("Kokoro 合成超时");
+        rejectDone(new Error("Kokoro 合成超时"));
+      }, 20_000);
+      this.#kokoroPending.set(reqId, { resolve: resolveDone, reject: rejectDone, timer });
+      try {
+        child.stdin.write(payload);
+      } catch (err) {
+        clearTimeout(timer);
+        this.#kokoroPending.delete(reqId);
+        rejectDone(err);
+      }
+    });
+  }
+
   #resetAsrWorker(reason = "语音识别进程已退出") {
     const child = this.#asrChild;
     this.#asrChild = null;
@@ -3224,6 +4039,7 @@ export class VoiceCallService {
 
   async handleTurn({
     callId = "",
+    callScope = "",
     audioBase64 = "",
     audioMimeType = "audio/wav",
     transcriptText = "",
@@ -3238,6 +4054,10 @@ export class VoiceCallService {
   } = {}) {
     const cleanCallId = String(callId || "").trim() || `call-${randomUUID().slice(0, 8)}`;
     const callState = this.#ensureCallState(cleanCallId);
+    const effectiveThreadId = String(activeThreadId || callState.activeThreadId || "").trim();
+    const effectiveScope = normalizeVoiceCallScope(callScope || callState.callScope || "", effectiveThreadId);
+    callState.callScope = effectiveScope;
+    if (effectiveThreadId) callState.activeThreadId = effectiveThreadId;
     if (voiceProvider || voiceModel || voiceProfileId) {
       callState.voicePref = {
         voiceProvider: String(voiceProvider || "").trim(),
@@ -3247,7 +4067,9 @@ export class VoiceCallService {
     }
     const cleanAudio = String(audioBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
     const cleanTranscript = String(transcriptText || "").trim();
-    const asrBinName = basename(String(this.#env?.VOICE_ASR_BIN || "").trim());
+    const rawAsrBin = String(this.#env?.VOICE_ASR_BIN || "").trim();
+    const hasExplicitAsrBin = Boolean(rawAsrBin);
+    const asrBinName = basename(rawAsrBin);
     const agyBinName = basename(agyExecutable(this.#env) || "");
     const isMockAgy = agyBinName.includes("mock-agy");
     const isMockAsr = asrBinName.includes("mock-voice-asr");
@@ -3338,17 +4160,35 @@ export class VoiceCallService {
       }
     }
 
-    const unheardUtterances = this.getUnheardUtterances(cleanCallId, { includeStalePending: false });
+    const rawUnheard = this.getUnheardUtterances(cleanCallId, { includeStalePending: false });
+    const unheardUtterances = rawUnheard
+      .filter((u) => ["turn", "briefing", "approval"].includes(String(u?.source || "turn")))
+      .map((u) => ({
+        ...u,
+        text: stripSpeechNoise(
+          String(u.text || "").replace(/\s*另外补播刚才未听到的提醒：[\s\S]*$/, "").trim(),
+          140,
+        ),
+      }))
+      .filter((u) => Boolean(u.text));
+    const unheardById = new Map(rawUnheard.map((u) => [u.utteranceId, u]));
     const lastUtterance = [...callState.utterances].reverse().find((u) => String(u?.text || "").trim()) || null;
-    const snapshot = await this.buildLiveSnapshot({ activeThreadId, callId: cleanCallId });
 
     let heard = cleanTranscript;
     let engineLabel = "";
-    if (cleanAudio && !heard) {
-      const projectNames = (snapshot.projects || []).map((p) => p.alias || p.name).filter(Boolean).slice(0, 8);
-      const asr = await this.transcribeAudio({ audioBase64: cleanAudio, audioMimeType,
-        promptHints: projectNames.length ? `可能提到的项目名称：${projectNames.join("、")}。` : "",
-      });
+    const snapshotPromise = effectiveScope === "thread"
+      ? this.buildThreadScopedSnapshot({ activeThreadId: effectiveThreadId, callId: cleanCallId })
+      : this.buildLiveSnapshot({ activeThreadId: effectiveThreadId, callId: cleanCallId });
+    const asrPromise = (cleanAudio && !heard && (!isMockAgy || hasExplicitAsrBin))
+      ? this.transcribeAudio({
+        audioBase64: cleanAudio,
+        audioMimeType,
+        promptHints: effectiveScope === "thread" && effectiveThreadId ? "围绕当前代码仓库与会话上下文的技术对话。" : "",
+      })
+      : Promise.resolve(null);
+
+    const [snapshot, asr] = await Promise.all([snapshotPromise, asrPromise]);
+    if (asr) {
       heard = String(asr.text || "").trim();
       engineLabel = asr.engine || "";
       if (!heard && mode !== "briefing") return buildLocalNoSpeechPayload({
@@ -3357,14 +4197,44 @@ export class VoiceCallService {
         liveProjectCount: snapshot.projects.filter((p) => p.liveCount > 0).length,
       });
     }
-    const target = await this.resolveVoiceTarget({ callId: cleanCallId });
-    callState.resolvedTarget = target;
-    const promptText = this.#buildCoordinatorPrompt({ snapshot, transcriptText: heard, mode,
-      unheardUtterances, lastUtterance,
-    });
-    const rawResponse = await this.#runVoiceCoordinator({ callId: cleanCallId, target, promptText });
-    const plan = parseCoordinatorJson(rawResponse, heard);
-    const model = target.model;
+
+    const isThreadScoped = effectiveScope === "thread" && snapshot.callScope === "thread" && Boolean(snapshot.activeThreadId);
+    const shortcutPlan = (isThreadScoped && mode !== "briefing")
+      ? matchDeterministicThreadShortcut(heard, snapshot)
+      : null;
+
+    let plan;
+    let model = "local-shortcut";
+    if (shortcutPlan) {
+      plan = shortcutPlan;
+    } else {
+      const target = await this.resolveVoiceTarget({ callId: cleanCallId });
+      callState.resolvedTarget = target;
+      const promptText = isThreadScoped
+        ? this.#buildThreadScopedCoordinatorPrompt({
+          snapshot,
+          transcriptText: heard,
+          mode,
+          unheardUtterances,
+          lastUtterance,
+        })
+        : this.#buildCoordinatorPrompt({
+          snapshot,
+          transcriptText: heard,
+          mode,
+          unheardUtterances,
+          lastUtterance,
+        });
+      const rawResponse = await this.#runVoiceCoordinator({ callId: cleanCallId, target, promptText });
+      plan = isThreadScoped
+        ? parseThreadScopedCoordinatorJson(rawResponse, heard, {
+          activeThreadId: snapshot.activeThreadId,
+          activeProjectCwd: snapshot.activeProjectCwd,
+          defaultRequestId: snapshot.pendingRequests?.[0]?.requestId || "",
+        })
+        : parseCoordinatorJson(rawResponse, heard);
+      model = target.model;
+    }
     const usedFallback = false;
 
     if (plan?.noSpeech || plan?.intent === "no_speech") {
@@ -3386,7 +4256,7 @@ export class VoiceCallService {
     let batchId = "";
 
     if (autoExecute && !usedFallback) {
-      const prepared = this.#prepareDispatchAction(plan, snapshot, { activeThreadId, callId: cleanCallId });
+      const prepared = this.#prepareDispatchAction(plan, snapshot, { activeThreadId: effectiveThreadId, callId: cleanCallId });
       if (asyncDispatch || prepared.alwaysAsync) {
         if (!prepared.needsBackground) {
           executed = prepared.immediateResult;
@@ -3442,28 +4312,22 @@ export class VoiceCallService {
 
     let replacesUtteranceIds = [];
     if (plan.intent === "repeat_last") {
-      replacesUtteranceIds = unheardUtterances.map((u) => u.utteranceId);
-      for (const u of unheardUtterances) {
+      replacesUtteranceIds = rawUnheard.map((u) => u.utteranceId);
+      for (const u of rawUnheard) {
         u.compensatedInTurn = true;
       }
-    } else if (unheardUtterances.length > 0) {
-      const eligibleMissed = unheardUtterances.filter((u) => ["turn", "briefing", "approval"].includes(String(u?.source || "turn")));
-      const missed = eligibleMissed.find((u) => u.priority === "critical")
-        || eligibleMissed[eligibleMissed.length - 1];
-      if (missed && missed.text) {
-        const rawMissedText = String(missed.text)
-          .replace(/\s*另外补播刚才未听到的提醒：[\s\S]*$/, "")
-          .trim();
-        const missedSnippet = stripSpeechNoise(rawMissedText, 140);
-        const currentReply = String(plan.spokenReply || "").trim();
-        if (missedSnippet && !currentReply.includes(missedSnippet)) {
-          plan.spokenReply = stripSpeechNoise(
-            `${currentReply ? `${currentReply} ` : ""}另外补播刚才未听到的提醒：${missedSnippet}`,
-            360,
-          );
+    } else if (unheardUtterances.length > 0 && !shortcutPlan) {
+      replacesUtteranceIds = unheardUtterances.map((u) => u.utteranceId);
+      for (const u of unheardUtterances) {
+        const orig = unheardById.get(u.utteranceId);
+        if (orig) orig.compensatedInTurn = true;
+      }
+      if (!String(plan.spokenReply || "").trim()) {
+        const fallbackMissed = unheardUtterances.find((u) => u.priority === "critical")
+          || unheardUtterances[unheardUtterances.length - 1];
+        if (fallbackMissed?.text) {
+          plan.spokenReply = fallbackMissed.text;
         }
-        missed.compensatedInTurn = true;
-        replacesUtteranceIds = [missed.utteranceId];
       }
     }
 
@@ -3510,6 +4374,7 @@ export class VoiceCallService {
     return {
       ok: true,
       callId: cleanCallId,
+      callScope: effectiveScope,
       model,
       asrEngine: cleanAudio ? engineLabel : "",
       usedFallback,
@@ -3577,6 +4442,8 @@ export class VoiceCallService {
     }
     this.#pendingSubagentThreads.clear();
     this.#resetAsrWorker("语音通话服务已关闭");
+    this.#resetEdgeTtsWorker("语音通话服务已关闭");
+    this.#resetKokoroWorker("语音通话服务已关闭");
     if (this.#client) {
       await this.#client.close().catch(() => {});
       this.#client = null;

@@ -1,23 +1,23 @@
-import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261116quota";
-import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261116quota";
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117draft";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117draft";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
   submitComposerRequest,
-} from "./composer-mode.js?v=20261116quota";
+} from "./composer-mode.js?v=20261117draft";
 import {
   closeCustomSelectMenu,
   initComposerCustomSelects,
   syncAllCustomSelects,
-} from "./custom-select.js?v=20261116quota";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261116quota";
+} from "./custom-select.js?v=20261117draft";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117draft";
 import {
   compressImageFileForUpload,
   estimateDataUrlBytes,
   formatByteSize,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261116quota";
+} from "./image-attachment.js?v=20261117draft";
 import {
   abbreviateMiddleText,
   buildSelectableTelemetryItems,
@@ -42,13 +42,14 @@ import {
   renderProfilePillsHtml,
   renderProviderPillsHtml,
   renderQuotaOverviewHtml,
+  resolveAntigravityModelSelection,
   resolveDistinctProfileChipText,
   resolveModelsForProvider,
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261116quota";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261116quota";
+} from "./instance-switcher.js?v=20261117draft";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117draft";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
@@ -63,7 +64,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261116quota";
+} from "./markdown.js?v=20261117draft";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   buildProjectGroups,
@@ -76,8 +77,14 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261116quota";
-import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261116quota";
+} from "./project-board.js?v=20261117draft";
+import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117draft";
+import {
+  applySlashCommandSelection,
+  filterSlashCommands,
+  parseSlashTrigger,
+  renderSlashMenuHtml,
+} from "./slash-commands.js?v=20261117draft";
 import {
   base64ToUint8Array,
   buildVoiceLiveProgressItems,
@@ -100,7 +107,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261116quota";
+} from "./voice-copilot.js?v=20261117draft";
 
 const $ = (id) => document.getElementById(id);
 
@@ -270,6 +277,22 @@ function saveDefaultPermissionMode(mode) {
     localStorage.setItem(PERM_PREF_KEY, clean);
   } catch {}
   return clean;
+}
+
+const NEW_THREAD_PREFS_KEY = "agentControl.newThreadPrefs.v1";
+
+function getNewThreadPrefs(provider) {
+  try {
+    return JSON.parse(localStorage.getItem(NEW_THREAD_PREFS_KEY) || "{}")[provider] || {};
+  } catch { return {}; }
+}
+
+function saveNewThreadPrefs(provider, patch) {
+  try {
+    const prefs = JSON.parse(localStorage.getItem(NEW_THREAD_PREFS_KEY) || "{}");
+    prefs[provider] = { ...prefs[provider], ...patch };
+    localStorage.setItem(NEW_THREAD_PREFS_KEY, JSON.stringify(prefs));
+  } catch {}
 }
 
 function loadThreadPrefsMap() {
@@ -458,6 +481,7 @@ const state = {
   initialThreadLoading: false,
   activeThreadId: "",
   activeThread: null,
+  newThreadCwd: null,
   nextCursor: null,
   liveActivity: null,
   activityCursor: "",
@@ -469,6 +493,13 @@ const state = {
   queuedTurns: [],
   queuedPanelCollapsed: false,
   editingQueueItem: null,
+  slashCatalogByKey: new Map(),
+  slashMenuOpen: false,
+  slashMenuItems: [],
+  slashMenuIndex: 0,
+  slashTrigger: null,
+  slashManualOpen: false,
+  slashFetchSeq: 0,
   images: [],
   imageProcessingCount: 0,
   composerGoal: false,
@@ -509,6 +540,8 @@ const state = {
   voice: {
     config: loadVoiceConfig(),
     callId: "",
+    callScope: "global",
+    scopedThreadId: "",
     callActive: false,
     minimized: false,
     callStartedAt: 0,
@@ -521,14 +554,19 @@ const state = {
     micStream: null,
     micSource: null,
     processorNode: null,
+    silentGainNode: null,
     vadDetector: null,
     currentRms: 0,
+    lastAudioFrameAt: 0,
+    micWatchdogTimer: null,
+    micRecovering: false,
     levelRafId: null,
     resumeListenTimer: null,
     audioEl: null,
     audioObjectUrl: "",
     activePlaybackAbort: null,
     activeBufferSource: null,
+    playbackToken: 0,
     webAudioUnlocked: false,
     audioElUnlocked: false,
     wakeLock: null,
@@ -629,7 +667,7 @@ function isInternalVoiceThreadClient(thread) {
 
 function isBoardViewActive() {
   if (state.initialThreadLoading && state.activeThreadId) return false;
-  return Boolean(state.boardOpen || !state.activeThread);
+  return Boolean(state.boardOpen || (!state.activeThread && state.newThreadCwd === null));
 }
 
 function syncWorkspaceVisibility() {
@@ -1123,9 +1161,151 @@ async function refreshExecutionStats() {
   }
 }
 
+let telemetryHeroAnim = null;
+let telemetryClosing = false;
+
+function cancelTelemetryHeroAnim() {
+  if (telemetryHeroAnim) {
+    try { telemetryHeroAnim.cancel(); } catch {}
+    telemetryHeroAnim = null;
+  }
+  telemetryClosing = false;
+}
+
+function getTelemetryHeroAnchorEl(preferredEl = null) {
+  if (typeof document === "undefined") return null;
+  const desktopSlot = $("topbarTelemetrySlot");
+  const isNarrow = typeof window !== "undefined" && window.innerWidth <= 960;
+  const preferredPill = preferredEl?.closest?.(".telemetry-compact-items, .telemetry-compact-pill, #topbarTelemetrySlot, #telemetryTopbarBtn");
+  if (preferredPill && desktopSlot?.contains(preferredPill)) return preferredPill;
+  if (!isNarrow && desktopSlot && !desktopSlot.hidden) {
+    return desktopSlot.querySelector(".telemetry-compact-items") || desktopSlot;
+  }
+  const bar = $("agentTelemetryBar");
+  return bar?.querySelector(".telemetry-compact-items") || $("telemetryTopbarBtn") || desktopSlot || bar || null;
+}
+
+function syncTelemetryPopoverAnchor(el, anchorEl) {
+  if (!el || !anchorEl || typeof window === "undefined") return;
+  if (window.innerWidth <= 960) {
+    el.style.removeProperty("--telemetry-popover-top");
+    el.style.removeProperty("--telemetry-popover-right");
+    return;
+  }
+  const rect = anchorEl.getBoundingClientRect?.();
+  if (!rect || rect.width <= 0) return;
+  const top = Math.max(50, Math.round(rect.bottom + 8));
+  const right = Math.max(12, Math.round(window.innerWidth - rect.right));
+  el.style.setProperty("--telemetry-popover-top", `${top}px`);
+  el.style.setProperty("--telemetry-popover-right", `${right}px`);
+}
+
+function openTelemetryPopover(preferredAnchor = null) {
+  const el = $("agentTelemetryBar");
+  const anchorEl = getTelemetryHeroAnchorEl(preferredAnchor);
+  const fromRect = anchorEl?.getBoundingClientRect?.() || null;
+  cancelTelemetryHeroAnim();
+  state.telemetryExpanded = true;
+  if (typeof window !== "undefined" && window.innerWidth <= 960) {
+    state.mobileTelemetryOpen = true;
+  }
+  syncTelemetryPopoverAnchor(el, anchorEl);
+  renderAgentTelemetryBar();
+  if (!el || el.hidden || typeof el.animate !== "function" || !fromRect || fromRect.width <= 0 || fromRect.height <= 0) return;
+  const toRect = el.getBoundingClientRect?.();
+  if (!toRect || toRect.width <= 0 || toRect.height <= 0) return;
+  const dx = fromRect.left - toRect.left;
+  const dy = fromRect.top - toRect.top;
+  const sx = Math.max(0.16, Math.min(1, fromRect.width / toRect.width));
+  const sy = Math.max(0.08, Math.min(1, fromRect.height / toRect.height));
+  telemetryHeroAnim = el.animate([
+    {
+      transformOrigin: "top left",
+      transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`,
+      opacity: 0.35,
+      borderRadius: "20px",
+    },
+    {
+      transformOrigin: "top left",
+      transform: "translate(0px, 0px) scale(1, 1)",
+      opacity: 1,
+      borderRadius: "14px",
+    },
+  ], {
+    duration: 240,
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  });
+  telemetryHeroAnim.onfinish = () => {
+    telemetryHeroAnim = null;
+  };
+}
+
+function closeTelemetryPopover(preferredAnchor = null) {
+  if (!state.telemetryExpanded && !state.telemetryPickerOpen && !state.mobileTelemetryOpen) return;
+  const el = $("agentTelemetryBar");
+  const backdrop = $("telemetryBackdrop");
+  const anchorEl = getTelemetryHeroAnchorEl(preferredAnchor);
+  const canAnimate = Boolean(
+    el
+    && !el.hidden
+    && typeof el.animate === "function"
+    && anchorEl
+    && typeof window !== "undefined"
+  );
+  const fromRect = canAnimate ? el.getBoundingClientRect?.() : null;
+  const toRect = canAnimate ? anchorEl.getBoundingClientRect?.() : null;
+
+  cancelTelemetryHeroAnim();
+  state.telemetryExpanded = false;
+  state.telemetryPickerOpen = false;
+  state.mobileTelemetryOpen = false;
+
+  if (canAnimate && fromRect && toRect && fromRect.width > 0 && fromRect.height > 0 && toRect.width > 0 && toRect.height > 0) {
+    telemetryClosing = true;
+    if (backdrop) {
+      backdrop.classList.remove("is-open");
+      backdrop.hidden = true;
+    }
+    $("topbarTelemetrySlot")?.classList.remove("is-popover-open");
+    const dx = toRect.left - fromRect.left;
+    const dy = toRect.top - fromRect.top;
+    const sx = Math.max(0.16, Math.min(1, toRect.width / fromRect.width));
+    const sy = Math.max(0.08, Math.min(1, toRect.height / fromRect.height));
+    const anim = el.animate([
+      {
+        transformOrigin: "top left",
+        transform: "translate(0px, 0px) scale(1, 1)",
+        opacity: 1,
+        borderRadius: "14px",
+      },
+      {
+        transformOrigin: "top left",
+        transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`,
+        opacity: 0,
+        borderRadius: "20px",
+      },
+    ], {
+      duration: 185,
+      easing: "cubic-bezier(0.4, 0, 0.2, 1)",
+      fill: "forwards",
+    });
+    telemetryHeroAnim = anim;
+    anim.onfinish = () => {
+      if (telemetryHeroAnim === anim) telemetryHeroAnim = null;
+      telemetryClosing = false;
+      try { anim.cancel(); } catch {}
+      renderAgentTelemetryBar();
+    };
+    return;
+  }
+
+  renderAgentTelemetryBar();
+}
+
 function renderAgentTelemetryBar() {
   const el = $("agentTelemetryBar");
   const desktopSlot = $("topbarTelemetrySlot");
+  const backdrop = $("telemetryBackdrop");
   const merged = buildMergedTelemetrySnapshot();
   const items = buildSelectableTelemetryItems(state.profiles);
   const visibleKeys = resolveVisibleTelemetryKeys(items, state.telemetryVisiblePrefs);
@@ -1143,28 +1323,48 @@ function renderAgentTelemetryBar() {
 
   const activeProvider = state.activeThread?.provider || $("composerProviderSelect")?.value || "";
   const activeProfileId = state.activeThread?.profileId || $("composerProfileSelect")?.value || "";
-  let html = renderAgentTelemetryBarHtml(state.profiles, merged, {
+  const compactSlotHtml = renderAgentTelemetryBarHtml(state.profiles, merged, {
     providerFilter: state.providerFilter,
-    expanded: state.telemetryExpanded,
+    expanded: false,
     refreshing: state.quotaRefreshing,
     visibleKeys,
-    pickerOpen: state.telemetryPickerOpen,
+    pickerOpen: false,
     activeProvider,
     activeProfileId,
   });
-  if (isDetailOpen) html += renderExecutionStatsHtml(state.executionStats, {
-    days: state.executionStatsDays, provider: state.executionStatsProvider,
-    loading: state.executionStatsLoading, error: state.executionStatsError,
-  });
 
   if (desktopSlot) {
-    const compactSlotHtml = !isDetailOpen ? html : "";
     if (desktopSlot._acLastHtml !== compactSlotHtml) {
       desktopSlot._acLastHtml = compactSlotHtml;
       desktopSlot.innerHTML = compactSlotHtml;
     }
     desktopSlot.hidden = !compactSlotHtml;
+    desktopSlot.classList.toggle("is-popover-open", isDetailOpen);
   }
+
+  if (backdrop) {
+    const showBackdrop = Boolean(isDetailOpen && !telemetryClosing);
+    backdrop.hidden = !showBackdrop;
+    backdrop.classList.toggle("is-open", showBackdrop);
+  }
+
+  if (telemetryClosing) return;
+
+  let html = isDetailOpen
+    ? renderAgentTelemetryBarHtml(state.profiles, merged, {
+        providerFilter: state.providerFilter,
+        expanded: state.telemetryExpanded,
+        refreshing: state.quotaRefreshing,
+        visibleKeys,
+        pickerOpen: state.telemetryPickerOpen,
+        activeProvider,
+        activeProfileId,
+      })
+    : compactSlotHtml;
+  if (isDetailOpen) html += renderExecutionStatsHtml(state.executionStats, {
+    days: state.executionStatsDays, provider: state.executionStatsProvider,
+    loading: state.executionStatsLoading, error: state.executionStatsError,
+  });
 
   if (!el) return;
   if (el._acLastHtml !== html) {
@@ -1174,6 +1374,7 @@ function renderAgentTelemetryBar() {
   el.hidden = !html;
   el.classList.toggle("is-expanded", Boolean(html && isDetailOpen));
   el.classList.toggle("is-mobile-open", Boolean(html && (state.mobileTelemetryOpen || isDetailOpen)));
+  if (isDetailOpen) syncTelemetryPopoverAnchor(el, getTelemetryHeroAnchorEl());
 }
 
 function renderQuotaStrip() {
@@ -1313,6 +1514,7 @@ function syncNewModelSelect(preferredModel = "") {
   const modelSelect = $("newModelSelect");
   if (!modelSelect) return;
   const provider = $("newProviderSelect").value || defaultProviderValue();
+  preferredModel ||= getNewThreadPrefs(provider).model || "";
   const rawModels = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
   const models = ensurePreferredModelInList(rawModels, provider, preferredModel);
   if (!models.length) {
@@ -1358,6 +1560,7 @@ function syncModelAndEffortSelectors() {
   const preferredModel = localPref?.model
     || state.activeThread?.model
     || (keepDraftModel ? modelSelect.value : "")
+    || (!state.activeThreadId ? getNewThreadPrefs(provider).model : "")
     || "";
   const rawModels = resolveModelsForProvider(state.modelsByProvider, state.allModels, provider);
   const models = ensurePreferredModelInList(rawModels, provider, preferredModel);
@@ -1387,11 +1590,23 @@ function syncModelAndEffortSelectors() {
   syncAllCustomSelects();
 }
 
+function normalizeEffortOptionValue(item) {
+  if (!item) return "";
+  if (typeof item === "string") {
+    const trimmed = item.trim();
+    return trimmed === "[object Object]" ? "" : trimmed;
+  }
+  if (typeof item === "object") {
+    return normalizeEffortOptionValue(item.reasoningEffort ?? item.id ?? item.value ?? "");
+  }
+  return "";
+}
+
 function syncEffortSelectForModel(selected) {
   const effortSelect = $("effortSelect");
-  const efforts = selected?.supportedReasoningEfforts?.length
-    ? selected.supportedReasoningEfforts
-    : [];
+  const efforts = (selected?.supportedReasoningEfforts || [])
+    .map(normalizeEffortOptionValue)
+    .filter(Boolean);
   const effortLabels = { low: "低思考", medium: "中思考", high: "高思考", xhigh: "超高思考", max: "最高思考" };
   if (!efforts.length) {
     effortSelect.innerHTML = `<option value="">默认强度</option>`;
@@ -1409,7 +1624,15 @@ function syncEffortSelectForModel(selected) {
     `<option value="${escapeHtml(e)}">${escapeHtml(effortLabels[e] || e)}</option>`,
   ).join("");
   const localPref = getLocalThreadPrefs(state.activeThreadId);
-  const preferredEffort = localPref?.effort || state.activeThread?.reasoningEffort || selected?.defaultReasoningEffort || "medium";
+  const legacyModelEffort = resolveAntigravityModelSelection(
+    localPref?.model || state.activeThread?.model || "",
+  ).effort;
+  const preferredEffort = normalizeEffortOptionValue(localPref?.effort)
+    || normalizeEffortOptionValue(state.activeThread?.reasoningEffort)
+    || (!state.activeThreadId ? normalizeEffortOptionValue(getNewThreadPrefs(currentComposerProvider()).effort) : "")
+    || normalizeEffortOptionValue(legacyModelEffort)
+    || normalizeEffortOptionValue(selected?.defaultReasoningEffort)
+    || "medium";
   if (efforts.includes(preferredEffort)) effortSelect.value = preferredEffort;
   syncCfgFieldVisibility();
   renderComposerConfigChip();
@@ -1798,6 +2021,110 @@ function toggleSidebarGroupCollapse(cwd) {
   renderThreadList();
 }
 
+let activeThreadContextMenu = null;
+
+function closeThreadContextMenu() {
+  if (activeThreadContextMenu) {
+    activeThreadContextMenu.remove();
+    activeThreadContextMenu = null;
+  }
+}
+
+async function forkThreadAction(threadId, { upToTurnIndex = null, upToTurnId = "" } = {}) {
+  if (!threadId) return;
+  try {
+    setComposerStatus("pending", "正在分叉会话…");
+    const res = await apiPost("api/thread/fork", {
+      threadId,
+      ...(Number.isInteger(upToTurnIndex) && upToTurnIndex >= 0 ? { upToTurnIndex } : {}),
+      ...(upToTurnId ? { upToTurnId } : {}),
+    });
+    await refreshThreads();
+    if (res?.thread?.id) {
+      await selectThread(res.thread.id);
+    }
+    setComposerStatus("success", "已分叉为新会话", { autoClearMs: 2600 });
+    showToastBanner("已创建分叉会话", {
+      detail: Number.isInteger(upToTurnIndex) && upToTurnIndex >= 0
+        ? "已保留至当前轮次，后续对话已舍弃"
+        : (res?.thread?.title || res?.thread?.name || "新会话"),
+    });
+  } catch (error) {
+    const errMsg = formatActionError(error, "分叉会话失败");
+    setComposerStatus("error", `分叉失败：${errMsg}`);
+    showToastBanner("分叉失败", { detail: errMsg, error: true });
+  }
+}
+
+function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
+  closeThreadContextMenu();
+  const thread = state.threads.find((t) => t.id === threadId);
+  if (!thread) return;
+
+  const menu = document.createElement("div");
+  menu.className = "thread-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.innerHTML = `
+    <button type="button" class="thread-context-menu-item" data-menu-action="fork">${iconSvg("fork", { size: 14 })}<span>分叉会话</span></button>
+    <button type="button" class="thread-context-menu-item" data-menu-action="rename">${iconSvg("edit", { size: 14 })}<span>重命名</span></button>
+    <button type="button" class="thread-context-menu-item" data-menu-action="archive">${iconSvg("archive", { size: 14 })}<span>${thread.archived ? "取消归档" : "归档会话"}</span></button>
+  `;
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const maxX = Math.max(8, window.innerWidth - rect.width - 8);
+  const maxY = Math.max(8, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.min(Math.max(8, clientX), maxX)}px`;
+  menu.style.top = `${Math.min(Math.max(8, clientY), maxY)}px`;
+  activeThreadContextMenu = menu;
+
+  const onDismiss = (ev) => {
+    if (ev.type === "keydown" && ev.key !== "Escape") return;
+    if (ev.type === "pointerdown" && menu.contains(ev.target)) return;
+    closeThreadContextMenu();
+    document.removeEventListener("pointerdown", onDismiss, true);
+    document.removeEventListener("keydown", onDismiss, true);
+    window.removeEventListener("scroll", onDismiss, true);
+  };
+  document.addEventListener("pointerdown", onDismiss, true);
+  document.addEventListener("keydown", onDismiss, true);
+  window.addEventListener("scroll", onDismiss, true);
+
+  menu.addEventListener("click", async (ev) => {
+    const btn = ev.target.closest("[data-menu-action]");
+    if (!btn) return;
+    const action = btn.dataset.menuAction;
+    closeThreadContextMenu();
+    document.removeEventListener("pointerdown", onDismiss, true);
+    document.removeEventListener("keydown", onDismiss, true);
+    window.removeEventListener("scroll", onDismiss, true);
+
+    if (action === "fork") {
+      await forkThreadAction(threadId);
+    } else if (action === "rename") {
+      const next = prompt("输入新的会话标题：", thread.title || thread.name || "");
+      if (!next || !next.trim()) return;
+      try {
+        await apiPost("api/thread/name", { threadId, name: next.trim() });
+        await refreshThreads();
+        if (state.activeThreadId === threadId) await selectThread(threadId, { focusScroll: false });
+      } catch (error) {
+        showToastBanner("重命名失败", { detail: formatActionError(error), error: true });
+      }
+    } else if (action === "archive") {
+      const nextArchived = !thread.archived;
+      try {
+        await apiPost("api/thread/archive", { threadId, archived: nextArchived });
+        await refreshThreads();
+        if (state.activeThreadId === threadId && nextArchived && !state.showArchived) {
+          await selectThread("");
+        }
+      } catch (error) {
+        showToastBanner("归档失败", { detail: formatActionError(error), error: true });
+      }
+    }
+  });
+}
+
 function renderThreadList() {
   const listEl = $("threadList");
   const warningsEl = $("threadWarnings");
@@ -1847,7 +2174,7 @@ function renderThreadList() {
 function renderProjectBoard() {
   const boardEl = $("projectBoard");
   if (!boardEl) return;
-  const shouldShowBoard = !(state.initialThreadLoading && state.activeThreadId) && (state.boardOpen || !state.activeThread);
+  const shouldShowBoard = isBoardViewActive();
   if (!shouldShowBoard) {
     boardEl.hidden = true;
     boardEl.innerHTML = "";
@@ -1926,7 +2253,7 @@ function renderTopbarAndControls() {
   const moreDot = $("topbarMoreDot");
   const moreProjCard = $("topbarMoreProjectCard");
 
-  boardBtn?.setAttribute("aria-pressed", state.boardOpen || !thread ? "true" : "false");
+  boardBtn?.setAttribute("aria-pressed", isBoardViewActive() ? "true" : "false");
 
   if (!thread) {
     topbar?.classList.remove("is-running");
@@ -1941,7 +2268,8 @@ function renderTopbarAndControls() {
     archiveBtn.hidden = true;
     if (moreDot) moreDot.hidden = !state.updateStatus?.hasUpdate;
     if (moreProjCard) moreProjCard.hidden = true;
-    renderActiveHeading("项目与多任务总控", "选择关注项目或点击语音说话直达对话");
+    renderActiveHeading(state.newThreadCwd !== null && !state.boardOpen ? "新会话" : "项目与多任务总控",
+      state.newThreadCwd !== null && !state.boardOpen ? state.newThreadCwd : "选择关注项目或点击语音说话直达对话");
     syncBoardAttentionDot();
     syncWorkspaceVisibility();
     renderLiveBanner();
@@ -2599,6 +2927,7 @@ function buildTurnRenderOptions(turns, idx) {
   return {
     agentLabel,
     threadId: state.activeThread?.id || state.activeThreadId || "",
+    turnIndex: idx,
     forceRunning: turnRunning,
     suppressRunning: !turnRunning,
     liveThought: turnRunning ? state.streamingThought : "",
@@ -2967,10 +3296,17 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
 
   const isCompressedUrl = !src.startsWith("data:") && /[?&]w=\d+/i.test(src) && !/[?&]raw=1/i.test(src);
   const resolvedRaw = rawSrc || "";
-  state.imagePreview = { src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl };
+  state.imagePreview = { src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0 };
 
   img.src = src;
   img.alt = caption || "图片预览";
+  img.style.transform = "";
+  img.classList.remove("is-zoomed", "is-dragging");
+  const zoomBtn = $("imagePreviewZoomBtn");
+  if (zoomBtn) {
+    zoomBtn.hidden = true;
+    zoomBtn.textContent = "100%";
+  }
   if (capEl) capEl.textContent = caption || "图片预览";
   if (metaEl) {
     metaEl.hidden = src.startsWith("data:");
@@ -3163,6 +3499,119 @@ function renderComposerControls() {
   renderComposerConfigChip();
   autoResizePromptInput();
   syncAllCustomSelects();
+}
+
+function closeSlashCommandMenu() {
+  state.slashMenuOpen = false;
+  state.slashManualOpen = false;
+  state.slashTrigger = null;
+  state.slashMenuItems = [];
+  state.slashMenuIndex = 0;
+  const menu = $("slashCommandMenu");
+  if (menu) {
+    menu.hidden = true;
+    menu.innerHTML = "";
+  }
+  $("composerSlashBtn")?.setAttribute("aria-expanded", "false");
+}
+
+function renderSlashCommandMenu() {
+  const menu = $("slashCommandMenu");
+  if (!menu) return;
+  if (!state.slashMenuOpen || !state.slashMenuItems.length) {
+    menu.hidden = true;
+    menu.innerHTML = "";
+    $("composerSlashBtn")?.setAttribute("aria-expanded", "false");
+    return;
+  }
+  menu.hidden = false;
+  menu.innerHTML = renderSlashMenuHtml(state.slashMenuItems, state.slashMenuIndex);
+  $("composerSlashBtn")?.setAttribute("aria-expanded", "true");
+  const activeEl = menu.querySelector(".slash-command-item.is-active");
+  activeEl?.scrollIntoView({ block: "nearest" });
+}
+
+async function fetchSlashCatalogForContext({ provider = "", cwd = "", query = "" } = {}) {
+  const cleanProvider = String(provider || currentComposerProvider() || "antigravity").trim().toLowerCase();
+  const cleanCwd = String(cwd || state.activeThread?.cwd || "").trim();
+  const cleanQuery = String(query || "").trim();
+  const key = `${cleanProvider}::${cleanCwd}::${cleanQuery}`;
+  const cached = state.slashCatalogByKey.get(key);
+  if (cached && (Date.now() - cached.at) < 15_000) {
+    return cached.items;
+  }
+  const params = new URLSearchParams({ provider: cleanProvider });
+  if (cleanCwd) params.set("cwd", cleanCwd);
+  if (cleanQuery) params.set("q", cleanQuery);
+  const res = await apiGet(`api/slash-commands?${params.toString()}`).catch(() => null);
+  const items = Array.isArray(res?.items) ? res.items : [];
+  if (items.length || !cleanQuery) {
+    state.slashCatalogByKey.set(key, { at: Date.now(), items });
+  }
+  return items;
+}
+
+async function updateSlashCommandMenu({ manual = false } = {}) {
+  const input = $("promptInput");
+  if (!input) return;
+  const text = input.value || "";
+  const cursor = input.selectionStart ?? text.length;
+  const trigger = parseSlashTrigger(text, cursor);
+
+  if (!trigger && !manual && !state.slashManualOpen) {
+    if (state.slashMenuOpen) closeSlashCommandMenu();
+    return;
+  }
+  if (!trigger && state.slashManualOpen && text.trim()) {
+    // Manual open while user continues typing non-slash text: close if cursor is not on a slash token.
+    closeSlashCommandMenu();
+    return;
+  }
+
+  state.slashTrigger = trigger;
+  if (manual) state.slashManualOpen = true;
+  const query = trigger?.query || "";
+  const provider = currentComposerProvider();
+  const cwd = state.activeThread?.cwd || "";
+  const seq = ++state.slashFetchSeq;
+
+  // Immediate render from pinned cache when available
+  const pinnedCached = state.slashCatalogByKey.get(`${provider}::${cwd}::`)?.items;
+  if (pinnedCached && pinnedCached.length) {
+    const quick = filterSlashCommands(pinnedCached, query);
+    if (quick.length) {
+      state.slashMenuItems = quick;
+      state.slashMenuIndex = 0;
+      state.slashMenuOpen = true;
+      renderSlashCommandMenu();
+    }
+  }
+
+  const fetched = await fetchSlashCatalogForContext({ provider, cwd, query });
+  if (seq !== state.slashFetchSeq) return;
+  const finalItems = filterSlashCommands(fetched, query);
+  if (!finalItems.length) {
+    closeSlashCommandMenu();
+    return;
+  }
+  state.slashMenuItems = finalItems;
+  state.slashMenuIndex = 0;
+  state.slashMenuOpen = true;
+  renderSlashCommandMenu();
+}
+
+function applySlashMenuChoice(index) {
+  const item = state.slashMenuItems[index];
+  const input = $("promptInput");
+  if (!item || !input) return;
+  const applied = applySlashCommandSelection(input.value || "", item, state.slashTrigger);
+  input.value = applied.text;
+  closeSlashCommandMenu();
+  renderComposerControls();
+  input.focus();
+  if (typeof input.setSelectionRange === "function") {
+    input.setSelectionRange(applied.cursorPos, applied.cursorPos);
+  }
 }
 
 function scrollViewportIfFollowing() {
@@ -3665,7 +4114,7 @@ async function reloadActiveThreadAfterTurnCompletion({
   renderLiveBanner();
 }
 
-async function selectThread(compositeId, { focusScroll = true, preserveStatus = false } = {}) {
+async function selectThread(compositeId, { focusScroll = true, preserveStatus = false, newThreadCwd = null } = {}) {
   closeCustomSelectMenu();
   if (!preserveStatus) {
     clearComposerStatus();
@@ -3678,11 +4127,15 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   if (compositeId !== prevThreadId && state.editingQueueItem) {
     clearQueueEditState({ restoreDraft: state.editingQueueItem.threadId === prevThreadId });
   }
+  if (compositeId !== prevThreadId) {
+    closeSlashCommandMenu();
+  }
   state.activeThreadId = compositeId;
   if (compositeId !== prevThreadId) {
     state.queuedPanelCollapsed = false;
   }
-  state.boardOpen = !compositeId;
+  state.newThreadCwd = compositeId ? null : newThreadCwd;
+  state.boardOpen = !compositeId && newThreadCwd === null;
   state.autoFollow = focusScroll;
   state.userPickedDraftModel = false;
   state.activityCursor = "";
@@ -3910,11 +4363,13 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
         profileId,
         text,
         images: cleanImages,
+        cwd: state.newThreadCwd || "",
         model,
         effort,
         permissionMode,
         goalMode,
       }, { timeoutMs: requestTimeoutMs });
+      saveNewThreadPrefs(provider, { model, effort });
       resetDraftIfNeeded();
       await refreshThreads();
       if (created?.thread?.id) {
@@ -3974,6 +4429,17 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
 
     const turnRes = submitted.result;
     resetDraftIfNeeded();
+    if (turnRes?.redirectedThreadId && turnRes.redirectedThreadId !== state.activeThreadId) {
+      const nextThreadId = turnRes.redirectedThreadId;
+      saveLocalThreadPrefs(nextThreadId, { model, effort, permissionMode });
+      state.threads = state.threads.filter((t) => t.id !== state.activeThreadId);
+      state.activeThreadId = nextThreadId;
+      if (state.activeThread) {
+        state.activeThread.id = nextThreadId;
+        state.activeThread.isForkDraft = false;
+      }
+      if (turnRes.thread) syncThreadSummaryIntoList(turnRes.thread);
+    }
     if (state.activeThread) {
       const optimisticTurnId = turnRes?.turn?.id || turnRes?.turnId || `optimistic-turn-${Date.now()}`;
       const userContent = [
@@ -4395,6 +4861,26 @@ function connectEvents() {
     } catch {}
   });
 
+  es.addEventListener("automation_status", (ev) => {
+    try {
+      const snap = JSON.parse(ev.data || "{}");
+      state.automationsSnapshot = snap;
+      renderAutomationsModal(snap);
+    } catch {}
+  });
+
+  es.addEventListener("automation_run", (ev) => {
+    try {
+      const info = JSON.parse(ev.data || "{}");
+      if (info.reason === "scheduled" && info.name && !info.error) {
+        showToastBanner(`定时任务已自动唤起：${info.name}`);
+      }
+      if ($("automationsModal")?.open) {
+        void refreshAutomations().catch(() => {});
+      }
+    } catch {}
+  });
+
   es.addEventListener("remote_status", (ev) => {
     try {
       const snap = JSON.parse(ev.data || "{}");
@@ -4468,6 +4954,9 @@ function connectEvents() {
     renderProjectTaskStrip();
     renderVoiceLiveProgressIfOpen();
     if (state.voice.callActive && state.voice.config.autoBroadcastEvents) {
+      if (effectiveVoiceScope() === "thread" && request.threadId && request.threadId !== effectiveVoiceThreadId()) {
+        return;
+      }
       const targetThread = state.threads.find((t) => t.id === request.threadId);
       const projLabel = targetThread ? (state.projectsMeta[normalizeProjectCwd(targetThread.cwd)]?.alias || projectBaseName(targetThread.cwd)) : "有任务";
       const detail = stripMarkdownForSpeech(request.title || request.command || "请确认", 80);
@@ -4540,13 +5029,15 @@ function connectEvents() {
       unwatchVoiceThread(milestone.threadId);
     }
     if (milestone?.shouldSpeak && milestone?.spokenFeedback && state.voice.callActive && state.voice.config.autoBroadcastEvents) {
-      enqueueOrPlayVoiceBroadcast({
-        text: milestone.spokenFeedback,
-        priority: milestone.priority || "normal",
-        source: "voice_external_milestone",
-        actionTag: milestone.summaryTag || "任务进展",
-        dedupeKey: milestone.dedupeKey || `milestone:${milestone.threadId || ""}:${milestone.turnId || ""}`,
-      });
+      if (effectiveVoiceScope() !== "thread" || !milestone.threadId || milestone.threadId === effectiveVoiceThreadId()) {
+        enqueueOrPlayVoiceBroadcast({
+          text: milestone.spokenFeedback,
+          priority: milestone.priority || "normal",
+          source: "voice_external_milestone",
+          actionTag: milestone.summaryTag || "任务进展",
+          dedupeKey: milestone.dedupeKey || `milestone:${milestone.threadId || ""}:${milestone.turnId || ""}`,
+        });
+      }
     }
     renderVoiceCallUi();
   });
@@ -5304,6 +5795,118 @@ async function triggerDesktopAppUpdate() {
   }
 }
 
+function formatAutomationTimeLabel(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  try {
+    return new Date(n).toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return "—";
+  }
+}
+
+function renderAutomationsModal(snapshot = state.automationsSnapshot) {
+  const badge = $("automationsSummaryBadge");
+  const toggle = $("automationsGlobalToggle");
+  const listEl = $("automationsList");
+  const menuBadge = $("topbarMenuAutomationsBadge");
+  const snap = snapshot || { enabled: true, tasks: [], summary: { total: 0, managedCount: 0 } };
+  const managedCount = Number(snap.summary?.managedCount || 0);
+  if (menuBadge) {
+    menuBadge.hidden = managedCount <= 0;
+    menuBadge.textContent = String(managedCount);
+  }
+  if (toggle) toggle.checked = snap.enabled !== false;
+  if (badge) {
+    badge.textContent = snap.enabled === false
+      ? "后台托管已暂停"
+      : `已托管 ${managedCount} / ${snap.summary?.total || 0}`;
+  }
+  if (!listEl) return;
+  const tasks = Array.isArray(snap.tasks) ? snap.tasks : [];
+  if (!tasks.length) {
+    listEl.innerHTML = `<div class="empty-state">暂未在本机发现定时任务，可点击上方「+ 新建通用定时任务」创建。</div>`;
+    return;
+  }
+  listEl.innerHTML = tasks.map((task) => {
+    const pv = providerVisualMeta(task.provider);
+    const sourceBadge = task.source === "agent-control" ? "自建托管" : `${pv.short} 原生`;
+    const statusPill = task.running
+      ? `<span class="board-status-pill is-live">执行中</span>`
+      : task.managed
+        ? `<span class="board-status-pill is-live">托管中</span>`
+        : `<span class="board-status-pill">未托管</span>`;
+    const lastRunHtml = task.effectiveLastRunAtMs
+      ? `<span>上次：${escapeHtml(formatAutomationTimeLabel(task.effectiveLastRunAtMs))}${task.lastStatus === "error" ? ` (失败: ${escapeHtml(task.lastError || "")})` : ""}</span>`
+      : "";
+    const nextRunHtml = task.nextRunAtMs
+      ? `<span>下次：${escapeHtml(formatAutomationTimeLabel(task.nextRunAtMs))}</span>`
+      : "";
+    const threadBtn = task.lastThreadId
+      ? `<button type="button" class="btn-secondary btn-xs" data-auto-open-thread="${escapeHtml(task.lastThreadId)}">查看会话</button>`
+      : "";
+    const delBtn = task.source === "agent-control"
+      ? `<button type="button" class="btn-secondary btn-xs" data-auto-delete="${escapeHtml(task.id)}">删除</button>`
+      : "";
+    return `
+      <div class="automation-item">
+        <div class="automation-item-top">
+          <div class="automation-item-title-wrap">
+            <span class="thread-micro-tag is-${escapeHtml(pv.tone)}">${pv.iconSvg || ""}${escapeHtml(sourceBadge)}</span>
+            <strong class="automation-item-name">${escapeHtml(task.name || task.id)}</strong>
+            ${statusPill}
+          </div>
+          <div class="automation-item-actions">
+            ${threadBtn}
+            <button type="button" class="btn-primary btn-xs" data-auto-run="${escapeHtml(task.taskKey)}"${task.running ? " disabled" : ""}>立即执行</button>
+            <button type="button" class="btn-secondary btn-xs" data-auto-toggle="${escapeHtml(task.taskKey)}" data-auto-next-managed="${task.managed ? "0" : "1"}">${task.managed ? "暂停托管" : "开启托管"}</button>
+            ${delBtn}
+          </div>
+        </div>
+        <div class="automation-item-meta">
+          <span>周期：${escapeHtml(task.scheduleLabel || "手动触发")}</span>
+          ${nextRunHtml}
+          ${lastRunHtml}
+          ${task.cwds?.[0] ? `<span title="${escapeHtml(task.cwds[0])}">目录：${escapeHtml(projectBaseName(task.cwds[0]))}</span>` : ""}
+        </div>
+        ${task.prompt ? `<div class="automation-item-prompt">${escapeHtml(task.prompt)}</div>` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
+async function refreshAutomations() {
+  const snap = await apiGet("api/automations");
+  state.automationsSnapshot = snap;
+  renderAutomationsModal(snap);
+  return snap;
+}
+
+async function openAutomationsModal() {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  const modal = $("automationsModal");
+  if (!modal) return;
+  renderAutomationsModal();
+  if (!modal.open) modal.showModal();
+  try {
+    await refreshAutomations();
+  } catch (error) {
+    const bar = $("automationsStatusBar");
+    if (bar) {
+      bar.hidden = false;
+      bar.className = "composer-status is-error";
+      bar.textContent = formatActionError(error, "加载定时任务失败");
+    }
+  }
+}
+
 async function openUpdateModal() {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
@@ -5659,6 +6262,23 @@ async function promptProjectAlias(cwd) {
   }
 }
 
+async function openNewThreadDraft({ cwd, provider = "", model = "", promptText = "" }) {
+  setTopbarMenuOpen(false);
+  setComposerConfigOpen(false);
+  await selectThread("", { newThreadCwd: cwd });
+  if (provider) $("composerProviderSelect").value = provider;
+  syncComposerProfileSelect();
+  if (model) saveNewThreadPrefs(currentComposerProvider(), { model });
+  syncModelAndEffortSelectors();
+  state.composerGoal = false;
+  state.images = [];
+  renderComposerImages();
+  $("promptInput").value = promptText;
+  renderTopbarAndControls();
+  setSidebarOpen(false);
+  $("promptInput").focus();
+}
+
 function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "" } = {}) {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
@@ -5787,6 +6407,7 @@ function scheduleVoiceListenResume() {
 
 function stopVoicePlayback({ scheduleResume = false, abortReason = "superseded" } = {}) {
   clearVoiceResumeTimer();
+  state.voice.playbackToken = (state.voice.playbackToken || 0) + 1;
   const abort = state.voice.activePlaybackAbort;
   state.voice.activePlaybackAbort = null;
   if (typeof abort === "function") {
@@ -5829,27 +6450,94 @@ function nextVoiceUtteranceId(prefix = "utt") {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+function effectiveVoiceThreadId() {
+  return String(state.voice.scopedThreadId || state.activeThreadId || "").trim();
+}
+
+function effectiveVoiceScope() {
+  if (state.voice.callScope === "thread" && effectiveVoiceThreadId()) {
+    return "thread";
+  }
+  return "global";
+}
+
+function renderVoiceScopeBar() {
+  const threadBtn = $("voiceScopeThreadBtn");
+  const globalBtn = $("voiceScopeGlobalBtn");
+  const threadLbl = $("voiceScopeThreadLabel");
+  if (!threadBtn || !globalBtn) return;
+  const targetTid = effectiveVoiceThreadId();
+  const targetThread = targetTid
+    ? (state.threads.find((t) => t.id === targetTid) || (state.activeThread?.id === targetTid ? state.activeThread : null))
+    : null;
+  const scope = effectiveVoiceScope();
+  const hasThread = Boolean(targetTid);
+  threadBtn.disabled = !hasThread;
+  threadBtn.classList.toggle("is-active", scope === "thread");
+  globalBtn.classList.toggle("is-active", scope !== "thread");
+  if (threadLbl) {
+    const rawTitle = String(targetThread?.title || targetThread?.name || "").trim();
+    const shortTitle = rawTitle.length > 12 ? `${rawTitle.slice(0, 12)}…` : rawTitle;
+    threadLbl.textContent = shortTitle ? `当前对话 · ${shortTitle}` : (hasThread ? "当前对话" : "当前对话（未选）");
+  }
+}
+
+function setVoiceCallScope(nextScope = "global") {
+  const wantThread = nextScope === "thread";
+  if (wantThread) {
+    const tid = state.activeThreadId || state.voice.scopedThreadId || "";
+    if (!tid) return;
+    state.voice.callScope = "thread";
+    state.voice.scopedThreadId = tid;
+  } else {
+    state.voice.callScope = "global";
+  }
+  renderVoiceScopeBar();
+  renderVoiceLiveProgress();
+  renderVoiceCallUi();
+  if (state.voice.callActive && state.voice.callId && !state.voice.backendMissing) {
+    void apiPostWithHotFallback("api/voice/call/start", {
+      callId: state.voice.callId,
+      callScope: effectiveVoiceScope(),
+      activeThreadId: effectiveVoiceThreadId(),
+      ...voiceSelectionPayload(),
+    }).catch(() => {});
+  }
+}
+
 function renderVoiceLiveProgress() {
   const listEl = $("voiceLiveProgressList");
   const badgeEl = $("voiceLiveSummaryBadge");
+  const headingEl = $("voiceProgressHeadingText");
   if (!listEl) return;
+  const scope = effectiveVoiceScope();
+  const scopedTid = effectiveVoiceThreadId();
   const groups = getProjectGroups({ ignoreFilters: true });
+  const filteredThreads = scope === "thread" && scopedTid
+    ? state.threads.filter((t) => t.id === scopedTid)
+    : state.threads;
+  const filteredRequests = scope === "thread" && scopedTid
+    ? state.pendingRequests.filter((r) => r.threadId === scopedTid)
+    : state.pendingRequests;
   const items = buildVoiceLiveProgressItems({
     groups,
-    threads: state.threads,
-    pendingRequests: state.pendingRequests,
+    threads: filteredThreads,
+    pendingRequests: filteredRequests,
     liveActivityByThread: state.liveActivityByThread,
     recentCompletedByThread: state.recentCompletedByThread,
-    activeThreadId: state.activeThreadId,
+    activeThreadId: scopedTid || state.activeThreadId,
   });
   listEl.innerHTML = renderVoiceLiveProgressHtml(items);
+  if (headingEl) {
+    headingEl.textContent = scope === "thread" ? "当前对话动态" : "实时任务动态";
+  }
   if (badgeEl) {
-    const liveCount = state.threads.filter((t) => t.live || state.liveActivityByThread.get(t.id)?.status === "running").length;
-    const pendingCount = state.pendingRequests.length;
+    const liveCount = filteredThreads.filter((t) => t.live || state.liveActivityByThread.get(t.id)?.status === "running").length;
+    const pendingCount = filteredRequests.length;
     const parts = [];
     if (pendingCount > 0) parts.push(`${pendingCount} 待审批`);
     if (liveCount > 0) parts.push(`${liveCount} 运行中`);
-    badgeEl.textContent = parts.length ? parts.join(" · ") : "实时同步";
+    badgeEl.textContent = parts.length ? parts.join(" · ") : (scope === "thread" ? "当前对话就绪" : "实时同步");
   }
 }
 
@@ -5908,6 +6596,7 @@ function updateVoiceTranscriptEntry(utteranceId, patch = {}) {
 }
 
 function renderVoiceCallUi() {
+  if (typeof renderVoiceScopeBar === "function") renderVoiceScopeBar();
   const orb = $("voiceOrbBtn");
   const dot = $("voiceCallDot");
   const stateEl = $("voiceStateText");
@@ -6044,17 +6733,23 @@ function startVoiceLevelAnimation() {
   stopVoiceLevelAnimation();
   const tick = () => {
     if (!state.voice.callActive) return;
+    const nowMs = Date.now();
+    if (state.voice.lastAudioFrameAt > 0 && nowMs - state.voice.lastAudioFrameAt > 180 && state.voice.currentRms > 0) {
+      state.voice.currentRms *= 0.82;
+      if (state.voice.currentRms < 0.001) state.voice.currentRms = 0;
+    }
     const orb = $("voiceOrbBtn");
     if (orb) {
+      const safeRms = Number.isFinite(state.voice.currentRms) ? Math.max(0, Math.min(1, state.voice.currentRms)) : 0;
       let level = 0;
       if (state.voice.isRecording) {
-        level = Math.min(1, state.voice.currentRms * 12);
+        level = Math.min(1, safeRms * 12);
       } else if (state.voice.isSpeaking) {
-        level = 0.28 + Math.sin(Date.now() / 160) * 0.14;
+        level = 0.28 + Math.sin(nowMs / 160) * 0.14;
       } else if (state.voice.isProcessing) {
-        level = 0.22 + Math.sin(Date.now() / 220) * 0.12;
+        level = 0.22 + Math.sin(nowMs / 220) * 0.12;
       } else if (!state.voice.isMuted) {
-        level = Math.min(0.45, state.voice.currentRms * 7);
+        level = Math.min(0.45, safeRms * 7);
       }
       orb.style.setProperty("--voice-level", level.toFixed(3));
     }
@@ -6083,6 +6778,10 @@ function renderVoiceModelSelector() {
 }
 
 function stopVoiceCallMicPipeline() {
+  if (state.voice.micWatchdogTimer) {
+    clearInterval(state.voice.micWatchdogTimer);
+    state.voice.micWatchdogTimer = null;
+  }
   if (state.voice.speechRecognition) {
     try {
       state.voice.speechRecognition.onresult = null;
@@ -6099,6 +6798,18 @@ function stopVoiceCallMicPipeline() {
     } catch {}
     state.voice.processorNode = null;
   }
+  if (state.voice.silentGainNode) {
+    try {
+      state.voice.silentGainNode.disconnect();
+    } catch {}
+    state.voice.silentGainNode = null;
+  }
+  if (Array.isArray(state.voice.filterNodes)) {
+    for (const node of state.voice.filterNodes) {
+      try { node.disconnect(); } catch {}
+    }
+    state.voice.filterNodes = [];
+  }
   if (state.voice.micSource) {
     try {
       state.voice.micSource.disconnect();
@@ -6107,13 +6818,17 @@ function stopVoiceCallMicPipeline() {
   }
   if (state.voice.micStream) {
     for (const track of state.voice.micStream.getTracks()) {
-      try { track.stop(); } catch {}
+      try {
+        track.onended = null;
+        track.stop();
+      } catch {}
     }
     state.voice.micStream = null;
   }
   state.voice.vadDetector = null;
   state.voice.isRecording = false;
   state.voice.currentRms = 0;
+  state.voice.lastAudioFrameAt = 0;
 }
 
 function startBrowserSpeechRecognitionPipeline() {
@@ -6221,47 +6936,147 @@ async function startVoiceCallMicPipeline() {
     const detector = createVadTurnDetector({
       sampleRate: 16000,
       preRollMs: 320,
-      silenceMs: 780,
-      minSpeechMs: 220,
-      maxSpeechMs: 22000,
-      rmsThreshold: 0.011,
+      silenceMs: 760,
+      minSpeechMs: 260,
+      maxSpeechMs: 14000,
+      rmsThreshold: 0.013,
       adaptive: true,
-      requireSustainedOnset: false,
-      minPeakRms: 0.012,
-      minSnrRatio: 1.6,
+      requireSustainedOnset: true,
+      minPeakRms: 0.015,
+      minSnrRatio: 1.8,
     });
 
     processor.onaudioprocess = (ev) => {
+      state.voice.lastAudioFrameAt = Date.now();
       if (!state.voice.callActive || state.voice.isMuted || state.voice.isSpeaking) {
         state.voice.currentRms = 0;
         return;
       }
-      const input = ev.inputBuffer?.getChannelData?.(0);
-      if (!input?.length) return;
-      const rms = computeRmsLevel(input);
-      state.voice.currentRms = rms;
-      const int16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-      const evt = detector.pushSamples(int16, rms);
-      if (evt.type === "speech_start") {
-        state.voice.isRecording = true;
-        renderVoiceCallUi();
-      } else if (evt.type === "utterance") {
+      try {
+        const input = ev.inputBuffer?.getChannelData?.(0);
+        if (!input?.length) return;
+        let hasCorruptSample = false;
+        for (let i = 0; i < input.length; i += 64) {
+          if (!Number.isFinite(input[i])) {
+            hasCorruptSample = true;
+            break;
+          }
+        }
+        if (hasCorruptSample) {
+          state.voice.currentRms = 0;
+          if (!state.voice.micRecovering) {
+            state.voice.micRecovering = true;
+            setTimeout(() => {
+              state.voice.micRecovering = false;
+              if (state.voice.callActive && !state.voice.isMuted) {
+                void startVoiceCallMicPipeline();
+              }
+            }, 60);
+          }
+          return;
+        }
+        const rms = computeRmsLevel(input);
+        state.voice.currentRms = rms;
+        const int16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
+        const evt = detector.pushSamples(int16, rms);
+        if (evt.type === "speech_start") {
+          state.voice.isRecording = true;
+          renderVoiceCallUi();
+        } else if (evt.type === "utterance") {
+          state.voice.isRecording = false;
+          state.voice.currentRms = 0;
+          const wavBytes = encodePcm16SamplesToWav(evt.samples, 16000);
+          void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
+        } else if (evt.type === "discarded_short" || evt.type === "discarded_noise") {
+          state.voice.isRecording = false;
+          state.voice.currentRms = 0;
+          renderVoiceCallUi();
+        }
+      } catch {
+        state.voice.currentRms = 0;
         state.voice.isRecording = false;
-        const wavBytes = encodePcm16SamplesToWav(evt.samples, 16000);
-        void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
-      } else if (evt.type === "discarded_short" || evt.type === "discarded_noise") {
-        state.voice.isRecording = false;
-        renderVoiceCallUi();
+        detector.reset();
       }
     };
 
-    source.connect(processor);
+    const filterNodes = [];
+    if (typeof ctx.createBiquadFilter === "function") {
+      const sr = Number(ctx.sampleRate) || 48000;
+      const nyquist = sr * 0.5;
+      const highpass = ctx.createBiquadFilter();
+      highpass.type = "highpass";
+      highpass.frequency.value = Math.min(100, Math.max(40, nyquist * 0.08));
+      highpass.Q.value = 0.707;
+      const lowpass = ctx.createBiquadFilter();
+      lowpass.type = "lowpass";
+      lowpass.frequency.value = Math.min(3800, Math.max(1200, Math.floor(nyquist * 0.82)));
+      lowpass.Q.value = 0.707;
+      source.connect(highpass);
+      highpass.connect(lowpass);
+      lowpass.connect(processor);
+      filterNodes.push(highpass, lowpass);
+    } else {
+      source.connect(processor);
+    }
     processor.connect(silentGain);
     silentGain.connect(ctx.destination);
 
+    const primaryTrack = stream.getAudioTracks?.()?.[0];
+    if (primaryTrack) {
+      primaryTrack.onended = () => {
+        if (state.voice.callActive && !state.voice.isMuted && !state.voice.micRecovering) {
+          state.voice.micRecovering = true;
+          setTimeout(() => {
+            state.voice.micRecovering = false;
+            if (state.voice.callActive && !state.voice.isMuted) {
+              void startVoiceCallMicPipeline();
+            }
+          }, 200);
+        }
+      };
+    }
+
+    state.voice.lastAudioFrameAt = Date.now();
+    state.voice.micWatchdogTimer = setInterval(() => {
+      if (!state.voice.callActive || state.voice.isMuted || state.voice.asrAvailable === false) return;
+      const activeCtx = state.voice.audioCtx;
+      if (activeCtx && (activeCtx.state === "suspended" || activeCtx.state === "interrupted")) {
+        void activeCtx.resume().catch(() => {});
+      }
+      if (state.voice.isSpeaking || state.voice.micRecovering) return;
+      const idleMs = state.voice.lastAudioFrameAt > 0 ? Date.now() - state.voice.lastAudioFrameAt : 0;
+      const trackDead = stream.getAudioTracks?.().some((t) => t.readyState === "ended");
+      if (trackDead || idleMs > 1600) {
+        if (state.voice.isRecording) {
+          const flushed = state.voice.vadDetector?.flush?.();
+          state.voice.isRecording = false;
+          state.voice.currentRms = 0;
+          if (flushed?.type === "utterance" && flushed.samples?.length) {
+            const wavBytes = encodePcm16SamplesToWav(flushed.samples, 16000);
+            void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
+          } else {
+            renderVoiceCallUi();
+          }
+        }
+        state.voice.micRecovering = true;
+        Promise.resolve(activeCtx?.state !== "running" ? activeCtx?.resume?.().catch(() => {}) : null)
+          .finally(() => {
+            setTimeout(() => {
+              const recovered = Date.now() - state.voice.lastAudioFrameAt < 600 && !trackDead;
+              state.voice.micRecovering = false;
+              if (!recovered && state.voice.callActive && !state.voice.isMuted) {
+                void startVoiceCallMicPipeline();
+              }
+            }, 350);
+          });
+      }
+    }, 1000);
+
     state.voice.micStream = stream;
     state.voice.micSource = source;
+    state.voice.filterNodes = filterNodes;
     state.voice.processorNode = processor;
+    state.voice.silentGainNode = silentGain;
     state.voice.vadDetector = detector;
     state.voice.isMuted = false;
     renderVoiceCallUi();
@@ -6437,7 +7252,7 @@ async function fetchVoiceTtsAudio({ text = "", utteranceId = "", preferOffline =
   }
 }
 
-async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
+async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0, playbackToken = state.voice.playbackToken) {
   const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(text));
   const ctx = state.voice.audioCtx;
   if (!ctx || ctx.state === "closed" || typeof ctx.decodeAudioData !== "function") {
@@ -6449,7 +7264,7 @@ async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
     if (ctx.state === "suspended") {
       await ctx.resume().catch(() => {});
     }
-    if (ctx.state !== "running") {
+    if (ctx.state !== "running" || playbackToken !== state.voice.playbackToken) {
       return null;
     }
     const bytes = base64ToUint8Array(tts.audioBase64);
@@ -6462,11 +7277,11 @@ async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
   if (!audioBuffer || !(audioBuffer.duration > 0)) {
     return null;
   }
-  if (!state.voice.callActive || !state.voice.isSpeaking) {
+  if (!state.voice.callActive || !state.voice.isSpeaking || playbackToken !== state.voice.playbackToken) {
     return {
       engine: tts.provider || "edge-tts",
       outcome: "interrupted",
-      reason: state.voice.callActive ? "user_barge_in" : "hangup",
+      reason: playbackToken !== state.voice.playbackToken ? "superseded" : (state.voice.callActive ? "user_barge_in" : "hangup"),
       started: false,
       playedMs: 0,
       expectedMs: effExpected,
@@ -6478,6 +7293,7 @@ async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
   return new Promise((resolve) => {
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
+    source.playbackRate.value = 1;
     source.connect(ctx.destination);
     state.voice.activeBufferSource = source;
 
@@ -6543,9 +7359,22 @@ async function playAudioBufferViaWebAudio(tts, text, expectedMs = 0) {
   });
 }
 
-function playAudioBufferViaElement(tts, text, expectedMs = 0) {
+function playAudioBufferViaElement(tts, text, expectedMs = 0, playbackToken = state.voice.playbackToken) {
   return new Promise((resolve) => {
     const effExpected = Math.max(Number(expectedMs) || 0, estimateVoiceDurationMs(text));
+    if (!state.voice.callActive || playbackToken !== state.voice.playbackToken) {
+      resolve({
+        engine: tts.provider || "audio",
+        outcome: "interrupted",
+        reason: "superseded",
+        started: false,
+        playedMs: 0,
+        expectedMs: effExpected,
+        muted: false,
+        volume: 1,
+      });
+      return;
+    }
     let url = "";
     try {
       const bytes = base64ToUint8Array(tts.audioBase64);
@@ -6568,6 +7397,8 @@ function playAudioBufferViaElement(tts, text, expectedMs = 0) {
     state.voice.audioObjectUrl = url;
     const audio = state.voice.audioEl || new Audio();
     audio.playsInline = true;
+    audio.playbackRate = 1;
+    audio.defaultPlaybackRate = 1;
     state.voice.audioEl = audio;
 
     let settled = false;
@@ -6681,6 +7512,8 @@ async function playVoiceTtsResult({
   if (state.voice.activePlaybackAbort || state.voice.activeBufferSource) {
     stopVoicePlayback({ scheduleResume: false, abortReason: "superseded" });
   }
+  const myToken = (state.voice.playbackToken || 0) + 1;
+  state.voice.playbackToken = myToken;
   const norm = normalizeVoiceTtsPayload(tts ? { ...tts, utteranceId: utteranceId || tts.utteranceId, text: tts.text || clean } : { utteranceId, text: clean });
   const effUtteranceId = utteranceId || norm.utteranceId || nextVoiceUtteranceId();
 
@@ -6693,8 +7526,11 @@ async function playVoiceTtsResult({
   let lastProvider = norm.provider || "none";
 
   if (norm.hasAudio) {
-    const rawAudio = (await playAudioBufferViaWebAudio(norm, clean, norm.expectedMs))
-      || (await playAudioBufferViaElement(norm, clean, norm.expectedMs));
+    const rawAudio = (await playAudioBufferViaWebAudio(norm, clean, norm.expectedMs, myToken))
+      || (await playAudioBufferViaElement(norm, clean, norm.expectedMs, myToken));
+    if (myToken !== state.voice.playbackToken) {
+      return { status: "interrupted", heard: false, reason: "superseded", playedMs: 0, expectedMs: norm.expectedMs, utteranceId: effUtteranceId };
+    }
     primaryEval = evaluateVoicePlaybackOutcome({ ...rawAudio, text: clean, expectedMs: norm.expectedMs, priority });
     lastProvider = norm.provider || "edge-tts";
     if (primaryEval.heard) {
@@ -6720,16 +7556,23 @@ async function playVoiceTtsResult({
     allowOfflineRetry
     && !state.voice.backendMissing
     && state.voice.callActive
+    && myToken === state.voice.playbackToken
     && norm.provider !== "macos-say"
     && primaryReason !== "autoplay_blocked"
     && primaryReason !== "muted_output"
   ) {
     const offlineTts = await fetchVoiceTtsAudio({ text: clean, utteranceId: effUtteranceId, preferOffline: true, register: false });
+    if (myToken !== state.voice.playbackToken || !state.voice.callActive) {
+      return { status: "interrupted", heard: false, reason: "superseded", playedMs: 0, expectedMs: norm.expectedMs, utteranceId: effUtteranceId };
+    }
     if (offlineTts?.hasAudio) {
-      updateVoiceTranscriptEntry(effUtteranceId, { ttsCache: offlineTts });
+      if (!norm.hasAudio) updateVoiceTranscriptEntry(effUtteranceId, { ttsCache: offlineTts });
       lastProvider = offlineTts.provider || "macos-say";
-      const rawOffline = (await playAudioBufferViaWebAudio(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs))
-        || (await playAudioBufferViaElement(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs));
+      const rawOffline = (await playAudioBufferViaWebAudio(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken))
+        || (await playAudioBufferViaElement(offlineTts, clean, offlineTts.expectedMs || norm.expectedMs, myToken));
+      if (myToken !== state.voice.playbackToken) {
+        return { status: "interrupted", heard: false, reason: "superseded", playedMs: 0, expectedMs: norm.expectedMs, utteranceId: effUtteranceId };
+      }
       const offEval = evaluateVoicePlaybackOutcome({ ...rawOffline, text: clean, expectedMs: offlineTts.expectedMs || norm.expectedMs, priority });
       if (offEval.heard) {
         markUtteranceHeard(effUtteranceId, { status: offEval.status });
@@ -7061,6 +7904,9 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
   if (!state.voice.callActive) return;
   if (wavUint8Array?.length || String(transcriptText || "").trim() || mode === "briefing") {
     state.voice.pendingVoiceTurns.push({ wavUint8Array, transcriptText, mode });
+    while (state.voice.pendingVoiceTurns.length > 2) {
+      state.voice.pendingVoiceTurns.shift();
+    }
   }
   if (state.voice.isProcessing || state.voice.isSpeaking || !state.voice.pendingVoiceTurns.length) return;
   ({ wavUint8Array, transcriptText, mode } = state.voice.pendingVoiceTurns.shift());
@@ -7093,12 +7939,15 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
 
   try {
     const audioBase64 = wavUint8Array?.length ? uint8ArrayToBase64(wavUint8Array) : "";
+    const resolvedTid = String(state.voice.scopedThreadId || state.activeThreadId || "").trim();
+    const resolvedScope = state.voice.callScope === "thread" && resolvedTid ? "thread" : "global";
     const res = await apiPostWithHotFallback("api/voice/call", {
       callId: state.voice.callId,
+      callScope: resolvedScope,
       audioBase64,
       audioMimeType: audioBase64 ? "audio/wav" : "",
       transcriptText: String(transcriptText || "").trim(),
-      activeThreadId: state.activeThreadId || "",
+      activeThreadId: resolvedTid,
       ...voiceSelectionPayload(),
       mode,
       autoExecute: true,
@@ -7109,17 +7958,15 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
     if (res?.asrEngine) state.voice.asrEngine = res.asrEngine;
     if (res?.noSpeech) {
       state.voice.isProcessing = false;
-      if (res.ignoredText) {
-        if (res.model) state.voice.modelName = res.model;
-        appendVoiceTranscriptEntry({
-          id: nextVoiceUtteranceId("unmatched"),
-          heardText: res.ignoredText,
-          spokenReply: "",
-          actionTag: "模型判定无需操作",
-        });
+      if (res.ignoredText && typeof $ === "function" && $("voiceSubHintText")) {
+        $("voiceSubHintText").textContent = "已自动过滤背景杂音，请直接说话";
       }
       renderVoiceCallUi();
-      scheduleVoiceListenResume();
+      if (state.voice.pendingVoiceTurns.length > 0) {
+        void sendVoiceTurnToMac();
+      } else {
+        scheduleVoiceListenResume();
+      }
       return;
     }
     if (res?.executed?.model || res?.dispatchModel || res?.model) {
@@ -7436,6 +8283,9 @@ async function openVoiceModal() {
 
   if (state.voice.callActive) {
     state.voice.minimized = false;
+    if (state.voice.callScope === "thread" && state.activeThreadId) {
+      state.voice.scopedThreadId = state.activeThreadId;
+    }
     renderVoiceTranscript();
     renderVoiceLiveProgress();
     renderVoiceCallUi();
@@ -7448,6 +8298,8 @@ async function openVoiceModal() {
   }
 
   state.voice.callId = `call-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  state.voice.callScope = state.activeThreadId ? "thread" : "global";
+  state.voice.scopedThreadId = state.activeThreadId || "";
   state.voice.callActive = true;
   state.voice.minimized = false;
   state.voice.callStartedAt = Date.now();
@@ -7479,6 +8331,8 @@ async function openVoiceModal() {
 
   const warmPromise = apiPostWithHotFallback("api/voice/call/start", {
     callId: state.voice.callId,
+    callScope: effectiveVoiceScope(),
+    activeThreadId: effectiveVoiceThreadId(),
     ...voiceSelectionPayload(),
   })
     .then((res) => {
@@ -7783,10 +8637,7 @@ function bindEvents() {
       e.stopPropagation();
       const tid = jumpBtn.dataset.telemetryJumpThread;
       if (tid) {
-        state.telemetryExpanded = false;
-        state.telemetryPickerOpen = false;
-        state.mobileTelemetryOpen = false;
-        renderAgentTelemetryBar();
+        closeTelemetryPopover();
         void selectThread(tid).catch((error) => {
           showToastBanner("切换会话失败", { detail: formatActionError(error), error: true });
         });
@@ -7802,18 +8653,16 @@ function bindEvents() {
     }
     if (e.target.closest("[data-telemetry-toggle]")) {
       e.stopPropagation();
-      state.telemetryExpanded = !state.telemetryExpanded;
-      if (!state.telemetryExpanded) {
-        state.telemetryPickerOpen = false;
-        state.mobileTelemetryOpen = false;
-      } else if (typeof window !== "undefined" && window.innerWidth <= 960) {
-        state.mobileTelemetryOpen = true;
+      if (state.telemetryExpanded || state.telemetryPickerOpen) {
+        closeTelemetryPopover(e.target);
+      } else {
+        openTelemetryPopover(e.target);
       }
-      renderAgentTelemetryBar();
     }
   };
   $("topbarTelemetrySlot")?.addEventListener("click", handleTelemetryBarClick);
   $("agentTelemetryBar")?.addEventListener("click", handleTelemetryBarClick);
+  $("telemetryBackdrop")?.addEventListener("click", () => closeTelemetryPopover());
   $("agentTelemetryBar")?.addEventListener("change", (e) => {
     if (e.target.matches("[data-execution-days]")) state.executionStatsDays = Number(e.target.value);
     else if (e.target.matches("[data-execution-provider]")) state.executionStatsProvider = e.target.value;
@@ -7894,15 +8743,12 @@ function bindEvents() {
       setComposerConfigOpen(false);
     }
     if (
-      state.mobileTelemetryOpen
+      (state.telemetryExpanded || state.mobileTelemetryOpen)
       && !e.target.closest("#agentTelemetryBar")
       && !e.target.closest("#topbarTelemetrySlot")
       && !e.target.closest("#telemetryTopbarBtn")
     ) {
-      state.mobileTelemetryOpen = false;
-      state.telemetryExpanded = false;
-      state.telemetryPickerOpen = false;
-      renderAgentTelemetryBar();
+      closeTelemetryPopover();
     } else if (state.telemetryPickerOpen && !e.target.closest(".telemetry-picker-panel") && !e.target.closest("[data-telemetry-picker-toggle]")) {
       state.telemetryPickerOpen = false;
       renderAgentTelemetryBar();
@@ -7915,10 +8761,7 @@ function bindEvents() {
       if (state.topbarMenuOpen) setTopbarMenuOpen(false);
       if (state.composerConfigOpen) setComposerConfigOpen(false);
       if (state.telemetryPickerOpen || state.mobileTelemetryOpen || state.telemetryExpanded) {
-        state.telemetryPickerOpen = false;
-        state.mobileTelemetryOpen = false;
-        state.telemetryExpanded = false;
-        renderAgentTelemetryBar();
+        closeTelemetryPopover();
       }
     }
   });
@@ -7935,7 +8778,7 @@ function bindEvents() {
     }
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const pill = e.target.closest("[data-strip-thread-id]");
@@ -8019,7 +8862,7 @@ function bindEvents() {
 
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
 
@@ -8041,7 +8884,7 @@ function bindEvents() {
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
       e.stopPropagation();
-      openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const staleBtn = e.target.closest("[data-sidebar-stale-projects]");
@@ -8109,6 +8952,15 @@ function bindEvents() {
     const head = el.closest("[data-toggle-cwd]");
     if (head?.dataset?.toggleCwd) return { projectCwd: head.dataset.toggleCwd };
     return null;
+  });
+
+  $("threadList").addEventListener("contextmenu", (e) => {
+    if (state.batchSelect.active) return;
+    const item = e.target.closest("[data-thread-id]");
+    const tid = item?.dataset?.threadId || "";
+    if (!tid) return;
+    e.preventDefault();
+    openThreadContextMenu(tid, e.clientX, e.clientY);
   });
 
   bindLongPressMultiSelect($("projectBoard"), (el) => {
@@ -8234,7 +9086,7 @@ function bindEvents() {
       saveLocalThreadPrefs(state.activeThreadId, { model: nextModel, modelExplicit: true, effort: nextEffort });
       if (state.activeThread) {
         state.activeThread.model = nextModel;
-        if (nextEffort) state.activeThread.reasoningEffort = nextEffort;
+        state.activeThread.reasoningEffort = nextEffort;
       }
       void apiPost("api/thread/prefs", {
         threadId: state.activeThreadId,
@@ -8243,6 +9095,7 @@ function bindEvents() {
       }).catch(() => null);
     } else {
       state.userPickedDraftModel = true;
+      saveNewThreadPrefs(provider, { model: nextModel, effort: nextEffort });
     }
     const label = selected?.displayName || nextModel || "默认模型";
     setComposerStatus("success", `已选择模型：${label}`, { autoClearMs: 2200 });
@@ -8257,6 +9110,8 @@ function bindEvents() {
         threadId: state.activeThreadId,
         effort: nextEffort,
       }).catch(() => null);
+    } else {
+      saveNewThreadPrefs(currentComposerProvider(), { effort: nextEffort });
     }
     renderComposerConfigChip();
   });
@@ -8297,16 +9152,69 @@ function bindEvents() {
     selectNewModalProvider($("newProviderSelect").value || defaultNewThreadProvider());
   });
 
-  $("promptInput").addEventListener("input", () => renderComposerControls());
+  $("promptInput").addEventListener("input", () => {
+    renderComposerControls();
+    void updateSlashCommandMenu();
+  });
   $("promptInput").addEventListener("change", () => renderComposerControls());
-  $("promptInput").addEventListener("compositionend", () => renderComposerControls());
+  $("promptInput").addEventListener("compositionend", () => {
+    renderComposerControls();
+    void updateSlashCommandMenu();
+  });
   $("runningSubmitMode").addEventListener("change", () => renderComposerControls());
 
   $("promptInput").addEventListener("keydown", (e) => {
+    if (state.slashMenuOpen && state.slashMenuItems.length && !e.isComposing && e.keyCode !== 229) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        state.slashMenuIndex = (state.slashMenuIndex + 1) % state.slashMenuItems.length;
+        renderSlashCommandMenu();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        state.slashMenuIndex = (state.slashMenuIndex - 1 + state.slashMenuItems.length) % state.slashMenuItems.length;
+        renderSlashCommandMenu();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeSlashCommandMenu();
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        e.preventDefault();
+        applySlashMenuChoice(state.slashMenuIndex);
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       void handleSend();
     }
+  });
+
+  $("composerSlashBtn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (state.slashMenuOpen) {
+      closeSlashCommandMenu();
+      return;
+    }
+    void updateSlashCommandMenu({ manual: true });
+    $("promptInput")?.focus();
+  });
+
+  $("slashCommandMenu")?.addEventListener("click", (e) => {
+    const itemBtn = e.target.closest("[data-slash-index]");
+    if (!itemBtn) return;
+    e.stopPropagation();
+    applySlashMenuChoice(Number(itemBtn.dataset.slashIndex) || 0);
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!state.slashMenuOpen) return;
+    if (e.target.closest("#slashCommandMenu") || e.target.closest("#composerSlashBtn")) return;
+    closeSlashCommandMenu();
   });
 
   $("promptInput").addEventListener("paste", (e) => {
@@ -8461,11 +9369,155 @@ function bindEvents() {
 
   const imgModal = $("imagePreviewModal");
   if (imgModal) {
+    const stage = $("imagePreviewStage");
+    const imgEl = $("imagePreviewImg");
+    const zoomBtn = $("imagePreviewZoomBtn");
+
+    const applyPreviewTransform = (dragging = false) => {
+      const info = state.imagePreview;
+      if (!info || !imgEl) return;
+      const scale = Math.max(1, Math.min(6, info.scale || 1));
+      info.scale = scale;
+      if (scale <= 1.01) {
+        info.scale = 1;
+        info.tx = 0;
+        info.ty = 0;
+        imgEl.style.transform = "";
+        imgEl.classList.remove("is-zoomed", "is-dragging");
+        if (zoomBtn) zoomBtn.hidden = true;
+        return;
+      }
+      imgEl.classList.add("is-zoomed");
+      imgEl.classList.toggle("is-dragging", dragging);
+      imgEl.style.transform = `translate3d(${info.tx.toFixed(1)}px, ${info.ty.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
+      if (zoomBtn) {
+        zoomBtn.hidden = false;
+        zoomBtn.textContent = `${Math.round(scale * 100)}%`;
+      }
+    };
+
+    const zoomAtPoint = (nextScaleRaw, clientX, clientY) => {
+      const info = state.imagePreview;
+      if (!info || !stage) return;
+      const oldScale = info.scale || 1;
+      const nextScale = Math.max(1, Math.min(6, nextScaleRaw));
+      if (Math.abs(nextScale - oldScale) < 0.001) return;
+      const rect = stage.getBoundingClientRect();
+      const ox = clientX - (rect.left + rect.width / 2);
+      const oy = clientY - (rect.top + rect.height / 2);
+      const ratio = nextScale / oldScale;
+      info.tx = ox - (ox - (info.tx || 0)) * ratio;
+      info.ty = oy - (oy - (info.ty || 0)) * ratio;
+      info.scale = nextScale;
+      applyPreviewTransform(false);
+    };
+
+    const resetPreviewZoom = () => {
+      if (!state.imagePreview) return;
+      state.imagePreview.scale = 1;
+      state.imagePreview.tx = 0;
+      state.imagePreview.ty = 0;
+      applyPreviewTransform(false);
+    };
+
+    zoomBtn?.addEventListener("click", resetPreviewZoom);
+    stage?.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      if ((state.imagePreview?.scale || 1) > 1.05) {
+        resetPreviewZoom();
+      } else {
+        zoomAtPoint(2.2, e.clientX, e.clientY);
+      }
+    });
+
+    // Trackpad two-finger pinch (`ctrlKey` + wheel) & two-finger pan when zoomed
+    stage?.addEventListener("wheel", (e) => {
+      const info = state.imagePreview;
+      if (!info) return;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const factor = Math.exp(-e.deltaY * 0.01);
+        zoomAtPoint((info.scale || 1) * factor, e.clientX, e.clientY);
+      } else if ((info.scale || 1) > 1.01) {
+        e.preventDefault();
+        info.tx = (info.tx || 0) - e.deltaX;
+        info.ty = (info.ty || 0) - e.deltaY;
+        applyPreviewTransform(true);
+      }
+    }, { passive: false });
+
+    // Touch two-finger pinch & single-finger pan
+    let pinchState = null;
+    let panState = null;
+    const touchDist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    const touchMid = (t1, t2) => ({ x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 });
+
+    stage?.addEventListener("touchstart", (e) => {
+      const info = state.imagePreview;
+      if (!info) return;
+      if (e.touches.length === 2) {
+        e.preventDefault();
+        panState = null;
+        const mid = touchMid(e.touches[0], e.touches[1]);
+        pinchState = {
+          startDist: Math.max(1, touchDist(e.touches[0], e.touches[1])),
+          startScale: info.scale || 1,
+          lastMid: mid,
+        };
+      } else if (e.touches.length === 1 && (info.scale || 1) > 1.01) {
+        panState = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: info.tx || 0, ty: info.ty || 0 };
+      }
+    }, { passive: false });
+
+    stage?.addEventListener("touchmove", (e) => {
+      const info = state.imagePreview;
+      if (!info) return;
+      if (e.touches.length === 2 && pinchState) {
+        e.preventDefault();
+        const dist = touchDist(e.touches[0], e.touches[1]);
+        const mid = touchMid(e.touches[0], e.touches[1]);
+        const nextScale = pinchState.startScale * (dist / pinchState.startDist);
+        info.tx = (info.tx || 0) + (mid.x - pinchState.lastMid.x);
+        info.ty = (info.ty || 0) + (mid.y - pinchState.lastMid.y);
+        pinchState.lastMid = mid;
+        zoomAtPoint(nextScale, mid.x, mid.y);
+      } else if (e.touches.length === 1 && panState) {
+        e.preventDefault();
+        info.tx = panState.tx + (e.touches[0].clientX - panState.x);
+        info.ty = panState.ty + (e.touches[0].clientY - panState.y);
+        applyPreviewTransform(true);
+      }
+    }, { passive: false });
+
+    stage?.addEventListener("touchend", () => {
+      pinchState = null;
+      panState = null;
+      applyPreviewTransform(false);
+    });
+
+    stage?.addEventListener("mousedown", (e) => {
+      const info = state.imagePreview;
+      if (e.button !== 0 || !info || (info.scale || 1) <= 1.01) return;
+      e.preventDefault();
+      panState = { x: e.clientX, y: e.clientY, tx: info.tx || 0, ty: info.ty || 0 };
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!panState || !state.imagePreview) return;
+      state.imagePreview.tx = panState.tx + (e.clientX - panState.x);
+      state.imagePreview.ty = panState.ty + (e.clientY - panState.y);
+      applyPreviewTransform(true);
+    });
+    window.addEventListener("mouseup", () => {
+      if (!panState) return;
+      panState = null;
+      applyPreviewTransform(false);
+    });
+
     imgModal.addEventListener("click", (e) => {
       if (e.target === imgModal) imgModal.close();
     });
     imgModal.addEventListener("close", () => {
-      const imgEl = $("imagePreviewImg");
+      resetPreviewZoom();
       if (imgEl) {
         imgEl.onload = null;
         imgEl.onerror = null;
@@ -8539,6 +9591,22 @@ function bindEvents() {
         });
       } finally {
         resumeBtn.disabled = false;
+      }
+      return;
+    }
+    const forkBtn = e.target.closest("[data-fork-turn-index]");
+    if (forkBtn) {
+      if (!state.activeThreadId || forkBtn.disabled) return;
+      const upToTurnIndex = Number(forkBtn.dataset.forkTurnIndex);
+      const upToTurnId = forkBtn.dataset.forkTurnId || "";
+      forkBtn.disabled = true;
+      try {
+        await forkThreadAction(state.activeThreadId, {
+          ...(Number.isInteger(upToTurnIndex) && upToTurnIndex >= 0 ? { upToTurnIndex } : {}),
+          ...(upToTurnId ? { upToTurnId } : {}),
+        });
+      } finally {
+        forkBtn.disabled = false;
       }
       return;
     }
@@ -8677,10 +9745,11 @@ function bindEvents() {
       steerBtn.disabled = true;
       setComposerStatus("pending", "正在直接引导进当前会话…");
       try {
+        const isThreadRunning = Boolean(state.activeThread?.live || state.liveActivity?.status === "running");
         const res = await apiPost("api/thread/queue/steer", {
           threadId: state.activeThreadId,
           id: steerId,
-          expectedTurnId: state.liveActivity?.turnId || "",
+          expectedTurnId: isThreadRunning ? (state.liveActivity?.turnId || "") : "",
         });
         applyActiveQueuedTurns(state.activeThreadId, res.items || []);
         if (state.activeThread) {
@@ -8905,10 +9974,11 @@ function bindEvents() {
   });
 
   $("newThreadBtn").addEventListener("click", () => {
-    openNewThreadModal({
-      cwd: state.activeThread?.cwd || "",
-      provider: defaultNewThreadProvider(),
-    });
+    if (state.activeThread?.cwd || state.newThreadCwd !== null) {
+      void openNewThreadDraft({ cwd: state.activeThread?.cwd || state.newThreadCwd, provider: defaultNewThreadProvider() });
+    } else {
+      openNewThreadModal({ provider: defaultNewThreadProvider() });
+    }
   });
 
   $("newThreadForm").addEventListener("submit", async (e) => {
@@ -8924,6 +9994,7 @@ function bindEvents() {
     const provider = $("newProviderSelect").value;
     const profileId = $("newProfileSelect").value || defaultProfileForProvider(provider);
     const model = $("newModelSelect")?.value || "";
+    const effort = getNewThreadPrefs(provider).effort || "";
     const cwd = $("newCwdInput").value.trim();
     const permissionMode = normalizeUiPermissionMode($("newPermissionSelect").value || "turbo", "turbo");
     state.defaultPermissionMode = saveDefaultPermissionMode(permissionMode);
@@ -8934,11 +10005,13 @@ function bindEvents() {
         provider,
         profileId,
         model,
+        effort,
         cwd,
         text,
         permissionMode,
         goalMode,
       });
+      saveNewThreadPrefs(provider, { model, effort });
       $("newPromptInput").value = "";
       $("newThreadModal").close();
       const createdProvider = created?.thread?.provider || provider;
@@ -8947,7 +10020,7 @@ function bindEvents() {
       }
       await refreshThreads();
       if (created?.thread?.id) {
-        saveLocalThreadPrefs(created.thread.id, { model, permissionMode });
+        saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
         await selectThread(created.thread.id);
       }
     } catch (error) {
@@ -8982,6 +10055,8 @@ function bindEvents() {
     if (state.voice.callActive && state.voice.callId && !state.voice.backendMissing) {
       void apiPostWithHotFallback("api/voice/call/start", {
         callId: state.voice.callId,
+        callScope: effectiveVoiceScope(),
+        activeThreadId: effectiveVoiceThreadId(),
         ...voiceSelectionPayload(),
       }).then((res) => {
         if (res?.dispatchModel || res?.model) {
@@ -8997,6 +10072,13 @@ function bindEvents() {
         renderVoiceCallUi();
       }).catch(() => {});
     }
+  });
+
+  $("voiceScopeBar")?.addEventListener("click", (e) => {
+    const pill = e.target.closest("[data-voice-scope]");
+    if (!pill || pill.disabled) return;
+    ensureVoiceAudioUnlocked();
+    setVoiceCallScope(pill.dataset.voiceScope);
   });
 
   $("voiceKeyboardToggleBtn")?.addEventListener("click", () => {
@@ -9129,6 +10211,90 @@ function bindEvents() {
     void openUpdateModal();
   });
   $("openUpdateModalBtn")?.addEventListener("click", () => void openUpdateModal());
+  $("openAutomationsModalBtn")?.addEventListener("click", () => void openAutomationsModal());
+  $("refreshAutomationsBtn")?.addEventListener("click", () => void refreshAutomations().catch(() => {}));
+  $("automationsGlobalToggle")?.addEventListener("change", (e) => {
+    void apiPost("api/automations/toggle", { enabled: Boolean(e.target.checked) })
+      .then((snap) => {
+        state.automationsSnapshot = snap;
+        renderAutomationsModal(snap);
+      })
+      .catch(() => {});
+  });
+  $("automationCreateForm")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const prompt = $("autoPromptInput")?.value?.trim() || "";
+    if (!prompt) return;
+    try {
+      const snap = await apiPost("api/automations/custom", {
+        action: "create",
+        name: $("autoNameInput")?.value?.trim() || "",
+        provider: $("autoProviderSelect")?.value || "codex",
+        rrule: $("autoScheduleSelect")?.value || "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+        cwd: $("autoCwdInput")?.value?.trim() || "",
+        prompt,
+      });
+      state.automationsSnapshot = snap;
+      renderAutomationsModal(snap);
+      $("automationCreateForm")?.reset();
+      const details = $("automationCreateDetails");
+      if (details) details.open = false;
+      showToastBanner("已添加定时任务并开启后台托管");
+    } catch (error) {
+      showToastBanner("创建定时任务失败", { detail: formatActionError(error), error: true });
+    }
+  });
+  $("automationsList")?.addEventListener("click", async (e) => {
+    const runBtn = e.target.closest("[data-auto-run]");
+    if (runBtn) {
+      const key = runBtn.dataset.autoRun;
+      runBtn.disabled = true;
+      try {
+        const res = await apiPost("api/automations/run", { taskKey: key });
+        if (res?.snapshot) {
+          state.automationsSnapshot = res.snapshot;
+          renderAutomationsModal(res.snapshot);
+        }
+        showToastBanner("已立即唤起执行定时任务", {
+          detail: res?.threadId ? `已启动会话 ${res.threadId}` : "任务已在后台启动",
+        });
+      } catch (error) {
+        showToastBanner("唤起定时任务失败", { detail: formatActionError(error), error: true });
+      } finally {
+        runBtn.disabled = false;
+      }
+      return;
+    }
+    const toggleBtn = e.target.closest("[data-auto-toggle]");
+    if (toggleBtn) {
+      const key = toggleBtn.dataset.autoToggle;
+      const managed = toggleBtn.dataset.autoNextManaged === "1";
+      const snap = await apiPost("api/automations/toggle", { taskKey: key, managed }).catch(() => null);
+      if (snap) {
+        state.automationsSnapshot = snap;
+        renderAutomationsModal(snap);
+      }
+      return;
+    }
+    const delBtn = e.target.closest("[data-auto-delete]");
+    if (delBtn) {
+      const snap = await apiPost("api/automations/custom", { action: "delete", id: delBtn.dataset.autoDelete }).catch(() => null);
+      if (snap) {
+        state.automationsSnapshot = snap;
+        renderAutomationsModal(snap);
+      }
+      return;
+    }
+    const openThreadBtn = e.target.closest("[data-auto-open-thread]");
+    if (openThreadBtn) {
+      const tid = openThreadBtn.dataset.autoOpenThread;
+      $("automationsModal")?.close();
+      if (tid) void selectThread(tid, { focusScroll: true }).catch(() => {});
+    }
+  });
+  $("automationsModal")?.addEventListener("click", (e) => {
+    if (e.target === $("automationsModal")) $("automationsModal").close();
+  });
   $("applyDesktopUpdateBtn")?.addEventListener("click", () => void triggerDesktopAppUpdate());
   $("checkUpdateBtn")?.addEventListener("click", () => void triggerCheckUpdates());
   $("applyUpdateBtn")?.addEventListener("click", () => void triggerApplyUpdate());

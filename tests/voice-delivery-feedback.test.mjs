@@ -362,7 +362,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   assert.equal(fakeAckJson.reason, "fake_short_end");
   assert.equal(fakeAckJson.unheardCount, 1);
 
-  // 5. Next normal turn compensates once by prepending missed summary & clearing turn3 from unheard list.
+  // 5. Next normal turn passes unheard items to the coordinator for natural merging (no robotic prefix) & clears turn3.
   const turn4Res = await fetch(`${srv.url}/apps/ac-hot/api/voice/call`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -371,7 +371,7 @@ test("Voice delivery ack, status ledger, repeat_last, fake-short-end downgrade, 
   assert.equal(turn4Res.status, 200);
   const turn4 = await turn4Res.json();
   assert.ok(turn4.replayedUnheardIds.includes(turn3.utteranceId));
-  assert.match(turn4.spokenReply, /补播|刚才未听到/);
+  assert.equal(turn4.spokenReply.includes("另外补播刚才未听到的提醒"), false);
 
   // Direct offline TTS route check with preferOffline=true uses macOS say WAV mock.
   const offlineTtsRes = await fetch(`${srv.url}/apps/ac-hot/api/voice/tts`, {
@@ -1481,10 +1481,9 @@ test("Voice model-planned real-cwd subagent, unrelated milestone isolation, and 
     transcriptText: "你好",
     tts: false,
   });
-  assert.equal(antiSnowballTurn.spokenReply.includes("主回复内容"), true);
+  assert.equal(antiSnowballTurn.replayedUnheardIds.includes("utt-nested-source"), true);
+  assert.equal(antiSnowballTurn.spokenReply.includes("另外补播刚才未听到的提醒"), false);
   assert.equal(antiSnowballTurn.spokenReply.includes("更早之前的内容"), false);
-  const compMatches = antiSnowballTurn.spokenReply.match(/另外补播刚才未听到的提醒：/g) || [];
-  assert.equal(compMatches.length, 1);
 });
 
 test("VoiceCallService supports optional lightweight models (Claude/Codex) without Gemini", async (t) => {
@@ -1495,31 +1494,32 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex) witho
     pickPreferredVoiceModel("claude", [
       { id: "claude-opus-4-6", displayName: "Opus 4.6" },
       { id: "claude-haiku-4-5", displayName: "Haiku 4.5" },
-      { id: "claude-sonnet-4-5", displayName: "Sonnet 4.5" },
+      { id: "claude-sonnet-5-5", displayName: "Sonnet 5.5" },
     ]),
-    "claude-haiku-4-5",
+    "claude-sonnet-5-5",
   );
   assert.equal(
     pickPreferredVoiceModel("codex", [
       { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: true },
       { id: "gpt-5.4-mini", displayName: "GPT-5.4 Mini" },
+      { id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra" },
     ]),
-    "gpt-5.4-mini",
+    "gpt-6.1-terra",
   );
 
   assert.deepEqual(
-    parseVoiceModelSelectionKey("codex:default:gpt-5.4-mini"),
-    { key: "codex:default:gpt-5.4-mini", voiceProvider: "codex", voiceProfileId: "default", voiceModel: "gpt-5.4-mini" },
+    parseVoiceModelSelectionKey("codex:default:gpt-6.1-terra"),
+    { key: "codex:default:gpt-6.1-terra", voiceProvider: "codex", voiceProfileId: "default", voiceModel: "gpt-6.1-terra" },
   );
-  assert.equal(normalizeVoiceConfig({ preferredModelKey: "claude:default:claude-haiku-4-5" }).preferredModelKey, "claude:default:claude-haiku-4-5");
+  assert.equal(normalizeVoiceConfig({ preferredModelKey: "claude:default:claude-sonnet-5-5" }).preferredModelKey, "claude:default:claude-sonnet-5-5");
   const selectHtml = renderVoiceModelSelectOptionsHtml(
     [
       { key: "auto", label: "自动优选轻量模型" },
-      { key: "codex:default:gpt-5.4-mini", label: "Codex · GPT-5.4 Mini (轻量)" },
+      { key: "codex:default:gpt-6.1-terra", label: "Codex · GPT-6.1 Terra (轻量)" },
     ],
-    "codex:default:gpt-5.4-mini",
+    "codex:default:gpt-6.1-terra",
   );
-  assert.match(selectHtml, /value="codex:default:gpt-5\.4-mini" selected/);
+  assert.match(selectHtml, /value="codex:default:gpt-6\.1-terra" selected/);
 
   const startedThreads = [];
   const events = [];
@@ -1545,7 +1545,7 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex) witho
       if (provider === "claude") {
         return {
           items: [
-            { id: "claude-sonnet-4-5", displayName: "Sonnet 4.5" },
+            { id: "claude-sonnet-5-5", displayName: "Sonnet 5.5" },
             { id: "claude-haiku-4-5", displayName: "Haiku 4.5" },
           ],
         };
@@ -1554,7 +1554,7 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex) witho
         return {
           items: [
             { id: "gpt-5.4", displayName: "GPT-5.4", isDefault: true },
-            { id: "gpt-5.4-mini", displayName: "GPT-5.4 Mini" },
+            { id: "gpt-6.1-terra", displayName: "GPT-6.1 Terra" },
           ],
         };
       }
@@ -1609,22 +1609,23 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex) witho
   });
   t.after(() => svc.close());
 
-  // 1. Without Antigravity/Gemini, auto picks Claude Haiku lightweight model and exposes modelOptions.
+  // 1. Without Antigravity/Gemini, auto picks Claude Sonnet (low effort) and exposes modelOptions.
   const startedAuto = await svc.startCall({ callId: "call-no-gemini" });
   assert.equal(startedAuto.dispatchProvider, "claude");
-  assert.equal(startedAuto.dispatchModel, "claude-haiku-4-5");
-  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "codex:default:gpt-5.4-mini"));
+  assert.equal(startedAuto.dispatchModel, "claude-sonnet-5-5");
+  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "codex:default:gpt-6.1-terra" && opt.effort === "low"));
+  assert.ok(startedAuto.modelOptions.some((opt) => opt.key === "claude:default:claude-sonnet-5-5" && opt.effort === "low"));
   assert.ok(!startedAuto.modelOptions.some((opt) => opt.key === "local:local-rules"));
 
-  // 2. Switching explicitly to Codex lightweight model executes subagent via Codex without Gemini.
+  // 2. Switching explicitly to Codex GPT-6.1 Terra executes subagent via Codex with low effort without Gemini.
   const startedCodex = await svc.startCall({
     callId: "call-no-gemini",
     voiceProvider: "codex",
     voiceProfileId: "default",
-    voiceModel: "gpt-5.4-mini",
+    voiceModel: "gpt-6.1-terra",
   });
   assert.equal(startedCodex.dispatchProvider, "codex");
-  assert.equal(startedCodex.dispatchModel, "gpt-5.4-mini");
+  assert.equal(startedCodex.dispatchModel, "gpt-6.1-terra");
 
   const subRes = await svc.handleTurn({
     callId: "call-no-gemini",
@@ -1644,7 +1645,10 @@ test("VoiceCallService supports optional lightweight models (Claude/Codex) witho
   }
   assert.equal(startedThreads.length, 2);
   assert.equal(startedThreads[0].provider, "codex");
-  assert.equal(startedThreads[0].model, "gpt-5.4-mini");
+  assert.equal(startedThreads[0].model, "gpt-6.1-terra");
+  assert.equal(startedThreads[0].effort, "low");
+  assert.equal(startedThreads[1].model, "gpt-6.1-terra");
+  assert.equal(startedThreads[1].effort, "low");
   assert.match(startedThreads[0].text, /^\[AC_VOICE_CALL\]/);
 
   const doneEvt = events.find(

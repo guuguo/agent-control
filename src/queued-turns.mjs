@@ -67,10 +67,26 @@ export function createQueuedTurnQueue({
       if (!await canDeliver(entry)) continue;
       try {
         const result = await deliver(entry);
+        delete entry.lastRetryError;
+        delete entry.lastRetryAt;
         removeById(threadId, entry.id);
         onEvent({ type: "started", entry, result });
       } catch (error) {
-        if (isRetryable?.(error)) continue;
+        if (isRetryable?.(error)) {
+          const msg = String(error?.message || error || "").trim();
+          if (msg && entry.lastRetryError !== msg) {
+            entry.lastRetryError = msg;
+            entry.lastRetryAt = Date.now();
+            onEvent({
+              type: "retry_blocked",
+              entry,
+              error: { message: msg, code: error?.code || "" },
+            });
+          }
+          continue;
+        }
+        delete entry.lastRetryError;
+        delete entry.lastRetryAt;
         removeById(threadId, entry.id);
         onEvent({ type: "failed", entry, error: { message: error?.message || String(error) } });
       }

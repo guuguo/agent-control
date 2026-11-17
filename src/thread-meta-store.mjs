@@ -17,6 +17,15 @@ function cleanProfileAlias(value) {
   return String(value || "").replace(/[\r\n]+/g, " ").trim().slice(0, 40);
 }
 
+function cleanReasoningEffort(value) {
+  if (!value) return "";
+  if (typeof value === "object") {
+    return cleanReasoningEffort(value.reasoningEffort ?? value.id ?? value.value ?? "");
+  }
+  const str = String(value).trim();
+  return str === "[object Object]" ? "" : str;
+}
+
 export function threadMetaPath(dataDir = defaultDataDir()) {
   return resolve(dataDir, "thread-meta.json");
 }
@@ -88,10 +97,23 @@ export function createThreadMetaStore({
             legacyProfiles[key] = { ...item };
           }
         }
+        const threads = {};
+        if (parsed.threads && typeof parsed.threads === "object") {
+          for (const [tid, item] of Object.entries(parsed.threads)) {
+            if (!tid || !item || typeof item !== "object") continue;
+            const cleanedEffort = cleanReasoningEffort(item.reasoningEffort);
+            const nextItem = { ...item };
+            if ("reasoningEffort" in nextItem) {
+              if (cleanedEffort) nextItem.reasoningEffort = cleanedEffort;
+              else delete nextItem.reasoningEffort;
+            }
+            threads[tid] = nextItem;
+          }
+        }
         const fileProfiles = await readProfilesFile();
         state = {
           version: 1,
-          threads: parsed.threads && typeof parsed.threads === "object" ? { ...parsed.threads } : {},
+          threads,
           projects,
           profiles: { ...legacyProfiles, ...fileProfiles },
         };
@@ -237,8 +259,10 @@ export function createThreadMetaStore({
       if (typeof patch.model === "string" && patch.model.trim()) {
         next.model = patch.model.trim();
       }
-      if (typeof patch.reasoningEffort === "string") {
-        next.reasoningEffort = patch.reasoningEffort.trim();
+      if ("reasoningEffort" in patch) {
+        const cleaned = cleanReasoningEffort(patch.reasoningEffort);
+        if (cleaned) next.reasoningEffort = cleaned;
+        else delete next.reasoningEffort;
       }
       if (typeof patch.permissionMode === "string" && patch.permissionMode.trim()) {
         next.permissionMode = patch.permissionMode.trim();

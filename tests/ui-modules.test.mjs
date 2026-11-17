@@ -582,7 +582,11 @@ test("model fallback selector and turbo permission helpers never leave UI select
   assert.ok(PERMISSION_MODES.includes("turbo"));
   assert.equal(isTurboPermissionMode("turbo"), true);
   assert.equal(isTurboPermissionMode("workspace"), false);
-  assert.deepEqual(codexExecutionPolicy("turbo"), { approvalPolicy: "never", sandbox: "danger-full-access" });
+  assert.deepEqual(codexExecutionPolicy("turbo"), {
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+    sandboxPolicy: { type: "dangerFullAccess" },
+  });
   assert.equal(claudePermissionMode("turbo"), "bypassPermissions");
   assert.equal(antigravityModeId("turbo"), "auto");
 
@@ -4636,8 +4640,10 @@ test("expanded telemetry cards show reset dates inline without duplicate drawer 
     },
   ], {}, { expanded: true, nowSec });
 
-  assert.match(html, /72% · 18:30/);
-  assert.match(html, /94% · 11\/21/);
+  assert.match(html, /<span class="telemetry-chip-v">72%<\/span><time[^>]*>8小时30分后重置<\/time>/);
+  assert.match(html, /title="[^"]*18:30"/);
+  assert.match(html, /<span class="telemetry-chip-v">94%<\/span><time[^>]*>4天23小时后重置<\/time>/);
+  assert.match(html, /title="[^"]*11\/21/);
   assert.doesNotMatch(html, /telemetry-drawer-grid|telemetry-drawer-card/);
 
   assert.deepEqual(

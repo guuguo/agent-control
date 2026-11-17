@@ -40,11 +40,16 @@ test("Codex active-writer RPC errors keep queued text and images until idle; gen
   await assert.rejects(hub.sendTurn(payload), (error) => error.status === 409 && error.code === "thread_busy");
   const queued = await hub.queueTurn(payload);
   await new Promise((done) => setTimeout(done, 250));
-  const waiting = await hub.listQueuedTurns(threadId);
+  const waiting = await waitFor(async () => {
+    const list = await hub.listQueuedTurns(threadId);
+    return list[0]?.blockedReason ? list : null;
+  });
   assert.equal(waiting.length, 1);
   assert.equal(waiting[0].id, queued.entry.id);
   assert.equal(waiting[0].text, payload.text);
   assert.equal(waiting[0].imageCount, 1);
+  assert.match(waiting[0].blockedReason, /本地 Codex 客户端/);
+  assert.equal(events.some((event) => event.eventType === "retry_blocked"), true);
   assert.equal(events.some((event) => event.eventType === "failed"), false);
   await rm(errorFile);
   await waitFor(() => events.find((event) => event.eventType === "started" && event.entry.id === queued.entry.id));

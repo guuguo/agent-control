@@ -1419,13 +1419,16 @@ function renderSlashCommandCard(cmd) {
   `;
 }
 
-export function renderMessageCopyButton(text = "") {
+export function renderMessageCopyButton(text = "", { forkTurnIndex = -1, forkTurnId = "" } = {}) {
   const content = String(text).replace(/<!--\s*GOAL_COMPLETE\s*-->/g, "");
   if (!content.trim()) return "";
-  return `<button type="button" class="msg-copy-btn" data-copy-message="${escapeHtml(content)}" title="复制消息文字（Markdown）" aria-label="复制消息文字">${iconSvg("clipboard", { size: 12 })}<span>复制</span></button>`;
+  const copyHtml = `<button type="button" class="msg-copy-btn" data-copy-message="${escapeHtml(content)}" title="复制消息文字（Markdown）" aria-label="复制消息文字">${iconSvg("clipboard", { size: 12 })}<span>复制</span></button>`;
+  if (!Number.isInteger(forkTurnIndex) || forkTurnIndex < 0) return copyHtml;
+  const forkHtml = `<button type="button" class="msg-copy-btn msg-fork-btn" data-fork-turn-index="${forkTurnIndex}" data-fork-turn-id="${escapeHtml(forkTurnId)}" title="从此处分叉为新会话（丢弃下方后续对话）" aria-label="从此处分叉为新会话">${iconSvg("fork", { size: 12 })}<span>分叉</span></button>`;
+  return `${copyHtml}${forkHtml}`;
 }
 
-function renderUserItem(item, { threadId = "", deferImages = false } = {}) {
+function renderUserItem(item, { threadId = "", deferImages = false, forkTurnIndex = -1, forkTurnId = "" } = {}) {
   const {
     textParts,
     images,
@@ -1504,7 +1507,7 @@ function renderUserItem(item, { threadId = "", deferImages = false } = {}) {
       <div class="msg-meta"><span class="msg-role">你</span>${renderMessageCopyButton([
         ...questionReplies.map((qr) => [qr.question, qr.answer].filter(Boolean).join("\n")),
         textParts.join("\n"),
-      ].filter(Boolean).join("\n\n"))}</div>
+      ].filter(Boolean).join("\n\n"), { forkTurnIndex, forkTurnId })}</div>
       <div class="msg-bubble user-bubble">
         ${imageParts.length ? `<div class="msg-images">${imageParts.join("")}${revealUserImagesBtnHtml}</div>` : ""}
         ${fileChips.length ? `<div class="msg-files">${fileChips.join("")}</div>` : ""}
@@ -2010,7 +2013,7 @@ export function formatTurnModelBadge(turnOrModel, fallbackModel = "", fallbackEf
   return { label, title };
 }
 
-function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null, deferImages = false } = {}) {
+function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null, deferImages = false, forkTurnIndex = -1, forkTurnId = "" } = {}) {
   const rawText = String(item.text || "");
   const parsedHb = item.heartbeat || parseClientHeartbeatAgentReply(rawText, { allowIncomplete: false });
   const text = item.heartbeat
@@ -2061,7 +2064,7 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
         ${hbTagHtml}
         ${isCommentary ? `<span class="phase-tag">过程汇报</span>` : ""}
         ${goalComplete ? `<span class="goal-done-tag">目标已达成</span>` : ""}
-        ${renderMessageCopyButton(text)}
+        ${renderMessageCopyButton(text, { forkTurnIndex, forkTurnId })}
       </div>
       <div class="msg-bubble agent-bubble md-body">
         ${renderMarkdown(text, { threadId, deferImages })}
@@ -2882,6 +2885,7 @@ function renderQuietHeartbeatTurnHtml(turn, group, { threadId = "" } = {}) {
 export function renderTurnHtml(turn, {
   agentLabel = "Agent",
   threadId = "",
+  turnIndex = -1,
   forceRunning = false,
   suppressRunning = false,
   liveThought = "",
@@ -2937,10 +2941,10 @@ export function renderTurnHtml(turn, {
     if (!item || typeof item !== "object") continue;
     if (item.type === "userMessage") {
       flushProcessGroup(false, false);
-      parts.push(renderUserItem(item, { threadId, deferImages }));
+      parts.push(renderUserItem(item, { threadId, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "" }));
     } else if (item.type === "agentMessage" && primaryAgentIndexes.has(i)) {
       flushProcessGroup(false, false);
-      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge, deferImages }));
+      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "" }));
     } else if (isTurnProcessItem(item)) {
       pendingProcessItems.push(item);
     }

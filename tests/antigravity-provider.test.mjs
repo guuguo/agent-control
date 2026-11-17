@@ -323,7 +323,16 @@ test("AntigravityProvider handles dual profiles, replay suppression, model/thoug
   assert.equal(profiles.length, 2);
 
   const models = await provider.listModels("cli");
-  assert.ok(models.some((m) => m.id === "gemini-4-carbon-high"));
+  const carbon = models.find((m) => m.id === "gemini-4-carbon");
+  assert.ok(carbon);
+  assert.equal(carbon.displayName, "Gemini 4 Carbon");
+  assert.deepEqual(carbon.supportedReasoningEfforts, ["medium", "high"]);
+  const hydrogen = models.find((m) => m.id === "gemini-4-hydrogen");
+  assert.ok(hydrogen);
+  assert.equal(hydrogen.displayName, "Gemini 4 Hydrogen");
+  assert.deepEqual(hydrogen.supportedReasoningEfforts, ["low", "medium"]);
+  assert.equal(models.filter((m) => m.id.startsWith("gemini-4-carbon")).length, 1);
+  assert.equal(models.filter((m) => m.id.startsWith("gemini-4-hydrogen")).length, 1);
   const orchestrator = models.find((m) => m.id === DEFAULT_AGY_MODEL);
   assert.equal(orchestrator?.displayName, "Orchestrator (Carbon)");
   assert.equal(orchestrator?.isDefault, true);
@@ -331,10 +340,17 @@ test("AntigravityProvider handles dual profiles, replay suppression, model/thoug
 
   const parsedCustom = parseAgyModelsOutput([
     "gemini-4-carbon-high Gemini 4 Carbon (High)",
+    "gemini-4-carbon-low Gemini 4 Carbon (Low)",
+    "gemini-4-hydrogen-medium Gemini 4 Hydrogen (Medium)",
+    "gemini-4-hydrogen-xhigh Gemini 4 Hydrogen (XHigh)",
     "gemini-pro-orchestrator Orchestrator (Carbon)",
   ].join("\n"));
+  assert.equal(parsedCustom.length, 3);
   assert.equal(parsedCustom.find((m) => m.id === "gemini-pro-orchestrator")?.isDefault, true);
-  assert.equal(parsedCustom.find((m) => m.id === "gemini-4-carbon-high")?.isDefault, false);
+  assert.equal(parsedCustom.find((m) => m.id === "gemini-4-carbon")?.isDefault, false);
+  assert.deepEqual(parsedCustom.find((m) => m.id === "gemini-4-carbon")?.supportedReasoningEfforts, ["low", "high"]);
+  assert.equal(parsedCustom.find((m) => m.id === "gemini-4-hydrogen")?.defaultReasoningEffort, "medium");
+  assert.deepEqual(parsedCustom.find((m) => m.id === "gemini-4-hydrogen")?.supportedReasoningEfforts, ["medium", "xhigh"]);
 
   const listed = await provider.listThreads("cli");
   assert.ok(listed.some((th) => th.id === "antigravity:cli:agy-seed-session-1"));

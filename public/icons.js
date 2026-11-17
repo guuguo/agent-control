@@ -43,6 +43,7 @@ const ICON_PATHS = Object.freeze({
   minus: `<path d="M4 8h8" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>`,
   film: `<rect x="2" y="2.75" width="12" height="10.5" rx="1.6" stroke="currentColor" stroke-width="1.45"/><path d="M5 2.75v10.5M11 2.75v10.5M2 6h3m6 0h3M2 10h3m6 0h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="m7 6.3 2.5 1.7L7 9.7V6.3Z" fill="currentColor"/>`,
   "external-link": `<path d="M6.5 3.25H3.75A1.5 1.5 0 0 0 2.25 4.75v7.5a1.5 1.5 0 0 0 1.5 1.5h7.5a1.5 1.5 0 0 0 1.5-1.5V9.5" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/><path d="M9.5 2.25h4.25V6.5M13.6 2.4 7.75 8.25" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>`,
+  fork: `<circle cx="4.75" cy="3.75" r="1.5" stroke="currentColor" stroke-width="1.45"/><circle cx="4.75" cy="12.25" r="1.5" stroke="currentColor" stroke-width="1.45"/><circle cx="11.25" cy="5.75" r="1.5" stroke="currentColor" stroke-width="1.45"/><path d="M4.75 5.25v5.5M4.75 9.5c0-1.9 6.5-1.15 6.5-2.25" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/>`,
 });
 
 const PROVIDER_ICON_PATHS = Object.freeze({

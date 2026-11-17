@@ -19,6 +19,22 @@ private let localFileContextMenuScript = #"""
 })();
 """#
 
+private final class PluginWindowSession {
+  let key: String
+  let window: NSWindow
+  let webView: WKWebView
+  let backButton: NSButton
+  var navObservation: NSKeyValueObservation?
+  var titleObservation: NSKeyValueObservation?
+
+  init(key: String, window: NSWindow, webView: WKWebView, backButton: NSButton) {
+    self.key = key
+    self.window = window
+    self.webView = webView
+    self.backButton = backButton
+  }
+}
+
 final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler {
   private var window: NSWindow!
   private var webView: WKWebView!
@@ -27,6 +43,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
   private var statusOverlay: NSView!
   private var statusLabel: NSTextField!
   private var retryButton: NSButton!
+  private var pluginSessions = [PluginWindowSession]()
 
   private var targetURL: URL!
   private var healthURL: URL!
@@ -58,8 +75,22 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    sender.orderOut(nil)
-    return false
+    if sender === window {
+      sender.orderOut(nil)
+      return false
+    }
+    return true
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    guard let closing = notification.object as? NSWindow, closing !== window else { return }
+    if let idx = pluginSessions.firstIndex(where: { $0.window === closing }) {
+      let session = pluginSessions.remove(at: idx)
+      session.navObservation = nil
+      session.titleObservation = nil
+      session.webView.navigationDelegate = nil
+      session.webView.uiDelegate = nil
+    }
   }
 
   // MARK: - Configuration
@@ -355,12 +386,13 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
   // MARK: - Menu Actions
 
   @objc private func goBack(_ sender: Any?) {
-    webView.goBack()
+    let target = activeWebView()
+    if target.canGoBack { target.goBack() }
   }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
     if menuItem.action == #selector(goBack(_:)) {
-      return webView?.canGoBack ?? false
+      return activeWebView().canGoBack
     }
     return true
   }
@@ -370,35 +402,39 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
   }
 
   @objc private func reloadWebView(_ sender: Any?) {
-    if !hasLoadedApp {
+    let target = activeWebView()
+    if target === webView && !hasLoadedApp {
       ensureServerAndLoad()
       return
     }
-    webView.reload()
+    target.reload()
   }
 
   @objc private func hardReloadWebView(_ sender: Any?) {
-    if !hasLoadedApp {
+    let target = activeWebView()
+    if target === webView && !hasLoadedApp {
       ensureServerAndLoad()
       return
     }
-    webView.reloadFromOrigin()
+    target.reloadFromOrigin()
   }
 
   @objc private func zoomIn(_ sender: Any?) {
-    webView.pageZoom = min(2.0, webView.pageZoom + 0.1)
+    let target = activeWebView()
+    target.pageZoom = min(2.0, target.pageZoom + 0.1)
   }
 
   @objc private func zoomOut(_ sender: Any?) {
-    webView.pageZoom = max(0.7, webView.pageZoom - 0.1)
+    let target = activeWebView()
+    target.pageZoom = max(0.7, target.pageZoom - 0.1)
   }
 
   @objc private func zoomReset(_ sender: Any?) {
-    webView.pageZoom = 1.0
+    activeWebView().pageZoom = 1.0
   }
 
   @objc private func openInBrowser(_ sender: Any?) {
-    NSWorkspace.shared.open(webView.url ?? targetURL)
+    NSWorkspace.shared.open(activeWebView().url ?? targetURL)
   }
 
   @objc private func restartLocalService(_ sender: Any?) {
@@ -470,17 +506,142 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     return actualPort == expectedPort
   }
 
+  private func isLocalPluginAppURL(_ url: URL) -> Bool {
+    guard isLocalAppURL(url) else { return false }
+    let path = url.path
+    return path == "/apps" || path.hasPrefix("/apps/")
+  }
+
+  private func pluginWindowKey(for url: URL) -> String {
+    let parts = url.pathComponents.filter { $0 != "/" }
+    if parts.count >= 2 && parts[0] == "apps" {
+      return "/apps/\(parts[1])"
+    }
+    return url.path.isEmpty ? url.absoluteString : url.path
+  }
+
+  private func activeWebView() -> WKWebView {
+    if let keyWin = NSApp.keyWindow,
+       let matched = pluginSessions.first(where: { $0.window === keyWin }) {
+      return matched.webView
+    }
+    return webView
+  }
+
+  private func hostWindow(for targetWebView: WKWebView?) -> NSWindow {
+    return targetWebView?.window ?? NSApp.keyWindow ?? window
+  }
+
+  @discardableResult
+  private func openPluginWindow(url: URL, configuration: WKWebViewConfiguration? = nil) -> WKWebView {
+    let key = pluginWindowKey(for: url)
+    if configuration == nil, let existing = pluginSessions.first(where: { $0.key == key }) {
+      existing.window.makeKeyAndOrderFront(nil)
+      NSApp.activate(ignoringOtherApps: true)
+      if existing.webView.url?.path != url.path {
+        existing.webView.load(URLRequest(url: url))
+      }
+      return existing.webView
+    }
+
+    let rect = NSRect(x: 0, y: 0, width: 1240, height: 820)
+    let childWindow = NSWindow(
+      contentRect: rect,
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered,
+      defer: false
+    )
+    childWindow.title = "Agent Control 插件"
+    childWindow.minSize = NSSize(width: 720, height: 500)
+    childWindow.backgroundColor = windowBgColor
+    childWindow.titlebarAppearsTransparent = true
+    childWindow.isReleasedWhenClosed = false
+    childWindow.delegate = self
+
+    let offset = CGFloat((pluginSessions.count + 1) * 24)
+    let origin = NSPoint(x: window.frame.origin.x + offset, y: max(40, window.frame.origin.y - offset))
+    childWindow.setFrameOrigin(origin)
+
+    let contentView = NSView(frame: rect)
+    contentView.wantsLayer = true
+    contentView.layer?.backgroundColor = windowBgColor.cgColor
+    childWindow.contentView = contentView
+
+    let childConfig: WKWebViewConfiguration
+    if let provided = configuration {
+      childConfig = provided
+    } else {
+      childConfig = WKWebViewConfiguration()
+      childConfig.websiteDataStore = .default()
+      childConfig.preferences.isElementFullscreenEnabled = true
+      childConfig.preferences.javaScriptCanOpenWindowsAutomatically = true
+      childConfig.userContentController.add(self, name: "localFileContextMenu")
+      childConfig.userContentController.addUserScript(WKUserScript(
+        source: localFileContextMenuScript,
+        injectionTime: .atDocumentEnd,
+        forMainFrameOnly: true
+      ))
+    }
+
+    let childWebView = WKWebView(frame: contentView.bounds, configuration: childConfig)
+    childWebView.autoresizingMask = [.width, .height]
+    childWebView.navigationDelegate = self
+    childWebView.uiDelegate = self
+    childWebView.allowsBackForwardNavigationGestures = true
+    childWebView.setValue(false, forKey: "drawsBackground")
+    if #available(macOS 13.3, *) {
+      childWebView.isInspectable = true
+    }
+    contentView.addSubview(childWebView)
+
+    let accessory = NSTitlebarAccessoryViewController()
+    accessory.layoutAttribute = .left
+    accessory.view = NSView(frame: NSRect(x: 0, y: 0, width: 76, height: 26))
+    let childBack = NSButton(title: "返回", target: self, action: #selector(goBack(_:)))
+    childBack.frame = NSRect(x: 6, y: 2, width: 64, height: 22)
+    childBack.bezelStyle = .texturedRounded
+    childBack.controlSize = .small
+    childBack.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: "返回")
+    childBack.imagePosition = .imageLeading
+    childBack.toolTip = "返回上一页（⌘[）"
+    accessory.view.addSubview(childBack)
+    childWindow.addTitlebarAccessoryViewController(accessory)
+
+    let session = PluginWindowSession(key: key, window: childWindow, webView: childWebView, backButton: childBack)
+    session.navObservation = childWebView.observe(\.canGoBack, options: [.initial, .new]) { view, _ in
+      childBack.isEnabled = view.canGoBack
+    }
+    session.titleObservation = childWebView.observe(\.title, options: [.initial, .new]) { view, _ in
+      let pageTitle = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      childWindow.title = pageTitle.isEmpty ? "Agent Control 插件" : pageTitle
+    }
+    pluginSessions.append(session)
+
+    if configuration == nil {
+      childWebView.load(URLRequest(url: url))
+    }
+    childWindow.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    return childWebView
+  }
+
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    statusOverlay.isHidden = true
-    retryButton.isHidden = true
+    if webView === self.webView {
+      statusOverlay.isHidden = true
+      retryButton.isHidden = true
+    }
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    handleLoadError(error)
+    if webView === self.webView {
+      handleLoadError(error)
+    }
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    handleLoadError(error)
+    if webView === self.webView {
+      handleLoadError(error)
+    }
   }
 
   private func handleLoadError(_ error: Error) {
@@ -504,6 +665,13 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     let scheme = url.scheme?.lowercased() ?? ""
     if scheme == "http" || scheme == "https" {
       if isLocalAppURL(url) {
+        if webView === self.webView
+          && navigationAction.navigationType == .linkActivated
+          && isLocalPluginAppURL(url) {
+          openPluginWindow(url: url)
+          decisionHandler(.cancel)
+          return
+        }
         decisionHandler(.allow)
       } else {
         NSWorkspace.shared.open(url)
@@ -578,13 +746,11 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     for navigationAction: WKNavigationAction,
     windowFeatures: WKWindowFeatures
   ) -> WKWebView? {
-    if let url = navigationAction.request.url {
-      if isLocalAppURL(url) {
-        webView.load(navigationAction.request)
-      } else {
-        NSWorkspace.shared.open(url)
-      }
+    guard let url = navigationAction.request.url else { return nil }
+    if isLocalAppURL(url) {
+      return openPluginWindow(url: url, configuration: configuration)
     }
+    NSWorkspace.shared.open(url)
     return nil
   }
 
@@ -598,7 +764,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     panel.allowsMultipleSelection = parameters.allowsMultipleSelection
     panel.canChooseDirectories = parameters.allowsDirectories
     panel.canChooseFiles = true
-    panel.beginSheetModal(for: window) { result in
+    panel.beginSheetModal(for: hostWindow(for: webView)) { result in
       completionHandler(result == .OK ? panel.urls : nil)
     }
   }
@@ -613,7 +779,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     alert.messageText = "Agent Control"
     alert.informativeText = message
     alert.addButton(withTitle: "确定")
-    alert.beginSheetModal(for: window) { _ in
+    alert.beginSheetModal(for: hostWindow(for: webView)) { _ in
       completionHandler()
     }
   }
@@ -629,7 +795,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     alert.informativeText = message
     alert.addButton(withTitle: "确定")
     alert.addButton(withTitle: "取消")
-    alert.beginSheetModal(for: window) { response in
+    alert.beginSheetModal(for: hostWindow(for: webView)) { response in
       completionHandler(response == .alertFirstButtonReturn)
     }
   }
@@ -648,7 +814,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     alert.accessoryView = field
     alert.addButton(withTitle: "确定")
     alert.addButton(withTitle: "取消")
-    alert.beginSheetModal(for: window) { response in
+    alert.beginSheetModal(for: hostWindow(for: webView)) { response in
       completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
     }
   }

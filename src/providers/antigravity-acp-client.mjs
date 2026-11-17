@@ -22,6 +22,8 @@ const PROMPT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export const DEFAULT_AGY_MODEL = "gemini-pro-orchestrator";
 
+const AGY_EFFORT_ORDER = ["low", "medium", "high", "xhigh"];
+
 export const FALLBACK_AGY_MODELS = Object.freeze([
   {
     id: "gemini-pro-orchestrator",
@@ -34,63 +36,50 @@ export const FALLBACK_AGY_MODELS = Object.freeze([
     supportedReasoningEfforts: [],
   },
   {
-    id: "gemini-4-carbon-high",
-    model: "gemini-4-carbon-high",
-    displayName: "Gemini 4 Carbon (High)",
+    id: "gemini-4-carbon",
+    model: "gemini-4-carbon",
+    baseModel: "gemini-4-carbon",
+    displayName: "Gemini 4 Carbon",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: ["low", "medium", "high"],
   },
   {
-    id: "gemini-4-carbon-medium",
-    model: "gemini-4-carbon-medium",
-    displayName: "Gemini 4 Carbon (Medium)",
+    id: "gemini-4-argon",
+    model: "gemini-4-argon",
+    baseModel: "gemini-4-argon",
+    displayName: "Gemini 4 Argon",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["low", "medium", "high"],
   },
   {
-    id: "gemini-4-argon-medium",
-    model: "gemini-4-argon-medium",
-    displayName: "Gemini 4 Argon (Medium)",
-    provider: "antigravity",
-    isDefault: false,
-    defaultReasoningEffort: "medium",
-    supportedReasoningEfforts: ["low", "medium", "high"],
-  },
-  {
-    id: "gemini-4-hydrogen-low",
-    model: "gemini-4-hydrogen-low",
-    displayName: "Gemini 4 Hydrogen (Low)",
-    provider: "antigravity",
-    isDefault: false,
-    defaultReasoningEffort: "low",
-    supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
-  },
-  {
-    id: "gemini-4-hydrogen-medium",
-    model: "gemini-4-hydrogen-medium",
-    displayName: "Gemini 4 Hydrogen (Medium)",
+    id: "gemini-4-hydrogen",
+    model: "gemini-4-hydrogen",
+    baseModel: "gemini-4-hydrogen",
+    displayName: "Gemini 4 Hydrogen",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
   },
   {
-    id: "claude-opus-5-5-medium",
-    model: "claude-opus-5-5-medium",
-    displayName: "Claude Opus 5.5 (Medium)",
+    id: "claude-opus-5-5",
+    model: "claude-opus-5-5",
+    baseModel: "claude-opus-5-5",
+    displayName: "Claude Opus 5.5",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["low", "medium", "high"],
   },
   {
-    id: "claude-sonnet-4-6-medium",
-    model: "claude-sonnet-4-6-medium",
-    displayName: "Claude Sonnet 4.6 (Medium)",
+    id: "claude-sonnet-4-6",
+    model: "claude-sonnet-4-6",
+    baseModel: "claude-sonnet-4-6",
+    displayName: "Claude Sonnet 4.6",
     provider: "antigravity",
     isDefault: false,
     defaultReasoningEffort: "medium",
@@ -112,31 +101,55 @@ export function splitAntigravityModelEffort(modelId = "", explicitEffort = "") {
 }
 
 export function parseAgyModelsOutput(stdout) {
-  const items = [];
+  const byBase = new Map();
   for (const line of String(stdout || "").split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const match = trimmed.match(/^([a-z0-9._-]+)\s+(.+)$/i);
     if (!match) continue;
-    const id = match[1];
-    const displayName = match[2].trim();
-    const { baseModel, effort } = splitAntigravityModelEffort(id);
-    items.push({
-      id,
-      model: id,
-      baseModel,
-      displayName,
-      provider: "antigravity",
-      isDefault: false,
-      defaultReasoningEffort: effort || "medium",
-      supportedReasoningEfforts: effort ? ["low", "medium", "high", ...(effort === "xhigh" ? ["xhigh"] : [])] : [],
-    });
+    const rawId = match[1];
+    const rawDisplayName = match[2].trim();
+    const { baseModel, effort } = splitAntigravityModelEffort(rawId);
+    const cleanDisplayName = rawDisplayName.replace(/\s*\((?:low|medium|high|xhigh)\)\s*$/i, "").trim() || rawDisplayName;
+    const key = baseModel || rawId;
+    let entry = byBase.get(key);
+    if (!entry) {
+      entry = {
+        id: key,
+        model: key,
+        baseModel: key,
+        displayName: cleanDisplayName,
+        provider: "antigravity",
+        isDefault: false,
+        defaultReasoningEffort: effort || "medium",
+        supportedReasoningEfforts: [],
+      };
+      byBase.set(key, entry);
+    } else if (cleanDisplayName.length < entry.displayName.length) {
+      entry.displayName = cleanDisplayName;
+    }
+    if (effort && !entry.supportedReasoningEfforts.includes(effort)) {
+      entry.supportedReasoningEfforts.push(effort);
+    }
   }
+  const items = [...byBase.values()].map((entry) => {
+    const sorted = entry.supportedReasoningEfforts.sort(
+      (a, b) => AGY_EFFORT_ORDER.indexOf(a) - AGY_EFFORT_ORDER.indexOf(b),
+    );
+    const preferredDefault = sorted.includes("medium")
+      ? "medium"
+      : (sorted[0] || entry.defaultReasoningEffort || "medium");
+    return {
+      ...entry,
+      defaultReasoningEffort: preferredDefault,
+      supportedReasoningEfforts: sorted,
+    };
+  });
   if (items.length) {
     const preferred =
       items.find((item) => item.id === DEFAULT_AGY_MODEL)
-      || items.find((item) => item.id === "gemini-4-carbon-high")
-      || items.find((item) => item.id === "gemini-4-carbon-medium")
+      || items.find((item) => item.id === "gemini-4-carbon")
+      || items.find((item) => item.id.startsWith("gemini-4-carbon"))
       || items[0];
     if (preferred) preferred.isDefault = true;
   }

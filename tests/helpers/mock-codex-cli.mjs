@@ -12,6 +12,7 @@ function readMockProbeError() {
 }
 
 const threads = new Map();
+const loadedThreads = new Set();
 const slowTurns = new Map();
 
 function ensureThread(id, extra = {}) {
@@ -226,12 +227,19 @@ rl.on("line", (line) => {
     }
     const threadId = `01900000-0000-7000-8000-${String(threads.size + 10).padStart(12, "0")}`;
     const thread = ensureThread(threadId, params);
+    loadedThreads.add(threadId);
     send({ id, result: { thread } });
     return;
   }
 
   if (method === "thread/resume") {
+    const resumeErrFile = resolve(process.env.CODEX_HOME || "", ".mock-resume-error");
+    if (existsSync(resumeErrFile)) {
+      send({ id, error: { code: -32000, message: readFileSync(resumeErrFile, "utf8").trim() } });
+      return;
+    }
     const thread = ensureThread(params.threadId, params);
+    loadedThreads.add(params.threadId);
     send({ id, result: { thread } });
     return;
   }
@@ -266,6 +274,14 @@ rl.on("line", (line) => {
   }
 
   if (method === "turn/steer") {
+    if (!loadedThreads.has(params.threadId)) {
+      send({ id, error: { code: -32000, message: `thread not found: ${params.threadId}` } });
+      return;
+    }
+    if (String(params.expectedTurnId || "").startsWith("stale-") && !slowTurns.has(params.expectedTurnId)) {
+      send({ id, error: { code: -32000, message: `no active turn: ${params.expectedTurnId}` } });
+      return;
+    }
     const text = (params.input || []).filter((i) => i.type === "text").map((i) => i.text).join("\n");
     const handler = slowTurns.get(params.expectedTurnId);
     send({ id, result: { turnId: params.expectedTurnId } });

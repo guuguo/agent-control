@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,5 +120,42 @@ test("ProviderHub records actual Mock Codex, Claude and Agy rounds with chosen m
   const stats = hub.getExecutionStats();
   assert.equal(stats.runs.length, 3);
   assert.equal(stats.runs.every((r) => r.status === "completed" && r.effort === "high" && r.durationMs >= 0), true, JSON.stringify(stats.runs));
-  assert.deepEqual(new Set(stats.groups.map((g) => g.model)), new Set(["gpt-5.4", "claude-haiku-5-5", "gemini-4-carbon-high"]));
+  assert.deepEqual(new Set(stats.groups.map((g) => g.model)), new Set(["gpt-5.4", "claude-haiku-5-5", "gemini-4-carbon"]));
+});
+
+test("Antigravity model names normalize effort suffixes on record and load", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-exec-agy-norm-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let now = 1794823200000;
+  const filePath = resolve(root, "stats.json");
+  const stats = new ExecutionStats({ filePath, now: () => now });
+  const threadId = "antigravity:desktop:one";
+
+  stats.handle({ type: "turn_started", threadId, turn: { id: "t1" }, provider: "antigravity", model: "gemini-4-hydrogen-high", effort: "medium" });
+  now += 1000;
+  stats.handle({ type: "turn_completed", threadId, turnId: "t1", status: "completed" });
+
+  stats.handle({ type: "turn_started", threadId, turn: { id: "t2" }, provider: "antigravity", model: "gemini-4-hydrogen", effort: "medium" });
+  now += 2000;
+  stats.handle({ type: "turn_completed", threadId, turnId: "t2", status: "completed" });
+
+  stats.handle({ type: "turn_started", threadId, turn: { id: "t3" }, provider: "antigravity", model: "gemini-4-hydrogen-high", effort: "" });
+  now += 3000;
+  stats.handle({ type: "turn_completed", threadId, turnId: "t3", status: "completed" });
+
+  await stats.flush();
+  // Existing records may still contain suffixed model IDs. The explicit effort
+  // remains authoritative even when it disagrees with the model-name suffix.
+  const saved = JSON.parse(await readFile(filePath, "utf8"));
+  saved.runs.find((row) => row.turnId === "t1").model = "gemini-4-hydrogen-high";
+  saved.runs.find((row) => row.turnId === "t2").model = "gemini-4-hydrogen-medium";
+  await writeFile(filePath, JSON.stringify(saved));
+  const reloaded = new ExecutionStats({ filePath, now: () => now });
+  await reloaded.load();
+  const groups = reloaded.snapshot().groups;
+  assert.equal(groups.length, 2);
+  const med = groups.find((g) => g.model === "gemini-4-hydrogen" && g.effort === "medium");
+  const high = groups.find((g) => g.model === "gemini-4-hydrogen" && g.effort === "high");
+  assert.equal(med?.count, 2);
+  assert.equal(high?.count, 1);
 });

@@ -1,6 +1,7 @@
 #!/opt/homebrew/bin/python3.12
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -84,11 +85,42 @@ def assess_audio_activity(audio_arr):
         frame_rms = np.sqrt(np.mean(frames * frames, axis=1))
         max_frame_rms = float(np.max(frame_rms))
     else:
+        frame_rms = None
         max_frame_rms = rms
 
     if peak < 0.007 or rms < 0.0020 or max_frame_rms < 0.006:
         return False, peak, rms, max_frame_rms
+
+    if frame_rms is not None and audio_arr.size >= 4800:
+        p25 = float(np.percentile(frame_rms, 25))
+        voice_thr = max(0.006, min(0.016, p25 * 2.0))
+        max_run = 0
+        cur_run = 0
+        for v in frame_rms:
+            if float(v) >= voice_thr:
+                cur_run += 1
+                if cur_run > max_run:
+                    max_run = cur_run
+            else:
+                cur_run = 0
+        if max_run < 5:
+            return False, peak, rms, max_frame_rms
+
     return True, peak, rms, max_frame_rms
+
+
+HALLUCINATION_RE = re.compile(
+    r"(请不吝点赞|点赞[\s，,、]*订阅|订阅[\s，,、]*转发|打赏支持|明镜与点点|优优独播剧场|字幕组|感谢收看|谢谢收看|amara\.org|subtitles\s+by)",
+    re.IGNORECASE,
+)
+REPEAT_TOKEN_RE = re.compile(r"([\u4e00-\u9fffA-Za-z]{1,8})(?:[\s，,、]+\1){2,}")
+
+
+def is_whisper_hallucination(text):
+    clean = str(text or "").strip()
+    if not clean:
+        return False
+    return bool(HALLUCINATION_RE.search(clean) or REPEAT_TOKEN_RE.search(clean))
 
 
 def extract_valid_whisper_text(res):
@@ -106,15 +138,56 @@ def extract_valid_whisper_text(res):
             no_speech_prob = seg.get("no_speech_prob")
             avg_logprob = seg.get("avg_logprob")
             compression_ratio = seg.get("compression_ratio")
-            if no_speech_prob is not None and float(no_speech_prob) >= 0.72 and (avg_logprob is None or float(avg_logprob) < -0.7):
+            if no_speech_prob is not None and float(no_speech_prob) >= 0.68:
+                continue
+            if no_speech_prob is not None and float(no_speech_prob) >= 0.50 and avg_logprob is not None and float(avg_logprob) < -0.85:
                 continue
             if avg_logprob is not None and float(avg_logprob) < -1.35 and len(seg_text) <= 10:
                 continue
-            if compression_ratio is not None and float(compression_ratio) >= 2.6 and len(seg_text) <= 24:
+            if compression_ratio is not None and float(compression_ratio) >= 2.3:
+                continue
+            if is_whisper_hallucination(seg_text):
                 continue
             kept.append(seg_text)
-        return "".join(kept).strip()
-    return str(res.get("text") or "").strip()
+        full_text = "".join(kept).strip()
+        return "" if is_whisper_hallucination(full_text) else full_text
+    raw_text = str(res.get("text") or "").strip()
+    return "" if is_whisper_hallucination(raw_text) else raw_text
+
+
+def filter_speech_with_silero(audio_arr, vad_model, get_speech_timestamps):
+    if vad_model is None or get_speech_timestamps is None:
+        return True, audio_arr
+    import numpy as np
+    import torch
+
+    if audio_arr.size < 1600:
+        return False, audio_arr[:0]
+
+    try:
+        tensor = torch.from_numpy(np.ascontiguousarray(audio_arr, dtype=np.float32))
+        segments = get_speech_timestamps(
+            tensor,
+            vad_model,
+            sampling_rate=16000,
+            threshold=0.45,
+            min_speech_duration_ms=160,
+            min_silence_duration_ms=220,
+            speech_pad_ms=160,
+        )
+    finally:
+        try:
+            vad_model.reset_states()
+        except Exception:
+            pass
+
+    if not segments:
+        return False, audio_arr[:0]
+
+    chunks = [audio_arr[int(seg["start"]):int(seg["end"])] for seg in segments if int(seg["end"]) > int(seg["start"])]
+    if not chunks:
+        return False, audio_arr[:0]
+    return True, np.concatenate(chunks)
 
 
 def main():
@@ -142,10 +215,21 @@ def main():
         sys.stdout.flush()
         return
 
-    sys.stdout.write(json.dumps({"ready": True, "modelDir": model_dir}, ensure_ascii=False) + "\n")
+    vad_model = None
+    vad_get_timestamps = None
+    try:
+        from silero_vad import get_speech_timestamps, load_silero_vad
+
+        vad_model = load_silero_vad()
+        vad_get_timestamps = get_speech_timestamps
+    except Exception:
+        vad_model = None
+        vad_get_timestamps = None
+
+    sys.stdout.write(json.dumps({"ready": True, "modelDir": model_dir, "sileroVad": vad_model is not None}, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
-    default_prompt = "请忠实转写用户说出的普通话和英文，保留疑问、否定和原意。"
+    default_prompt = "普通话语音对话。"
     while True:
         raw_line = sys.stdin.readline()
         if not raw_line:
@@ -166,22 +250,45 @@ def main():
             t0 = time.monotonic()
             audio_arr = load_pcm16_float32(audio_path)
             has_speech, peak, rms, max_frame_rms = assess_audio_activity(audio_arr)
+            silence_reason = ""
             if not has_speech:
                 text = ""
                 no_speech = True
+                silence_reason = "acoustic_gate"
             else:
-                res = mlx_whisper.transcribe(
-                    audio_arr,
-                    path_or_hf_repo=model_dir,
-                    language=language,
-                    temperature=(0.0, 0.2),
-                    condition_on_previous_text=False,
-                    initial_prompt=prompt,
-                )
-                text = extract_valid_whisper_text(res)
-                no_speech = not bool(text)
+                has_voice, speech_arr = filter_speech_with_silero(audio_arr, vad_model, vad_get_timestamps)
+                if not has_voice or speech_arr.size < 1600:
+                    text = ""
+                    no_speech = True
+                    silence_reason = "silero_no_speech"
+                else:
+                    try:
+                        res = mlx_whisper.transcribe(
+                            speech_arr,
+                            path_or_hf_repo=model_dir,
+                            language=language,
+                            temperature=(0.0, 0.2),
+                            condition_on_previous_text=False,
+                            initial_prompt=prompt,
+                            no_speech_threshold=0.6,
+                            compression_ratio_threshold=2.3,
+                            logprob_threshold=-1.0,
+                        )
+                    except TypeError:
+                        res = mlx_whisper.transcribe(
+                            speech_arr,
+                            path_or_hf_repo=model_dir,
+                            language=language,
+                            temperature=(0.0, 0.2),
+                            condition_on_previous_text=False,
+                            initial_prompt=prompt,
+                        )
+                    text = extract_valid_whisper_text(res)
+                    no_speech = not bool(text)
+                    if no_speech:
+                        silence_reason = "whisper_filtered"
             elapsed_ms = int((time.monotonic() - t0) * 1000)
-            sys.stdout.write(json.dumps({
+            payload = {
                 "id": req_id,
                 "ok": True,
                 "text": text,
@@ -190,8 +297,12 @@ def main():
                 "rms": round(rms, 5),
                 "maxFrameRms": round(max_frame_rms, 5),
                 "engine": "mlx-whisper",
+                "sileroVad": vad_model is not None,
                 "durationMs": elapsed_ms,
-            }, ensure_ascii=False) + "\n")
+            }
+            if silence_reason:
+                payload["silenceReason"] = silence_reason
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
             sys.stdout.flush()
         except Exception as exc:
             sys.stdout.write(json.dumps({

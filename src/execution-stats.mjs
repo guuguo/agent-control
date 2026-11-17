@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { splitAntigravityModelEffort } from "./providers/antigravity-acp-client.mjs";
 import { estimateTextTokens } from "./telemetry-service.mjs";
 
 const LIMIT = 5000;
@@ -7,6 +8,28 @@ const TOKEN_KEYS = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoni
 const finite = (value) => value !== null && value !== undefined && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
 const percentile = (values, p) => values.length ? [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * p) - 1)] : null;
 const average = (values) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+
+function cleanEffort(value) {
+  if (!value) return "";
+  if (typeof value === "object") {
+    return cleanEffort(value.reasoningEffort ?? value.id ?? value.value ?? "");
+  }
+  const str = String(value).trim();
+  return str === "[object Object]" ? "" : str;
+}
+
+function normalizeModelAndEffort(provider, model = "", effort = "") {
+  const cleanModel = String(model || "").trim();
+  const cleanedEffort = cleanEffort(effort);
+  if (provider !== "antigravity" || !cleanModel) {
+    return { model: cleanModel, effort: cleanedEffort };
+  }
+  const { baseModel, effort: resolvedEffort } = splitAntigravityModelEffort(cleanModel, cleanedEffort);
+  return {
+    model: baseModel || cleanModel,
+    effort: cleanedEffort || resolvedEffort,
+  };
+}
 
 function tokens(raw = {}, { claude = false } = {}) {
   const input = finite(raw.inputTokens ?? raw.input_tokens ?? raw.prompt_tokens);
@@ -43,6 +66,9 @@ export class ExecutionStats {
       this.#startedAt = saved.startedAt || this.#startedAt;
       for (const row of (saved.runs || []).slice(-LIMIT)) {
         if (row.status === "running") row.status = "incomplete";
+        const normalized = normalizeModelAndEffort(row.provider, row.model, row.effort);
+        row.model = normalized.model;
+        row.effort = normalized.effort;
         this.#rows.set(row.id, row);
       }
     } catch (error) {
@@ -68,17 +94,24 @@ export class ExecutionStats {
   }
 
   context(threadId, turnId, { model = "", effort = "", internal = false, goalMode = false } = {}) {
+    const provider = String(threadId || "").split(":")[0];
+    const normalized = normalizeModelAndEffort(provider, model, effort);
     const row = this.#row(threadId, turnId);
     if (!row) {
-      if (turnId) this.#contexts.set(`${threadId}/${turnId}`, { model, effort, internal, goalMode });
+      if (turnId) this.#contexts.set(`${threadId}/${turnId}`, { model: normalized.model, effort: normalized.effort, internal, goalMode });
       return;
     }
     if (internal) {
       this.#rows.delete(row.id);
       if (this.#active.get(threadId) === row.id) this.#active.delete(threadId);
     } else {
-      if (model) row.model = model;
-      if (effort) row.effort = effort;
+      const rowNorm = normalizeModelAndEffort(
+        row.provider || provider,
+        model || row.model,
+        cleanEffort(effort) || row.effort,
+      );
+      if (model) row.model = rowNorm.model;
+      if (cleanEffort(effort) || (!row.effort && rowNorm.effort)) row.effort = rowNorm.effort;
       row.goalMode = Boolean(goalMode);
     }
     this.#persist();
@@ -99,10 +132,15 @@ export class ExecutionStats {
       this.#contexts.delete(id);
       if (context?.internal) return;
       if (!this.#rows.has(id)) {
+        const normalized = normalizeModelAndEffort(
+          event.provider,
+          context?.model || event.model || event.turn?.model || preferences.model || "",
+          cleanEffort(context?.effort) || cleanEffort(event.effort) || cleanEffort(event.turn?.effort) || cleanEffort(preferences.reasoningEffort) || "",
+        );
         this.#rows.set(id, {
           id, threadId, turnId, provider: event.provider, profileId: event.profileId || "",
-          model: context?.model || event.model || event.turn?.model || preferences.model || "",
-          effort: context?.effort || event.effort || event.turn?.effort || preferences.reasoningEffort || "",
+          model: normalized.model,
+          effort: normalized.effort,
           startedAt: now, endedAt: null, durationMs: null, firstResponseMs: null, status: "running",
           inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null,
           tokenSource: "unavailable", estimatedOutputTokens: 0, toolIds: [], goalMode: Boolean(context?.goalMode),

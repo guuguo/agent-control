@@ -3,6 +3,8 @@ import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
+import { ExecutionStats } from "../src/execution-stats.mjs";
+import { createThreadMetaStore } from "../src/thread-meta-store.mjs";
 import { GrokProvider } from "../src/providers/grok-provider.mjs";
 import {
   GrokHistoryIndex,
@@ -267,4 +269,65 @@ test("GrokProvider enforces auth gate, executes headless streaming turns, and su
   });
   const slowDone = events.find((e) => e.rawId === slowStart.thread.rawId && e.type === "turn_completed");
   assert.equal(slowDone.status, "interrupted");
+});
+
+test("ExecutionStats and ThreadMetaStore strip [object Object] and unpack object effort entries", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-grok-effort-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const metaPath = resolve(dir, "thread-meta.json");
+  await writeFile(metaPath, JSON.stringify({
+    version: 1,
+    threads: {
+      "grok:default:t-1": {
+        model: "grok-4.7",
+        reasoningEffort: "[object Object]",
+      },
+    },
+    projects: {},
+  }), "utf8");
+
+  const metaStore = createThreadMetaStore({ filePath: metaPath });
+  await metaStore.load();
+  const loadedThread = metaStore.applyToThread({ id: "grok:default:t-1", provider: "grok", profileId: "default", rawId: "t-1" });
+  assert.equal(loadedThread.reasoningEffort, undefined);
+
+  await metaStore.setThreadPrefs("grok:default:t-1", { reasoningEffort: { reasoningEffort: "xhigh" } });
+  const updated = metaStore.applyToThread({ id: "grok:default:t-1", provider: "grok", profileId: "default", rawId: "t-1" });
+  assert.equal(updated.reasoningEffort, "xhigh");
+
+  const statsPath = resolve(dir, "execution-stats.json");
+  await writeFile(statsPath, JSON.stringify({
+    version: 1,
+    startedAt: 1000,
+    runs: [{
+      id: "grok:default:t-old/turn-old",
+      threadId: "grok:default:t-old",
+      turnId: "turn-old",
+      provider: "grok",
+      profileId: "default",
+      model: "grok-4.7",
+      effort: "[object Object]",
+      startedAt: Date.now() - 1000,
+      status: "completed",
+      toolIds: [],
+    }],
+  }), "utf8");
+
+  const stats = new ExecutionStats({ filePath: statsPath });
+  await stats.load();
+  stats.context("grok:default:t-new", "turn-new", { model: "grok-4.7", effort: { reasoningEffort: "high" } });
+  stats.handle({
+    type: "turn_started",
+    provider: "grok",
+    profileId: "default",
+    threadId: "grok:default:t-new",
+    turnId: "turn-new",
+    model: "grok-4.7",
+  }, { reasoningEffort: "[object Object]" });
+
+  const snap = stats.snapshot({ days: 7, provider: "grok" });
+  assert.equal(snap.runs.find((r) => r.turnId === "turn-old")?.effort, "");
+  assert.equal(snap.runs.find((r) => r.turnId === "turn-new")?.effort, "high");
+  await stats.flush();
 });

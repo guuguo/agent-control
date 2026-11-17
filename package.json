@@ -1,6 +1,6 @@
 {
   "name": "agent-control",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Self-hosted remote control console for local Codex, Claude Code, and Antigravity sessions.",
   "private": true,
   "license": "AGPL-3.0-only",

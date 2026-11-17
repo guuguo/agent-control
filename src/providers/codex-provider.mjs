@@ -27,15 +27,28 @@ import { discoverCodexProfiles, readCodexPublicEndpoint } from "./profile-discov
 const execFileAsync = promisify(execFile);
 
 const CODEX_ACTIVE_WRITER_RE = /already has an active writer|\bactive writer\b|thread is busy|already running|turn in progress/i;
+const CODEX_STEER_FALLBACK_RE = /thread not found|no active turn|turn.*not.*in progress|turn not found|expectedTurnId/i;
 
-function normalizeCodexTurnError(error) {
+function normalizeCodexTurnError(error, { steer = false, idleLock = false } = {}) {
   const msg = String(error?.message || error || "").trim();
   if (CODEX_ACTIVE_WRITER_RE.test(msg)) {
-    return Object.assign(new Error(`当前会话正被其他任务占用（${msg}）`), {
-      status: 409,
-      code: "thread_busy",
-      rawMessage: msg,
-    });
+    let text;
+    if (idleLock) {
+      text = `当前会话锁仍被本地 Codex 客户端占用（桌面端可能仍停留在当前会话），请在桌面端切走或关闭该会话后重试（${msg}）`;
+    } else if (steer) {
+      text = `当前会话正由本地 Codex 客户端执行，控制端无法直接引导插话，请留在排队等待当前轮次完成后自动发送（${msg}）`;
+    } else {
+      text = `当前会话正被其他任务占用（${msg}）`;
+    }
+    return Object.assign(
+      new Error(text),
+      {
+        status: 409,
+        code: "thread_busy",
+        rawMessage: msg,
+        idleLock: Boolean(idleLock),
+      },
+    );
   }
   return error;
 }
@@ -511,12 +524,14 @@ export class CodexProvider {
     };
   }
 
-  async #ensureThreadResumed(client, profileId, rawId, cwd = "") {
+  async #ensureThreadResumed(client, profileId, rawId, cwd = "", policy = null) {
     const key = `${profileId}:${rawId}`;
     if (this.#resumedThreads.has(key)) return;
     await client.request("thread/resume", {
       threadId: rawId,
       ...(cwd ? { cwd } : {}),
+      ...(policy?.approvalPolicy ? { approvalPolicy: policy.approvalPolicy } : {}),
+      ...(policy?.sandbox ? { sandbox: policy.sandbox } : {}),
     });
     this.#resumedThreads.add(key);
   }
@@ -563,6 +578,36 @@ export class CodexProvider {
     return { thread, turn: null };
   }
 
+  async forkThread({
+    profileId = "default",
+    rawId,
+    lastTurnId = "",
+    cwd = "",
+    model = "",
+    permissionMode = "workspace",
+  } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const client = await this.#getClient(profileId);
+    const policy = codexExecutionPolicy(permissionMode);
+    const forked = await client.request("thread/fork", {
+      threadId: rawId,
+      ...(lastTurnId ? { lastTurnId } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(model ? { model } : {}),
+      approvalPolicy: policy.approvalPolicy,
+      sandbox: policy.sandbox,
+    });
+    const rawThread = forked?.thread || forked;
+    const newRawId = String(rawThread?.id || "");
+    if (!newRawId) {
+      throw Object.assign(new Error("Codex 未返回分叉后的新会话 ID"), { status: 502 });
+    }
+    this.#resumedThreads.add(`${profileId}:${newRawId}`);
+    return {
+      thread: this.#normalizeThread(profile, rawThread),
+    };
+  }
+
   async sendTurn({
     profileId = "default",
     rawId,
@@ -583,9 +628,10 @@ export class CodexProvider {
 
     const indexed = (readIndexedThreads(profile.home, { limit: 400, includeArchived: true }) || [])
       .find((item) => item.id === rawId);
+    const resolvedCwd = cwd || indexed?.cwd || "";
     const inMemoryActive = this.#writers.getActive(rawId);
 
-    let activeTurnId = expectedTurnId || inMemoryActive?.turnId || "";
+    let activeTurnId = inMemoryActive?.turnId || expectedTurnId || "";
     if (steer && !activeTurnId && inMemoryActive) {
       const read = await this.readThread(profileId, rawId, { detail: "auto" }).catch(() => null);
       const runningTurn = (read?.thread?.turns || []).find((item) => item.status === "inProgress");
@@ -593,7 +639,29 @@ export class CodexProvider {
     }
 
     if (steer && activeTurnId) {
+      let externalBusy = false;
+      if (!inMemoryActive && writerConflictPolicy === "reject") {
+        const conflict = await this.#writers.detectExternalWriter({
+          rolloutPath: indexed?.rolloutPath || "",
+        });
+        externalBusy = Boolean(conflict.busy);
+        if (conflict.busy) {
+          throw Object.assign(
+            new Error("当前会话正由本地 Codex 客户端执行，控制端无法直接引导插话，请留在排队等待当前轮次完成后自动发送"),
+            { status: 409, code: "thread_busy" },
+          );
+        }
+      }
+
+      try {
+        await this.#ensureThreadResumed(client, profileId, rawId, resolvedCwd, policy);
+      } catch (error) {
+        const idleLock = Boolean(!inMemoryActive && !externalBusy);
+        throw normalizeCodexTurnError(error, { steer: !idleLock, idleLock });
+      }
+
       let steerRes;
+      let shouldFallbackToTurnStart = false;
       try {
         steerRes = await client.request("turn/steer", {
           threadId: rawId,
@@ -601,18 +669,29 @@ export class CodexProvider {
           input,
         });
       } catch (error) {
-        throw normalizeCodexTurnError(error);
+        const msg = String(error?.message || error || "");
+        if (CODEX_STEER_FALLBACK_RE.test(msg)) {
+          this.#resumedThreads.delete(`${profileId}:${rawId}`);
+          this.#writers.clearActive(rawId, activeTurnId);
+          shouldFallbackToTurnStart = true;
+        } else {
+          const idleLock = Boolean(!inMemoryActive && !externalBusy);
+          throw normalizeCodexTurnError(error, { steer: !idleLock, idleLock });
+        }
       }
-      return {
-        turn: steerRes?.turn || { id: steerRes?.turnId || activeTurnId, status: "inProgress" },
-        steered: true,
-      };
+      if (!shouldFallbackToTurnStart) {
+        return {
+          turn: steerRes?.turn || { id: steerRes?.turnId || activeTurnId, status: "inProgress" },
+          steered: true,
+        };
+      }
     }
 
-    if (steer && inMemoryActive) {
+    const activeAfterSteerAttempt = this.#writers.getActive(rawId);
+    if (steer && activeAfterSteerAttempt) {
       await this.interrupt({ profileId, rawId }).catch(() => {});
-      this.#writers.clearActive(rawId, inMemoryActive.turnId || "");
-    } else if (!steer && inMemoryActive && writerConflictPolicy === "reject") {
+      this.#writers.clearActive(rawId, activeAfterSteerAttempt.turnId || "");
+    } else if (!steer && activeAfterSteerAttempt && writerConflictPolicy === "reject") {
       throw Object.assign(new Error("当前会话正在运行，请等待完成、插入引导或加入排队"), {
         status: 409,
         code: "thread_busy",
@@ -633,17 +712,25 @@ export class CodexProvider {
 
     let result;
     try {
-      await this.#ensureThreadResumed(client, profileId, rawId, cwd || indexed?.cwd || "");
+      await this.#ensureThreadResumed(client, profileId, rawId, resolvedCwd, policy);
       result = await client.request("turn/start", {
         threadId: rawId,
         input,
         ...(model ? { model } : {}),
         ...(effort ? { effort } : {}),
         approvalPolicy: policy.approvalPolicy,
-        sandbox: policy.sandbox,
+        sandboxPolicy: policy.sandboxPolicy,
       });
     } catch (error) {
-      throw normalizeCodexTurnError(error);
+      const msg = String(error?.message || error || "");
+      let idleLock = false;
+      if (!this.#writers.getActive(rawId) && CODEX_ACTIVE_WRITER_RE.test(msg)) {
+        const conflict = await this.#writers.detectExternalWriter({
+          rolloutPath: indexed?.rolloutPath || "",
+        }).catch(() => ({ busy: false }));
+        idleLock = !conflict.busy;
+      }
+      throw normalizeCodexTurnError(error, { steer: false, idleLock });
     }
     const turn = result?.turn || result || { id: `turn-${Date.now()}`, status: "inProgress" };
     this.#writers.markActive(rawId, { turnId: turn.id || "" });
@@ -658,7 +745,7 @@ export class CodexProvider {
     const env = { ...this.#env, CODEX_HOME: profile.home };
     const { stdout = "" } = await this.#execFileImpl(
       appServerExecutable(env),
-      ["queue", "--thread", rawId, "--message", String(text || ""), "--resume"],
+      ["queue", "--thread", rawId, "--message", String(text || "")],
       { env, shell: false, timeout: 15_000, maxBuffer: 64 * 1024 },
     );
     const messageId = String(stdout).match(/Queued message\s+(\S+)\s+for thread/i)?.[1] || "";

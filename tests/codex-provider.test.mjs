@@ -917,3 +917,50 @@ test("codex-thread-history and codex-large-preview enrich per-turn model and eff
   assert.equal(fullLoaded.thread.turns[0].model, "gpt-6.1-sol");
   assert.equal(fullLoaded.thread.turns[0].effort, "high");
 });
+
+test("Codex steer resumes unloaded thread and falls back to turn/start when stale turn ended, or reports busy writer clearly", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-codex-steer-resume-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const codexHome = resolve(root, "codex");
+  await mkdir(codexHome, { recursive: true });
+
+  const provider = new CodexProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      CODEX_BIN: fileURLToPath(new URL("./helpers/mock-codex-cli.mjs", import.meta.url)),
+      AGENT_CONTROL_CODEX_HOMES: JSON.stringify([{ id: "default", home: codexHome }]),
+    },
+  });
+  t.after(() => provider.close());
+
+  const seededRawId = "01900000-0000-7000-8000-000000000001";
+  // 1. 当本地客户端实际占有锁导致 thread/resume 报 active writer 时，steer 应返回清晰的 409 thread_busy 而非 thread not found
+  const resumeErrFile = resolve(codexHome, ".mock-resume-error");
+  await writeFile(resumeErrFile, `thread ${seededRawId} already has an active writer`, "utf8");
+  await assert.rejects(
+    provider.sendTurn({
+      profileId: "default",
+      rawId: seededRawId,
+      cwd: root,
+      text: "任务怎么样了？",
+      steer: true,
+      expectedTurnId: "stale-turn-1",
+    }),
+    (err) => err?.status === 409 && err?.code === "thread_busy" && /本地 Codex 客户端/.test(err?.message || ""),
+  );
+  await rm(resumeErrFile, { force: true });
+
+  // 2. 无外部占用但新进程尚未加载该会话、且旧 expectedTurnId 已无活跃轮次时：应先 resume 再自动回退 turn/start 发出
+  const sent = await provider.sendTurn({
+    profileId: "default",
+    rawId: seededRawId,
+    cwd: root,
+    text: "任务怎么样了？",
+    steer: true,
+    expectedTurnId: "stale-turn-1",
+  });
+  assert.ok(sent?.turn?.id);
+  assert.notEqual(sent.steered, true);
+});

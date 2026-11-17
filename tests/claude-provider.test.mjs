@@ -413,7 +413,13 @@ test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallbac
     mkdir(relocatedWorkspace, { recursive: true }),
     mkdir(slugDir, { recursive: true }),
   ]);
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  let hub = null;
+  let badBinHub = null;
+  t.after(async () => {
+    await badBinHub?.close().catch(() => {});
+    await hub?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
 
   const sid1 = "sess-cwd-real-1";
   await writeFile(resolve(slugDir, `${sid1}.jsonl`), [
@@ -455,7 +461,7 @@ test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallbac
 
   // ProviderHub + ClaudeProvider should succeed on sid1 (resolved to realWorkspace) instead of failing on lossy slug.
   const events = [];
-  const hub = new ProviderHub({
+  hub = new ProviderHub({
     env: {
       ...process.env,
       CLAUDE_BIN: MOCK_CLAUDE_BIN,
@@ -465,7 +471,6 @@ test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallbac
     dataDir: resolve(dir, "hub-data"),
     enableQueueDrain: false,
   });
-  t.after(() => hub.close());
   await hub.init();
   hub.subscribe((evt, data) => {
     if (evt === "provider_event") events.push(data);
@@ -491,7 +496,7 @@ test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallbac
 
   // If spawning the Claude binary fails with ENOENT, ProviderHub must keep status="failed" (not recover to completed).
   const badBinEvents = [];
-  const badBinHub = new ProviderHub({
+  badBinHub = new ProviderHub({
     env: {
       ...process.env,
       CLAUDE_BIN: resolve(dir, "missing-claude-bin"),
@@ -501,7 +506,6 @@ test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallbac
     dataDir: resolve(dir, "hub-data-bad-bin"),
     enableQueueDrain: false,
   });
-  t.after(() => badBinHub.close());
   await badBinHub.init();
   badBinHub.subscribe((evt, data) => {
     if (evt === "provider_event") badBinEvents.push(data);

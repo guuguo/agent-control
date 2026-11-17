@@ -340,7 +340,11 @@ export class GrokProvider {
     const workDir = String(cwd || "").trim() || os.homedir();
     const nowSec = Math.floor(Date.now() / 1000);
     const inputText = String(text || prompt || "");
-    const inputEffort = String(effort || reasoningEffort || "").trim().toLowerCase();
+    const rawEffort = effort || reasoningEffort;
+    const inputEffort = (typeof rawEffort === "object" && rawEffort
+      ? String(rawEffort.reasoningEffort ?? rawEffort.id ?? rawEffort.value ?? "")
+      : String(rawEffort || "")
+    ).trim().toLowerCase().replace(/^\[object object\]$/i, "");
     const homeDir = profile.home || profile.grokHome || "";
 
     const pending = {
@@ -426,7 +430,11 @@ export class GrokProvider {
 
     const resume = Boolean(located || this.#startedSessions.has(cleanId));
     const inputText = String(text || prompt || "");
-    const inputEffort = String(effort || reasoningEffort || "").trim().toLowerCase();
+    const rawEffort = effort || reasoningEffort;
+    const inputEffort = (typeof rawEffort === "object" && rawEffort
+      ? String(rawEffort.reasoningEffort ?? rawEffort.id ?? rawEffort.value ?? "")
+      : String(rawEffort || "")
+    ).trim().toLowerCase().replace(/^\[object object\]$/i, "");
     const effectiveCwd = String(cwd || "").trim()
       || historySummary?.thread?.cwd
       || pending?.cwd

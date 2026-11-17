@@ -21,6 +21,7 @@ import { defaultDataDir, ensureInstanceIdentity } from "./instance-identity.mjs"
 import { listLocalApps, LOCAL_APPS_DIR, proxyLocalApp } from "./local-apps.mjs";
 import { isSubpathOrEqual } from "./platform.mjs";
 import { ProviderHub } from "./provider-hub.mjs";
+import { listSlashCommands } from "./slash-commands.mjs";
 import {
   isDirectLoopbackRequest,
   isHttpsForwardedRequest,
@@ -32,6 +33,7 @@ import {
 import { RemoteBridge } from "./remote-bridge.mjs";
 import { logRequestError } from "./request-logging.mjs";
 import { acquireRuntimeLease } from "./runtime-lease.mjs";
+import { AutomationScheduler } from "./automation-scheduler.mjs";
 import { UpdateService } from "./update-service.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
 
@@ -226,6 +228,13 @@ export async function createAgentControlServer({
   });
   await updateService.load();
 
+  const automationScheduler = new AutomationScheduler({
+    hub,
+    dataDir,
+    onEvent: (eventName, payload) => broadcastSse(eventName, payload),
+  });
+  await automationScheduler.load();
+
   const heartbeat = setInterval(() => {
     for (const res of [...sseClients]) {
       if (res.writableEnded || res.destroyed) {
@@ -399,6 +408,15 @@ export async function createAgentControlServer({
         const profileId = url.searchParams.get("profileId") || "";
         const models = await hub.listModels({ provider, profileId });
         sendJson(response, 200, models, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/slash-commands" && request.method === "GET") {
+        const provider = url.searchParams.get("provider") || "";
+        const cwd = url.searchParams.get("cwd") || "";
+        const query = url.searchParams.get("q") || "";
+        const items = await listSlashCommands({ provider, cwd, query });
+        sendJson(response, 200, { ok: true, provider, items }, { requestId });
         return;
       }
 
@@ -798,6 +816,18 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/thread/fork" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        context.threadId = body.threadId || "";
+        const result = await hub.forkThread({
+          threadId: body.threadId,
+          ...(body.upToTurnIndex !== undefined && body.upToTurnIndex !== null ? { upToTurnIndex: Number(body.upToTurnIndex) } : {}),
+          ...(body.upToTurnId ? { upToTurnId: String(body.upToTurnId) } : {}),
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/archive" && request.method === "POST") {
         const body = await readJsonBody(request);
         context.threadId = body.threadId || "";
@@ -833,6 +863,8 @@ export async function createAgentControlServer({
         const body = await readJsonBody(request);
         const result = await voiceService.startCall({
           callId: body.callId || "",
+          callScope: body.callScope || "",
+          activeThreadId: body.activeThreadId || "",
           voiceProvider: body.voiceProvider || "",
           voiceModel: body.voiceModel || "",
           voiceProfileId: body.voiceProfileId || "",
@@ -851,6 +883,7 @@ export async function createAgentControlServer({
         }
         const result = await voiceService.handleTurn({
           callId: body.callId || "",
+          callScope: body.callScope || "",
           audioBase64: body.audioBase64 || "",
           audioMimeType: body.audioMimeType || "audio/wav",
           transcriptText: body.transcriptText || "",
@@ -1128,6 +1161,37 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/automations" && request.method === "GET") {
+        const snapshot = await automationScheduler.getSnapshot();
+        sendJson(response, 200, snapshot, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/automations/toggle" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const snapshot = await automationScheduler.configure({
+          ...(typeof body?.enabled === "boolean" ? { enabled: body.enabled } : {}),
+          ...(body?.taskKey ? { taskKey: body.taskKey } : {}),
+          ...(typeof body?.managed === "boolean" ? { managed: body.managed } : {}),
+        });
+        sendJson(response, 200, snapshot, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/automations/run" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await automationScheduler.runNow(body?.taskKey || "");
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/automations/custom" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const snapshot = await automationScheduler.saveCustomTask(body || {});
+        sendJson(response, 200, snapshot, { requestId });
+        return;
+      }
+
       if (pathname.startsWith("/api/")) {
         sendJson(response, 404, { error: { message: "API 路由不存在" } }, { requestId });
         return;
@@ -1154,6 +1218,7 @@ export async function createAgentControlServer({
 
   const closeResources = async () => {
     clearInterval(heartbeat);
+    automationScheduler.close();
     updateService.close();
     unsubscribeHub();
     for (const res of [...sseClients]) {
@@ -1203,6 +1268,9 @@ export async function createAgentControlServer({
       bridge.connect();
       if (!disableUpdateCheck) {
         updateService.start();
+      }
+      if (!env.AGENT_CONTROL_DISABLE_AUTOMATIONS) {
+        automationScheduler.start();
       }
       leaseHandle = await acquireRuntimeLease({
         dataDir,

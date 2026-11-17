@@ -237,19 +237,29 @@ export function pcm16Base64ToWavBytes(base64, sampleRate = 24000) {
 export function computeRmsLevel(samples) {
   if (!samples?.length) return 0;
   let sum = 0;
+  let validCount = 0;
   for (let i = 0; i < samples.length; i += 1) {
-    const s = Number(samples[i]) || 0;
+    const raw = Number(samples[i]);
+    if (!Number.isFinite(raw)) continue;
+    const s = Math.max(-1, Math.min(1, raw));
     sum += s * s;
+    validCount += 1;
   }
-  return Math.sqrt(sum / samples.length);
+  if (!validCount) return 0;
+  const rms = Math.sqrt(sum / validCount);
+  return Number.isFinite(rms) ? Math.min(1, rms) : 0;
 }
 
 export function downsampleFloat32ToInt16(float32Samples, inputSampleRate = 48000, targetSampleRate = 16000) {
   if (!float32Samples?.length) return new Int16Array(0);
+  const safeSample = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(-1, Math.min(1, n)) : 0;
+  };
   if (inputSampleRate <= targetSampleRate) {
     const out = new Int16Array(float32Samples.length);
     for (let i = 0; i < float32Samples.length; i += 1) {
-      const clamped = Math.max(-1, Math.min(1, float32Samples[i]));
+      const clamped = safeSample(float32Samples[i]);
       out[i] = clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
     }
     return out;
@@ -264,10 +274,10 @@ export function downsampleFloat32ToInt16(float32Samples, inputSampleRate = 48000
     let accum = 0;
     let count = 0;
     for (let j = offsetBuffer; j < nextOffsetBuffer; j += 1) {
-      accum += float32Samples[j];
+      accum += safeSample(float32Samples[j]);
       count += 1;
     }
-    const avg = count > 0 ? accum / count : float32Samples[offsetBuffer] || 0;
+    const avg = count > 0 ? accum / count : safeSample(float32Samples[offsetBuffer]);
     const clamped = Math.max(-1, Math.min(1, avg));
     out[i] = clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
     offsetBuffer = nextOffsetBuffer;
@@ -342,23 +352,33 @@ export function createVadTurnDetector({
   let speechSamples = 0;
   let voicedSamples = 0;
   let silenceSamples = 0;
+  let revoiceSamples = 0;
+  let currentContiguousVoiced = 0;
+  let maxContiguousVoicedSamples = 0;
   let candidateOnsetSamples = 0;
   let peakVoicedRms = 0;
   let voicedRmsSum = 0;
   let voicedChunkCount = 0;
   let inSpeech = false;
   let noiseFloorRms = 0.004;
+  const effectiveTriggerHoldSamples = Math.round((sampleRate * (requireSustainedOnset ? 150 : 110)) / 1000);
+  const revoiceHoldSamples = Math.round((sampleRate * 100) / 1000);
 
   const currentOnsetThreshold = () => {
     if (!adaptive) return rmsThreshold;
-    const minAdaptiveFloor = requireSustainedOnset ? Math.max(0.011, rmsThreshold * 0.6) : Math.max(0.0085, rmsThreshold * 0.55);
-    const snrMult = requireSustainedOnset ? 2.8 : 2.6;
-    return Math.max(minAdaptiveFloor, Math.min(0.05, Math.max(minAdaptiveFloor, noiseFloorRms * snrMult)));
+    const minAdaptiveFloor = requireSustainedOnset ? Math.max(0.010, rmsThreshold * 0.65) : Math.max(0.0085, rmsThreshold * 0.55);
+    const snrMult = requireSustainedOnset ? 2.2 : 2.6;
+    const cap = requireSustainedOnset ? 0.030 : 0.05;
+    return Math.max(minAdaptiveFloor, Math.min(cap, Math.max(minAdaptiveFloor, noiseFloorRms * snrMult)));
   };
 
   const currentHoldThreshold = () => {
     if (!adaptive) return rmsThreshold;
-    return Math.max(requireSustainedOnset ? 0.008 : 0.006, currentOnsetThreshold() * 0.72);
+    const baseHold = Math.max(requireSustainedOnset ? 0.008 : 0.006, currentOnsetThreshold() * 0.72);
+    if (inSpeech && peakVoicedRms > 0.12) {
+      return Math.max(baseHold, Math.min(0.045, peakVoicedRms * 0.12));
+    }
+    return baseHold;
   };
 
   const reset = () => {
@@ -368,6 +388,9 @@ export function createVadTurnDetector({
     speechSamples = 0;
     voicedSamples = 0;
     silenceSamples = 0;
+    revoiceSamples = 0;
+    currentContiguousVoiced = 0;
+    maxContiguousVoicedSamples = 0;
     candidateOnsetSamples = 0;
     peakVoicedRms = 0;
     voicedRmsSum = 0;
@@ -393,9 +416,16 @@ export function createVadTurnDetector({
       && noiseFloorRms > 0
       && peakVoicedRms < noiseFloorRms * minSnrRatio
       && avgVoicedRms < noiseFloorRms * minSnrRatio;
+    const failsTransient = requireSustainedOnset && (
+      maxContiguousVoicedSamples < Math.min(minSamplesRequired, Math.round(sampleRate * 0.16))
+      || (speechSamples > sampleRate * 2.5 && (voicedSamples / Math.max(1, speechSamples)) < 0.12)
+    );
     reset();
     if (!merged.length || !hadEnoughSpeech) {
       return { type: "discarded_short", samples: new Int16Array(0), reason: "too_short" };
+    }
+    if (failsTransient) {
+      return { type: "discarded_noise", samples: new Int16Array(0), reason: "transient_noise" };
     }
     if (failsPeak || failsSnr) {
       return { type: "discarded_noise", samples: new Int16Array(0), reason: "low_energy_noise" };
@@ -424,27 +454,29 @@ export function createVadTurnDetector({
       }
       return emitUtterance(Math.round(sampleRate * 0.14));
     },
-    pushSamples(int16Chunk, rms = 0) {
+    pushSamples(int16Chunk, rawRms = 0) {
+      const rms = Number.isFinite(Number(rawRms)) ? Math.max(0, Math.min(1, Number(rawRms))) : 0;
       if (!int16Chunk?.length) return { type: "idle", rms };
       const onsetThreshold = currentOnsetThreshold();
       const active = rms >= (inSpeech ? currentHoldThreshold() : onsetThreshold);
 
       if (!inSpeech) {
-        if (adaptive && rms < onsetThreshold * 1.15) {
-          noiseFloorRms = noiseFloorRms * 0.96 + rms * 0.04;
+        if (adaptive && !active) {
+          noiseFloorRms = Math.min(0.014, noiseFloorRms * 0.96 + rms * 0.04);
         }
         pushPreRoll(int16Chunk);
         if (active) {
           candidateOnsetSamples += int16Chunk.length;
-          const strongSpikeBypass = requireSustainedOnset
-            ? rms >= Math.max(onsetThreshold * 3.0, 0.065)
-            : rms >= onsetThreshold * 1.45;
-          if (candidateOnsetSamples >= triggerHoldSamples || strongSpikeBypass) {
+          const strongSpikeBypass = requireSustainedOnset ? false : rms >= onsetThreshold * 1.45;
+          if (candidateOnsetSamples >= effectiveTriggerHoldSamples || strongSpikeBypass) {
             inSpeech = true;
             speechChunks = [...preRollChunks];
             speechSamples = preRollSamples;
             voicedSamples = candidateOnsetSamples;
+            currentContiguousVoiced = candidateOnsetSamples;
+            maxContiguousVoicedSamples = candidateOnsetSamples;
             silenceSamples = 0;
+            revoiceSamples = 0;
             candidateOnsetSamples = 0;
             peakVoicedRms = rms;
             voicedRmsSum = rms;
@@ -462,12 +494,31 @@ export function createVadTurnDetector({
       speechChunks.push(int16Chunk);
       speechSamples += int16Chunk.length;
       if (active) {
-        voicedSamples += int16Chunk.length;
-        silenceSamples = 0;
-        if (rms > peakVoicedRms) peakVoicedRms = rms;
-        voicedRmsSum += rms;
-        voicedChunkCount += 1;
+        currentContiguousVoiced += int16Chunk.length;
+        if (currentContiguousVoiced > maxContiguousVoicedSamples) {
+          maxContiguousVoicedSamples = currentContiguousVoiced;
+        }
+        if (silenceSamples === 0) {
+          voicedSamples += int16Chunk.length;
+          if (rms > peakVoicedRms) peakVoicedRms = rms;
+          voicedRmsSum += rms;
+          voicedChunkCount += 1;
+        } else {
+          revoiceSamples += int16Chunk.length;
+          if (revoiceSamples >= revoiceHoldSamples) {
+            voicedSamples += revoiceSamples;
+            silenceSamples = 0;
+            revoiceSamples = 0;
+            if (rms > peakVoicedRms) peakVoicedRms = rms;
+            voicedRmsSum += rms;
+            voicedChunkCount += 1;
+          } else {
+            silenceSamples += int16Chunk.length;
+          }
+        }
       } else {
+        currentContiguousVoiced = 0;
+        revoiceSamples = 0;
         silenceSamples += int16Chunk.length;
       }
 
@@ -866,7 +917,14 @@ export function renderVoiceCallTranscriptHtml(entries = []) {
               ${replayBtn}
             </div>
           </div>
-        ` : ""}
+        ` : (entry.actionTag ? `
+          <div class="voice-turn-ai">
+            <span class="voice-turn-tag is-ai">H₂</span>
+            <div class="voice-turn-ai-body">
+              <span class="voice-turn-action-chip">${iconSvg("bolt", { size: 11 })} ${escapeHtml(entry.actionTag)}</span>
+            </div>
+          </div>
+        ` : "")}
       </div>
     `;
   }).join("");

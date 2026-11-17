@@ -20,12 +20,24 @@ export function codexExecutionPolicy(mode = "workspace") {
   switch (normalizePermissionMode(mode)) {
     case "safe":
     case "plan":
-      return { approvalPolicy: "on-request", sandbox: "read-only" };
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "read-only",
+        sandboxPolicy: { type: "readOnly" },
+      };
     case "full":
     case "turbo":
-      return { approvalPolicy: "never", sandbox: "danger-full-access" };
+      return {
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
     default:
-      return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+      return {
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+        sandboxPolicy: { type: "workspaceWrite" },
+      };
   }
 }
 

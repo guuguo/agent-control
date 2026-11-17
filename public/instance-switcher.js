@@ -28,63 +28,45 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
       supportedReasoningEfforts: [],
     },
     {
-      id: "gemini-4-carbon-high",
-      model: "gemini-4-carbon-high",
-      displayName: "Gemini 4 Carbon (High)",
+      id: "gemini-4-carbon",
+      model: "gemini-4-carbon",
+      displayName: "Gemini 4 Carbon",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "high",
       supportedReasoningEfforts: ["low", "medium", "high"],
     },
     {
-      id: "gemini-4-carbon-medium",
-      model: "gemini-4-carbon-medium",
-      displayName: "Gemini 4 Carbon (Medium)",
+      id: "gemini-4-argon",
+      model: "gemini-4-argon",
+      displayName: "Gemini 4 Argon",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "medium", "high"],
     },
     {
-      id: "gemini-4-argon-medium",
-      model: "gemini-4-argon-medium",
-      displayName: "Gemini 4 Argon (Medium)",
-      provider: "antigravity",
-      isDefault: false,
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: ["low", "medium", "high"],
-    },
-    {
-      id: "gemini-4-hydrogen-low",
-      model: "gemini-4-hydrogen-low",
-      displayName: "Gemini 4 Hydrogen (Low)",
-      provider: "antigravity",
-      isDefault: false,
-      defaultReasoningEffort: "low",
-      supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
-    },
-    {
-      id: "gemini-4-hydrogen-medium",
-      model: "gemini-4-hydrogen-medium",
-      displayName: "Gemini 4 Hydrogen (Medium)",
+      id: "gemini-4-hydrogen",
+      model: "gemini-4-hydrogen",
+      displayName: "Gemini 4 Hydrogen",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
     },
     {
-      id: "claude-opus-5-5-medium",
-      model: "claude-opus-5-5-medium",
-      displayName: "Claude Opus 5.5 (Medium)",
+      id: "claude-opus-5-5",
+      model: "claude-opus-5-5",
+      displayName: "Claude Opus 5.5",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: ["low", "medium", "high"],
     },
     {
-      id: "claude-sonnet-4-6-medium",
-      model: "claude-sonnet-4-6-medium",
-      displayName: "Claude Sonnet 4.6 (Medium)",
+      id: "claude-sonnet-4-6",
+      model: "claude-sonnet-4-6",
+      displayName: "Claude Sonnet 4.6",
       provider: "antigravity",
       isDefault: false,
       defaultReasoningEffort: "medium",
@@ -92,6 +74,15 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
     },
   ]),
   codex: Object.freeze([
+    {
+      id: "gpt-6.1-terra",
+      model: "gpt-6.1-terra",
+      displayName: "GPT-6.1 Terra",
+      provider: "codex",
+      isDefault: false,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
     {
       id: "gpt-5.4",
       model: "gpt-5.4",
@@ -321,6 +312,13 @@ export function permissionVisualMeta(mode = "turbo") {
   }
 }
 
+export function resolveAntigravityModelSelection(modelId = "") {
+  const clean = String(modelId || "").trim();
+  const match = clean.match(/^(.+)-(low|medium|high|xhigh)$/i);
+  if (!match) return { baseModel: clean, effort: "" };
+  return { baseModel: match[1], effort: match[2].toLowerCase() };
+}
+
 export function compactModelBadgeLabel(rawModel = "") {
   const clean = String(rawModel || "").trim();
   if (!clean) return "默认";
@@ -328,18 +326,25 @@ export function compactModelBadgeLabel(rawModel = "") {
   if (clean === "gemini-pro-orchestrator" || lower.includes("orchestrator")) {
     return "Carbon";
   }
-  if (clean === "gemini-4-carbon-high" || /carbon.*\(high\)/i.test(clean)) {
+  if (clean === "gemini-4-carbon-high" || /carbon.*\(high\)/i.test(clean) || /^gemini-.*carbon-high$/i.test(clean)) {
     return "Carbon H";
   }
-  if (clean === "gemini-4-carbon-medium" || /carbon.*\(medium\)/i.test(clean)) {
+  if (clean === "gemini-4-carbon-medium" || /carbon.*\(medium\)/i.test(clean) || /^gemini-.*carbon-medium$/i.test(clean)) {
     return "Carbon M";
   }
+  if (clean === "gemini-4-carbon-low" || /carbon.*\(low\)/i.test(clean) || /^gemini-.*carbon-low$/i.test(clean)) {
+    return "Carbon L";
+  }
   if (lower.includes("argon")) {
+    if (lower.includes("high")) return "Argon H";
+    if (lower.includes("medium")) return "Argon M";
+    if (lower.includes("low")) return "Argon L";
     return "Argon";
   }
   if (lower.includes("hydrogen")) {
     if (lower.includes("xhigh")) return "Hydrogen XH";
     if (lower.includes("high")) return "Hydrogen H";
+    if (lower.includes("medium")) return "Hydrogen M";
     if (lower.includes("low")) return "Hydrogen L";
     return "Hydrogen";
   }
@@ -1803,6 +1808,12 @@ export function ensurePreferredModelInList(models = [], provider = "", preferred
   if (list.some((m) => m?.id === cleanPreferred || m?.model === cleanPreferred)) {
     return list;
   }
+  if (provider === "antigravity") {
+    const { baseModel } = resolveAntigravityModelSelection(cleanPreferred);
+    if (baseModel && list.some((m) => m?.id === baseModel || m?.model === baseModel || m?.baseModel === baseModel)) {
+      return list;
+    }
+  }
   if (provider === "claude" && !/^claude-/i.test(cleanPreferred)) return list;
   if (provider === "codex" && /^(claude-|gemini-|grok-)/i.test(cleanPreferred)) return list;
   if (provider === "antigravity" && /^(gpt-|grok-)/i.test(cleanPreferred)) return list;
@@ -1828,6 +1839,13 @@ export function pickDefaultModelForProvider(models = [], provider = "", preferre
   if (preferredModel) {
     const exact = scoped.find((m) => m.id === preferredModel || m.model === preferredModel);
     if (exact) return exact;
+    if (provider === "antigravity") {
+      const { baseModel } = resolveAntigravityModelSelection(preferredModel);
+      if (baseModel) {
+        const mapped = scoped.find((m) => m.id === baseModel || m.model === baseModel || m?.baseModel === baseModel);
+        if (mapped) return mapped;
+      }
+    }
   }
   return scoped.find((m) => m.isDefault) || scoped[0];
 }

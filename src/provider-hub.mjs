@@ -17,6 +17,7 @@ import {
 import { createGoalController, GOAL_COMPLETE_MARKER } from "./goal-controller.mjs";
 import { createInflightTurnStore, inflightTurnsPath } from "./inflight-turns.mjs";
 import { ExecutionStats } from "./execution-stats.mjs";
+import { ForkStore, buildForkContextPrompt, stripForkContextPrefix } from "./fork-store.mjs";
 import { isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { isTurboPermissionMode, normalizePermissionMode } from "./permissions.mjs";
@@ -119,6 +120,8 @@ export function summarizeQueuedTurnEntry(entry) {
     canCancel: entry.canCancel !== undefined ? Boolean(entry.canCancel) : source === "control",
   };
   if (entry.position !== undefined) summary.position = entry.position;
+  const blockedReason = String(entry.lastRetryError || entry.blockedReason || "").trim();
+  if (blockedReason) summary.blockedReason = blockedReason;
   return summary;
 }
 
@@ -484,6 +487,7 @@ export class ProviderHub {
   #quotaService;
   #telemetry;
   #executionStats;
+  #forkStore;
   #telemetryTimer = null;
   #telemetryTickInFlight = false;
   #lastTelemetrySig = "";
@@ -521,6 +525,7 @@ export class ProviderHub {
     this.#goalController = goalController || createGoalController({ filePath: goalStatePath(dataDir) });
     this.#inflightStore = inflightStore || createInflightTurnStore({ filePath: inflightTurnsPath(dataDir) });
     this.#executionStats = new ExecutionStats({ filePath: resolve(dataDir, "execution-stats.json") });
+    this.#forkStore = new ForkStore({ filePath: resolve(dataDir, "forked-threads.json") });
 
     const emitEvent = (evt) => this.#handleProviderEvent(evt);
     const emitServerRequest = (req) => this.#handleProviderServerRequest(req);
@@ -595,6 +600,7 @@ export class ProviderHub {
       this.#goalController.load(),
       this.#inflightStore.load(),
       this.#executionStats.load(),
+      this.#forkStore.load(),
       this.#queue.load(),
       ...this.providerList().map((p) => p.refreshProfiles?.().catch(() => {})),
     ]);
@@ -1718,6 +1724,11 @@ export class ProviderHub {
     );
 
     const allThreads = [];
+    for (const forkEntry of this.#forkStore.listPending()) {
+      if (provider && forkEntry.provider !== provider) continue;
+      if (profileId && forkEntry.profileId !== profileId) continue;
+      allThreads.push(this.#enrichThread(forkEntry));
+    }
     settled.forEach((result, idx) => {
       const prof = targetProfiles[idx];
       if (result.status === "fulfilled") {
@@ -1987,14 +1998,54 @@ export class ProviderHub {
   }
 
   async readThread(compositeId, { cursor = null, detail = "auto", limit = 20 } = {}) {
+    const forkDraft = this.#forkStore.get(compositeId);
+    if (forkDraft && !forkDraft.materializedThreadId) {
+      const enriched = this.#enrichThread({
+        ...forkDraft,
+        turns: forkDraft.prefixTurns || [],
+      }, { fromReadThread: true });
+      const thread = detail !== "full" ? capOversizedThreadInlineImages(enriched) : enriched;
+      return {
+        thread,
+        hasMoreTurns: false,
+        totalTurns: thread.turns.length,
+        activityCursor: "fork:0",
+        pendingRequests: [],
+        queuedTurns: [],
+        goalState: thread.goalState,
+      };
+    }
     const parsed = parseCompositeThreadId(compositeId);
     const provider = this.getProvider(parsed.provider);
     const result = await provider.readThread(parsed.profileId, parsed.rawId, { cursor, detail, limit });
+    const forkParent = this.#forkStore.getByMaterialized(compositeId);
+    let rawTurns = Array.isArray(result.thread?.turns) ? result.thread.turns : [];
+    if (forkParent) {
+      const cleanedRealTurns = rawTurns.map((turn, idx) => {
+        if (idx !== 0 || !Array.isArray(turn?.items)) return turn;
+        return {
+          ...turn,
+          items: turn.items.map((item) => {
+            if (item?.type !== "userMessage" || !Array.isArray(item.content)) return item;
+            return {
+              ...item,
+              content: item.content.map((part) => (
+                part?.type === "text" && typeof part.text === "string"
+                  ? { ...part, text: stripForkContextPrefix(part.text) }
+                  : part
+              )),
+            };
+          }),
+        };
+      });
+      rawTurns = [...(forkParent.prefixTurns || []), ...cleanedRealTurns];
+    }
     const nativeQueuedTurns = Array.isArray(result.nativeQueuedTurns)
       ? result.nativeQueuedTurns
       : await this.#readNativeQueuedTurns(compositeId);
     const enriched = this.#enrichThread({
       ...result.thread,
+      ...(forkParent ? { turns: rawTurns } : {}),
       nativeQueuedCount: nativeQueuedTurns.length,
     }, { fromReadThread: true });
     const thread = detail !== "full" ? capOversizedThreadInlineImages(enriched) : enriched;
@@ -2014,6 +2065,16 @@ export class ProviderHub {
   }
 
   async getActivity(compositeId, { cursor = null } = {}) {
+    const forkDraft = this.#forkStore.get(compositeId);
+    if (forkDraft && !forkDraft.materializedThreadId) {
+      return {
+        live: false,
+        cursor: "fork:0",
+        changed: Boolean(cursor && cursor !== "fork:0"),
+        queuedTurns: [],
+        queuedCount: 0,
+      };
+    }
     const parsed = parseCompositeThreadId(compositeId);
     const provider = this.getProvider(parsed.provider);
     const rawCursorIn = typeof cursor === "string" ? cursor.replace(/\|cq:.*$/, "") : cursor;
@@ -2220,6 +2281,94 @@ export class ProviderHub {
     return { threadId: compositeId, goalState };
   }
 
+  async forkThread({
+    threadId,
+    upToTurnIndex = null,
+    upToTurnId = "",
+  } = {}) {
+    const cleanThreadId = String(threadId || "").trim();
+    if (!cleanThreadId) {
+      throw Object.assign(new Error("缺少要分叉的会话 ID"), { status: 400 });
+    }
+    const read = await this.readThread(cleanThreadId, { detail: "full", limit: 300 });
+    const origThread = read?.thread;
+    if (!origThread) {
+      throw Object.assign(new Error("找不到要分叉的会话"), { status: 404 });
+    }
+    const turns = Array.isArray(origThread.turns) ? origThread.turns : [];
+    let cutIndex = turns.length - 1;
+    if (upToTurnId) {
+      const idx = turns.findIndex((t) => String(t?.id || "") === String(upToTurnId));
+      if (idx >= 0) cutIndex = idx;
+    } else if (Number.isInteger(upToTurnIndex) && upToTurnIndex >= 0 && upToTurnIndex < turns.length) {
+      cutIndex = upToTurnIndex;
+    }
+    const keptTurns = cutIndex >= 0 ? turns.slice(0, cutIndex + 1) : [];
+    const isTruncated = cutIndex >= 0 && cutIndex < turns.length - 1;
+    const lastTurnId = String(keptTurns[keptTurns.length - 1]?.id || "");
+    const baseName = String(origThread.name || origThread.title || "新会话").replace(/\s*\(分叉(?:\s*\d+)?\)\s*$/i, "").trim() || "新会话";
+    const forkName = `${baseName} (分叉)`;
+    const parsed = parseCompositeThreadId(cleanThreadId);
+    const provider = this.getProvider(parsed.provider);
+
+    if (
+      parsed.provider === "codex"
+      && !this.#forkStore.get(cleanThreadId)
+      && typeof provider.forkThread === "function"
+      && (!isTruncated || lastTurnId)
+    ) {
+      try {
+        const nativeRes = await provider.forkThread({
+          profileId: parsed.profileId,
+          rawId: parsed.rawId,
+          lastTurnId: isTruncated ? lastTurnId : "",
+          cwd: origThread.cwd || "",
+          model: origThread.model || "",
+          permissionMode: origThread.permissionMode || "workspace",
+        });
+        if (nativeRes?.thread?.id) {
+          await this.#metaStore.setCustomName(nativeRes.thread.id, forkName);
+          await this.#metaStore.setThreadPrefs(nativeRes.thread.id, {
+            ...(origThread.model ? { model: origThread.model } : {}),
+            ...(origThread.reasoningEffort ? { reasoningEffort: origThread.reasoningEffort } : {}),
+            permissionMode: origThread.permissionMode || "workspace",
+          });
+          const enriched = this.#enrichThread({ ...nativeRes.thread, name: forkName, title: forkName });
+          this.#broadcast("thread_list_changed", { action: "fork", threadId: enriched.id });
+          return { ok: true, thread: enriched, native: true };
+        }
+      } catch {
+        // Fall back to soft fork store if native fork fails.
+      }
+    }
+
+    const forkEntry = await this.#forkStore.create({
+      provider: parsed.provider,
+      profileId: parsed.profileId,
+      profileLabel: origThread.profileLabel || "",
+      cwd: origThread.cwd || "",
+      name: forkName,
+      model: origThread.model || "",
+      reasoningEffort: origThread.reasoningEffort || "",
+      permissionMode: origThread.permissionMode || "workspace",
+      forkedFrom: {
+        threadId: cleanThreadId,
+        turnIndex: cutIndex,
+        turnId: lastTurnId,
+      },
+      turns: keptTurns,
+    });
+    await this.#metaStore.setCustomName(forkEntry.id, forkName);
+    await this.#metaStore.setThreadPrefs(forkEntry.id, {
+      ...(forkEntry.model ? { model: forkEntry.model } : {}),
+      ...(forkEntry.reasoningEffort ? { reasoningEffort: forkEntry.reasoningEffort } : {}),
+      permissionMode: forkEntry.permissionMode || "workspace",
+    });
+    const enriched = this.#enrichThread(forkEntry);
+    this.#broadcast("thread_list_changed", { action: "fork", threadId: enriched.id });
+    return { ok: true, thread: enriched, native: false };
+  }
+
   async sendTurn({
     threadId,
     cwd = "",
@@ -2236,6 +2385,37 @@ export class ProviderHub {
     isSystemResume = false,
     resumeAttempts = 0,
   } = {}) {
+    const forkDraft = this.#forkStore.get(threadId);
+    if (forkDraft && !forkDraft.materializedThreadId) {
+      const promptWithContext = buildForkContextPrompt(forkDraft.prefixTurns || [], text);
+      const started = await this.startThread({
+        provider: forkDraft.provider,
+        profileId: forkDraft.profileId,
+        cwd: cwd || forkDraft.cwd || "",
+        text: promptWithContext,
+        images,
+        model: model || forkDraft.model || "",
+        effort: effort || forkDraft.reasoningEffort || "",
+        permissionMode: permissionMode || forkDraft.permissionMode || "workspace",
+        runMode,
+        goalMode,
+      });
+      if (started?.thread?.id) {
+        const displayName = this.#metaStore.get(threadId)?.customName || forkDraft.name;
+        if (displayName) {
+          await this.#metaStore.setCustomName(started.thread.id, displayName);
+          started.thread.name = displayName;
+          started.thread.title = displayName;
+        }
+        await this.#forkStore.markMaterialized(threadId, started.thread.id);
+        this.#broadcast("thread_list_changed", { action: "fork_materialized", threadId: started.thread.id, fromId: threadId });
+      }
+      return {
+        ...started,
+        forkedFromId: threadId,
+        redirectedThreadId: started?.thread?.id || "",
+      };
+    }
     const parsed = parseCompositeThreadId(threadId);
     const provider = this.getProvider(parsed.provider);
     const savedPrefs = this.#metaStore.get(threadId);
@@ -2613,8 +2793,11 @@ export class ProviderHub {
     const parsed = parseCompositeThreadId(compositeId);
     const meta = await this.#metaStore.setCustomName(compositeId, name);
     this.#setCachedThreadTitle(compositeId, meta.customName);
+    await this.#forkStore.rename(compositeId, meta.customName);
     const provider = this.getProvider(parsed.provider);
-    await provider.renameThread?.(parsed.profileId, parsed.rawId, meta.customName).catch(() => {});
+    if (!this.#forkStore.get(compositeId)) {
+      await provider.renameThread?.(parsed.profileId, parsed.rawId, meta.customName).catch(() => {});
+    }
     this.#broadcast("thread_renamed", { threadId: compositeId, name: meta.customName });
     return { ok: true, threadId: compositeId, name: meta.customName };
   }
@@ -2635,12 +2818,16 @@ export class ProviderHub {
     const nextArchived = Boolean(archived);
     const cleanIds = parsedItems.map((item) => item.id);
     await this.#metaStore.setArchivedMany(cleanIds, nextArchived);
+    for (const id of cleanIds) {
+      await this.#forkStore.archive(id, nextArchived);
+    }
 
     const syncNative = async () => {
       const concurrency = 6;
       for (let i = 0; i < parsedItems.length; i += concurrency) {
         const slice = parsedItems.slice(i, i + concurrency);
-        await Promise.allSettled(slice.map(async ({ parsed }) => {
+        await Promise.allSettled(slice.map(async ({ id, parsed }) => {
+          if (this.#forkStore.get(id)) return;
           const provider = this.getProvider(parsed.provider);
           if (nextArchived) {
             await provider.archiveThread?.(parsed.profileId, parsed.rawId);

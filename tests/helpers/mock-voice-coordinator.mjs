@@ -20,6 +20,7 @@ const cases = new Map([
   ["刚才那两个任务结果怎么样", { intent: "summarize_progress", replyFrom: "results" }],
   ["帮我深入分析一下粉丝站小屋最近的报错原因", { intent: "subagent_hydrogen", targetName: "粉丝站小屋" }],
   ["让粉丝站跑一下检查", { intent: "send_turn", targetName: "粉丝站小屋", instruction: "跑一下检查" }],
+  ["让 粉丝站小屋 跑一下检查", { intent: "send_turn", targetName: "粉丝站小屋", instruction: "跑一下检查" }],
   ["你好", { intent: "wake_ping", spokenReply: "我在，请讲。" }],
 ]);
 

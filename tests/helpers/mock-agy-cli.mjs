@@ -254,7 +254,11 @@ rl.on("line", async (line) => {
           spokenReply: `当前共有 ${projCount} 个活跃项目，一切运行正常。`,
         };
       } else {
-        const targetProj = (snapshot.projects || []).find((p) => Array.isArray(p.threads) && p.threads.length > 0) || snapshot.projects?.[0] || null;
+        const userLine = text.match(/(?:用户补充输入|用户说)：([^\n]+)/)?.[1] || "";
+        const targetProj = (snapshot.projects || []).find((p) => Array.isArray(p.threads) && p.threads.length > 0 && p.name && userLine.includes(p.name))
+          || (snapshot.projects || []).find((p) => Array.isArray(p.threads) && p.threads.length > 0)
+          || snapshot.projects?.[0]
+          || null;
         const targetThread = targetProj?.threads?.[0] || null;
         if (targetProj && targetThread) {
           plan = {
