@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261117goalcontext" />
+  <meta name="ac-ui-version" content="20261117qoder" />
   <title>Agent Control · 多智能体远程控制台</title>
-  <link rel="stylesheet" href="./app.css?v=20261117goalcontext" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261117goalcontext" />
+  <link rel="stylesheet" href="./app.css?v=20261117qoder" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261117qoder" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -43,7 +43,12 @@
           <button type="button" class="provider-tab" data-provider="claude">Claude</button>
           <button type="button" class="provider-tab" data-provider="antigravity" title="Antigravity">Agy</button>
           <button type="button" class="provider-tab" data-provider="grok">Grok</button>
+          <button type="button" class="provider-tab" data-provider="qoder">Qoder</button>
         </div>
+        <details id="providerTabsSettings" class="provider-tabs-settings">
+          <summary title="设置显示哪些智能体" aria-label="设置显示哪些智能体"><span data-icon="settings" data-icon-size="14" aria-hidden="true"></span></summary>
+          <div id="providerTabsSettingsMenu" class="provider-tabs-settings-menu"></div>
+        </details>
         <button type="button" id="sidebarBatchSelectBtn" class="batch-mode-toggle-btn" title="批量选择项目或会话（也可直接长按列表项）">多选</button>
       </div>
 
@@ -729,6 +734,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="./app.js?v=20261117goalcontext"></script>
+  <script type="module" src="./app.js?v=20261117qoder"></script>
 </body>
 </html>

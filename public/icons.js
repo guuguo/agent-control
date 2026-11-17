@@ -47,6 +47,7 @@ const ICON_PATHS = Object.freeze({
 });
 
 const PROVIDER_ICON_PATHS = Object.freeze({
+  qoder: `<path d="M11.7 11.6a5 5 0 1 0-2.1 1.2L13.5 15M9.5 9.5l4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
   antigravity: `<path d="M8 1.5 9.65 6.35 14.5 8 9.65 9.65 8 14.5 6.35 9.65 1.5 8 6.35 6.35 8 1.5Z" fill="currentColor"/>`,
   codex: `<path d="M8 1.85 13.3 4.9v6.2L8 14.15 2.7 11.1V4.9L8 1.85Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="m5.9 6.6 2.1 1.4-2.1 1.4M8.5 9.5h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`,
   claude: `<path d="M8 1.8v12.4M1.8 8h12.4M3.6 3.6l8.8 8.8M12.4 3.6l-8.8 8.8" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/><circle cx="8" cy="8" r="1.45" fill="currentColor"/>`,

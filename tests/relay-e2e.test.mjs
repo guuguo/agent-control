@@ -121,7 +121,7 @@ test("Relay + RemoteBridge end-to-end pairing, cookie auth, SSE tunneling, offli
   });
   assert.equal(proxiedProviders.status, 200);
   const proxiedJson = await proxiedProviders.json();
-  assert.equal(proxiedJson.providers.length, 4);
+  assert.equal(proxiedJson.providers.length, 5);
 
   // Tunneled SSE stream works.
   const sseAbort = new AbortController();

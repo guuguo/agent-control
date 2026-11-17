@@ -41,7 +41,7 @@ export function renderExecutionStatsHtml(snapshot, { days = 7, provider = "all",
   return `<section class="execution-stats" aria-label="Agent 执行统计">
     <div class="execution-stats-heading"><strong>执行统计</strong><div class="execution-stats-controls">
       <label>范围 <select data-execution-days aria-label="统计时间范围" ${loading ? "disabled" : ""}>${[[1, "近24小时"], [7, "近7天"], [30, "近30天"], [0, "全部"]].map(([value, label]) => `<option value="${value}"${Number(days) === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>
-      <label>Agent <select data-execution-provider aria-label="统计 Agent" ${loading ? "disabled" : ""}>${["all", "codex", "claude", "antigravity", "grok"].map((value) => `<option value="${value}"${provider === value ? " selected" : ""}>${value === "all" ? "全部" : escapeHtml(providerDisplayName(value))}</option>`).join("")}</select></label>
+      <label>Agent <select data-execution-provider aria-label="统计 Agent" ${loading ? "disabled" : ""}>${["all", "codex", "claude", "antigravity", "grok", "qoder"].map((value) => `<option value="${value}"${provider === value ? " selected" : ""}>${value === "all" ? "全部" : escapeHtml(providerDisplayName(value))}</option>`).join("")}</select></label>
       <button type="button" class="telemetry-action-btn" data-execution-refresh ${loading ? "disabled" : ""}>${loading ? "读取中…" : "刷新统计"}</button>
     </div></div>
     <p class="execution-stats-note">每轮指令单独采样，/goal 续跑分轮记录。耗时含工具和审批等待，不含排队；首输出含思考。汇总用时仅统计成功轮次，Token 均值仅使用已确认的每轮协议用量。不同任务复杂度不能直接当作模型速度排名。${snapshot ? `记录起于 ${escapeHtml(new Date(snapshot.startedAt).toLocaleDateString("zh-CN"))}，更新于 ${escapeHtml(new Date(snapshot.updatedAt).toLocaleTimeString("zh-CN", { hour12: false }))}。` : ""}</p>

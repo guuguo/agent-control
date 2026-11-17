@@ -295,6 +295,9 @@ export class AntigravityAcpClient extends EventEmitter {
   #loadedSessions = new Set();
   #skipPermissions = false;
   #closed = false;
+  #launch;
+  #clientCapabilities;
+  #agentName;
 
   constructor({
     appDataDir = "",
@@ -303,6 +306,9 @@ export class AntigravityAcpClient extends EventEmitter {
     spawnImpl = spawn,
     executable = "",
     skipPermissions = false,
+    launch = null,
+    clientCapabilities = {},
+    agentName = "Antigravity",
   } = {}) {
     super();
     this.#appDataDir = appDataDir;
@@ -311,6 +317,9 @@ export class AntigravityAcpClient extends EventEmitter {
     this.#spawnImpl = spawnImpl;
     this.#executable = executable || agyExecutable(env);
     this.#skipPermissions = Boolean(skipPermissions);
+    this.#launch = launch;
+    this.#clientCapabilities = clientCapabilities;
+    this.#agentName = agentName;
   }
 
   get skipPermissions() {
@@ -322,7 +331,7 @@ export class AntigravityAcpClient extends EventEmitter {
   }
 
   async ensureReady() {
-    if (this.#closed) throw new Error("Antigravity ACP 客户端已关闭");
+    if (this.#closed) throw new Error(`${this.#agentName} ACP 客户端已关闭`);
     if (this.#ready) return this.#ready;
     this.#ready = this.#start().catch((error) => {
       this.#ready = null;
@@ -332,7 +341,7 @@ export class AntigravityAcpClient extends EventEmitter {
   }
 
   async #start() {
-    const launch = resolveAgyAcpLaunch({
+    const launch = this.#launch || resolveAgyAcpLaunch({
       appDataDir: this.#appDataDir,
       env: this.#env,
       platform: this.#platform,
@@ -364,9 +373,10 @@ export class AntigravityAcpClient extends EventEmitter {
     proc.on("error", (error) => this.#failAll(error));
     proc.on("exit", (code, signal) => {
       const stderrText = this.#stderrTail.join("").trim().slice(-400);
+      const processLabel = this.#agentName === "Antigravity" ? "agy acp" : `${this.#agentName} ACP`;
       const message = stderrText
-        ? `agy acp 已退出 (${code ?? signal}): ${stderrText}`
-        : `agy acp 已退出 (${code ?? signal})`;
+        ? `${processLabel} 已退出 (${code ?? signal}): ${stderrText}`
+        : `${processLabel} 已退出 (${code ?? signal})`;
       if (this.#process === proc) {
         this.#process = null;
         this.#ready = null;
@@ -380,7 +390,7 @@ export class AntigravityAcpClient extends EventEmitter {
     try {
       await this.#sendRequest("initialize", {
         protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {},
+        clientCapabilities: this.#clientCapabilities,
         clientInfo: CLIENT_INFO,
       });
     } catch (error) {
@@ -419,7 +429,7 @@ export class AntigravityAcpClient extends EventEmitter {
       this.#pending.delete(String(msg.id));
       clearTimeout(entry.timer);
       if (msg.error) {
-        entry.reject(Object.assign(new Error(msg.error.message || "Antigravity ACP 调用失败"), {
+        entry.reject(Object.assign(new Error(msg.error.message || `${this.#agentName} ACP 调用失败`), {
           code: msg.error.code,
           status: 500,
         }));
@@ -447,7 +457,7 @@ export class AntigravityAcpClient extends EventEmitter {
 
   #writeLine(payload) {
     if (!this.#process?.stdin?.writable) {
-      throw new Error("agy acp 输入流不可用");
+      throw new Error(`${this.#agentName} ACP 输入流不可用`);
     }
     this.#process.stdin.write(`${JSON.stringify(payload)}\n`);
   }
@@ -457,7 +467,7 @@ export class AntigravityAcpClient extends EventEmitter {
     return new Promise((resolveReq, rejectReq) => {
       const timer = setTimeout(() => {
         this.#pending.delete(String(id));
-        rejectReq(new Error(`Antigravity ACP 请求超时 (${method})`));
+        rejectReq(new Error(`${this.#agentName} ACP 请求超时 (${method})`));
       }, timeoutMs);
       timer.unref?.();
       this.#pending.set(String(id), {
@@ -607,7 +617,7 @@ export class AntigravityAcpClient extends EventEmitter {
     this.#ready = null;
     this.#loadedSessions.clear();
     this.#replayingSessions.clear();
-    this.#failAll(new Error("Antigravity ACP 客户端已关闭"));
+    this.#failAll(new Error(`${this.#agentName} ACP 客户端已关闭`));
     if (proc && proc.exitCode === null) {
       await new Promise((resolveClose) => {
         const timer = setTimeout(() => {

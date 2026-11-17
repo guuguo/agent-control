@@ -9,7 +9,7 @@ import { ANTIGRAVITY_STALE_LIVE_AGE_MS, isAntigravityDiskLive } from "./provider
 import { readClaudeDesktopSessionsMeta } from "./providers/profile-discovery.mjs";
 import { isInternalVoiceCallThread } from "./thread-access.mjs";
 
-const PROVIDERS_ORDER = ["codex", "claude", "antigravity", "grok"];
+const PROVIDERS_ORDER = ["codex", "claude", "antigravity", "grok", "qoder"];
 const MAX_FILE_CURSORS = 80;
 const INITIAL_TAIL_BYTES = 128 * 1024;
 const DELTA_READ_CAP_BYTES = 256 * 1024;
@@ -674,6 +674,7 @@ export class AgentTelemetryService {
       claude: claudeDisk,
       antigravity: agyDisk,
       grok: grokDisk,
+      qoder: new Map(),
     };
 
     const byProvider = {};

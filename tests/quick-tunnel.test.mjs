@@ -399,7 +399,7 @@ test("RemoteBridge remains authorized via internal bridge token even when X-Forw
   });
   assert.equal(proxiedProviders.status, 200);
   const proxiedJson = await proxiedProviders.json();
-  assert.equal(proxiedJson.providers.length, 4);
+  assert.equal(proxiedJson.providers.length, 5);
 });
 
 test("Fixed URL pairing (Cloudflare Named Tunnel) and Tailscale Funnel endpoints enforce gateway security", async (t) => {

@@ -124,7 +124,7 @@ test("Hub + HTTP/SSE control server coordinates Codex, Claude, and Antigravity e
   // Health & providers & models & threads.
   const health = await jsonReq(srv.url, "/health");
   assert.equal(health.status, 200);
-  assert.equal(health.data.providers.length, 4);
+  assert.equal(health.data.providers.length, 5);
 
   const models = await jsonReq(srv.url, "/api/models");
   assert.equal(models.status, 200);

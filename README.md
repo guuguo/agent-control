@@ -157,6 +157,18 @@ RELAY_PUBLIC_URL=https://relay.example.com RELAY_KEY=你的密钥 npm run invite
 - 所有会话通过 `<provider>:<profileId>:<rawId>` 复合 ID 只读索引，重命名/归档/置顶持久化于独立数据目录（macOS：`~/Library/Application Support/Agent Control`；Windows：`%APPDATA%\Agent Control`；Linux：`~/.local/share/agent-control`），不会修改原工具数据库。
 - 常用环境变量：`PORT`（默认 `43310`）、`HOST`（默认 `127.0.0.1`）、`AGENT_CONTROL_DATA_DIR`、`AGENT_CONTROL_DISABLE_RELAY`、`AGENT_CONTROL_TITLE_RULES_FILE`、`AGENT_CONTROL_CODEX_HOMES`、`AGENT_CONTROL_CLAUDE_CONFIG_DIRS`、`AGENT_CONTROL_AGY_APP_DATA_DIRS`、`CODEX_BIN`、`CLAUDE_BIN`、`AGY_BIN`。
 
+#### Qoder CLI
+
+按 [Qoder 官方安装说明](https://docs.qoder.com/cli/installation) 安装 CLI，并在服务运行用户下执行 `qoder login`（旧命令名为 `qodercli login`，控制台同时支持发现两者）。Agent Control 使用官方 ACP 接口及本机登录状态，不读取登录凭证。
+
+在底部 Agent 选择器选择 **Qoder**，可使用 Auto、Lite、Performance 模型档位，设置思考强度和权限，发送图片、查看流式回复与工具执行、处理审批、中断任务或加入控制端队列。切换模型、思考或权限后，下一轮重新加载原会话。
+
+规划模式通过规划指令和控制端只读约束执行：拒绝文件写入、终端执行及工具授权请求；不会向不支持 `--permission-mode plan` 的 CLI 传入该值。
+
+本次接入管理从 Agent Control 创建的 Qoder 会话，历史副本保存在 Agent Control 数据目录下的 `qoder-threads.json`；不会扫描或修改 Qoder 的外部历史。重启服务后仍通过原 session ID 续接。未提供积分余额查询；赠送额度、模型可用性和费用以对应 Qoder 账号为准。
+
+可通过 `QODER_BIN` 指定 CLI 路径，`AGENT_CONTROL_QODER_CONFIG_DIR` 指定 Qoder 配置目录（默认 `~/.qoder`）。侧边栏智能体筛选栏右侧的设置按钮可隐藏不常用的入口，显示偏好保存在当前浏览器中；隐藏后会话仍在“全部”中。
+
 ### 5. 本地开发与零消耗测试
 
 ```bash

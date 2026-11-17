@@ -1,4 +1,4 @@
-import { iconSvg, providerIconSvg } from "./icons.js?v=20261117a";
+import { iconSvg, providerIconSvg } from "./icons.js?v=20261117qoder";
 
 export const PROVIDER_META = Object.freeze({
   all: { id: "all", label: "全部", short: "全部" },
@@ -6,6 +6,7 @@ export const PROVIDER_META = Object.freeze({
   claude: { id: "claude", label: "Claude Code", short: "Claude" },
   antigravity: { id: "antigravity", label: "Antigravity", short: "Agy" },
   grok: { id: "grok", label: "Grok", short: "Grok" },
+  qoder: { id: "qoder", label: "Qoder", short: "Qoder" },
 });
 
 export const UI_PERMISSION_MODES = Object.freeze([
@@ -17,6 +18,8 @@ export const UI_PERMISSION_MODES = Object.freeze([
 ]);
 
 export const CLIENT_FALLBACK_MODELS = Object.freeze({
+  qoder: Object.freeze(["auto", "lite", "performance"].map((id) => ({ id, model: id, displayName: { auto: "Auto", lite: "Lite", performance: "Performance" }[id],
+    provider: "qoder", isDefault: id === "auto", defaultReasoningEffort: "medium", supportedReasoningEfforts: ["low", "medium", "high"] }))),
   antigravity: Object.freeze([
     {
       id: "gemini-pro-orchestrator",
@@ -281,6 +284,8 @@ export function providerVisualMeta(provider = "antigravity") {
       return { id: "claude", label: "Claude Code", short: "Claude", glyph: "", iconSvg: providerIconSvg("claude", { size: 12 }), tone: "claude" };
     case "grok":
       return { id: "grok", label: "Grok", short: "Grok", glyph: "", iconSvg: providerIconSvg("grok", { size: 12 }), tone: "grok" };
+    case "qoder":
+      return { id: "qoder", label: "Qoder", short: "Qoder", glyph: "", iconSvg: providerIconSvg("qoder", { size: 12 }), tone: "qoder" };
     default:
       return {
         id: provider || "agent",
@@ -398,7 +403,7 @@ function escapeAttrHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-const TELEMETRY_PROVIDER_ORDER = ["codex", "claude", "antigravity", "grok"];
+const TELEMETRY_PROVIDER_ORDER = ["codex", "claude", "antigravity", "grok", "qoder"];
 
 export function formatTokensPerSec(value = 0) {
   const num = Number(value);
@@ -1770,7 +1775,7 @@ export function filterProfilesByProvider(profiles = [], provider = "all") {
   return profiles.filter((p) => p.provider === provider);
 }
 
-const NEW_THREAD_PROVIDER_ORDER = ["antigravity", "codex", "claude", "grok"];
+const NEW_THREAD_PROVIDER_ORDER = ["antigravity", "codex", "claude", "grok", "qoder"];
 
 export function renderProviderPillsHtml({
   selectedProvider = "antigravity",

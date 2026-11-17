@@ -1,10 +1,11 @@
-export const PROVIDERS = Object.freeze(["codex", "claude", "antigravity", "grok"]);
+export const PROVIDERS = Object.freeze(["codex", "claude", "antigravity", "grok", "qoder"]);
 
 export const PROVIDER_LABELS = Object.freeze({
   codex: "Codex",
   claude: "Claude Code",
   antigravity: "Antigravity",
   grok: "Grok",
+  qoder: "Qoder",
 });
 
 const PROFILE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,48}$/;

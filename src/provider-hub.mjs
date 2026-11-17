@@ -6,6 +6,7 @@ import {
   formatProfileKey,
   parseCompositeThreadId,
   PROVIDER_LABELS,
+  PROVIDERS,
 } from "./composite-id.mjs";
 import {
   ALLOWED_PREVIEW_IMAGE_MIMES,
@@ -20,6 +21,7 @@ import { ExecutionStats } from "./execution-stats.mjs";
 import { ForkStore, buildForkContextPrompt, stripForkContextPrefix } from "./fork-store.mjs";
 import { isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
+import { QoderProvider } from "./providers/qoder-provider.mjs";
 import { isTurboPermissionMode, normalizePermissionMode } from "./permissions.mjs";
 import { isSubpathOrEqual, isUserHomePath, resolveUserHome } from "./platform.mjs";
 import {
@@ -619,6 +621,7 @@ export class ProviderHub {
       new ClaudeProvider({ env, onEvent: emitEvent, onServerRequest: emitServerRequest }),
       new AntigravityProvider({ env, onEvent: emitEvent, onServerRequest: emitServerRequest }),
       new GrokProvider({ env, onEvent: emitEvent }),
+      new QoderProvider({ env, dataDir, onEvent: emitEvent, onServerRequest: emitServerRequest }),
     ];
     this.#quotaService = quotaService || new QuotaService({
       env,
@@ -851,7 +854,7 @@ export class ProviderHub {
         ? snapshot.activeThreads.map((t) => `${t?.id || ""}:${t?.title || ""}:${t?.status || ""}`).join(",")
         : "";
       const sig = [
-        ...["codex", "claude", "antigravity", "grok"].map((id) => {
+        ...PROVIDERS.map((id) => {
           const item = byP[id] || {};
           return `${id}:${item.runningCount || 0}:${item.queuedCount || 0}:${item.tokensPerSec || 0}`;
         }),
