@@ -223,7 +223,14 @@ function renderRevealThreadImagesButtonHtml() {
   return `<button type="button" class="msg-reveal-thread-images-btn" data-reveal-thread-images="1" title="加载并展示当前会话的全部预览图">${iconSvg("image", { size: 12 })}<span>加载本会话预览图</span></button>`;
 }
 
-function renderInlineMarkdown(text, { threadId = "", deferImages = false } = {}) {
+function resolveMarkdownFileRef(rawRef, basePath) {
+  // Only file previews supply a base; normal conversation links keep using CWD.
+  if (!basePath || !rawRef || /^(?:[a-z][a-z0-9+.-]*:|[/\\#]|~[\\/])/i.test(rawRef)) return rawRef;
+  const separator = Math.max(basePath.lastIndexOf("/"), basePath.lastIndexOf("\\"));
+  return separator < 0 ? rawRef : basePath.slice(0, separator + 1) + rawRef;
+}
+
+function renderInlineMarkdown(text, { threadId = "", deferImages = false, basePath = "" } = {}) {
   let working = String(text ?? "").replace(/\x00/g, "");
   if (!working) return "";
 
@@ -241,6 +248,7 @@ function renderInlineMarkdown(text, { threadId = "", deferImages = false } = {})
       : inner;
     const fileRef = threadId ? parsePreviewableCodePath(trimmed) : null;
     if (fileRef) {
+      fileRef.cleanPath = resolveMarkdownFileRef(fileRef.cleanPath, basePath);
       const lineAttr = fileRef.startLine ? ` data-local-file-line="${fileRef.startLine}"` : "";
       return stash(
         `<code class="md-code-file" data-local-file-path="${escapeHtml(fileRef.cleanPath)}"${lineAttr} title="点击查看：${escapeHtml(fileRef.cleanPath)}">${escapeHtml(trimmed)}</code>`,
@@ -268,7 +276,7 @@ function renderInlineMarkdown(text, { threadId = "", deferImages = false } = {})
   working = working.replace(
     /!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|((?:\([^()\s]*\)|[^()\n])+?))(?:\s+"([^"\n]*)")?\s*\)/g,
     (_, altRaw, bracketHref, plainHref, titleRaw) => {
-      const rawUrl = (bracketHref || plainHref || "").trim();
+      const rawUrl = resolveMarkdownFileRef((bracketHref || plainHref || "").trim(), basePath);
       const safeImg = sanitizeImageSrc(rawUrl);
       if (safeImg) {
         return stash(
@@ -314,7 +322,7 @@ function renderInlineMarkdown(text, { threadId = "", deferImages = false } = {})
   working = working.replace(
     /\[([^\]\n]+)\]\(\s*(?:<([^>\n]+)>|((?:\([^()\s]*\)|[^()\n])+?))(?:\s+"([^"\n]*)")?\s*\)/g,
     (_, labelRaw, bracketHref, plainHref, titleRaw) => {
-      const rawUrl = (bracketHref || plainHref || "").trim();
+      const rawUrl = resolveMarkdownFileRef((bracketHref || plainHref || "").trim(), basePath);
       const labelHtml = renderEscapedEmphasis(escapeHtml(labelRaw));
       const trimmedLabel = String(labelRaw || "").trim();
       const ref = splitClientFileRefAndAnchor(rawUrl);
@@ -400,12 +408,12 @@ function parseTableAlignments(line) {
   return alignments;
 }
 
-function renderTableRowCells(tag, cells, colCount, alignments = [], { threadId = "", deferImages = false } = {}) {
+function renderTableRowCells(tag, cells, colCount, alignments = [], { threadId = "", deferImages = false, basePath = "" } = {}) {
   const out = [];
   for (let c = 0; c < colCount; c += 1) {
     const align = alignments[c] || "";
     const alignAttr = align ? ` style="text-align:${align}"` : "";
-    out.push(`<${tag}${alignAttr}>${renderInlineMarkdown(cells[c] || "", { threadId, deferImages })}</${tag}>`);
+    out.push(`<${tag}${alignAttr}>${renderInlineMarkdown(cells[c] || "", { threadId, deferImages, basePath })}</${tag}>`);
   }
   return `<tr>${out.join("")}</tr>`;
 }
@@ -423,7 +431,7 @@ const HR_RE = /^\s*(?:-\s*){3,}$|^\s*(?:\*\s*){3,}$|^\s*(?:_\s*){3,}$/;
 const HEADING_RE = /^\s*(#{1,6})\s+(.+?)(?:\s+#+\s*)?$/;
 const FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})(.*)$/;
 
-function renderListItemsHtml(items, { threadId = "", deferImages = false } = {}) {
+function renderListItemsHtml(items, { threadId = "", deferImages = false, basePath = "" } = {}) {
   if (!items.length) return "";
   const html = [];
   const stack = [];
@@ -457,7 +465,7 @@ function renderListItemsHtml(items, { threadId = "", deferImages = false } = {})
       }
     }
 
-    const bodyHtml = item.lines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />");
+    const bodyHtml = item.lines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages, basePath })).join("<br />");
     if (item.taskChecked !== null) {
       const checkedCls = item.taskChecked ? " is-checked" : "";
       html.push(
@@ -495,7 +503,7 @@ function isBlockBoundaryLine(lines, index) {
   return false;
 }
 
-export function renderMarkdown(source, { depth = 0, threadId = "", deferImages = false } = {}) {
+export function renderMarkdown(source, { depth = 0, threadId = "", deferImages = false, basePath = "" } = {}) {
   const text = String(source || "")
     .replace(/<!--\s*GOAL_COMPLETE\s*-->/g, "")
     .replace(/\r\n/g, "\n");
@@ -584,10 +592,10 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
             innerLines.splice(firstNonEmptyIdx, 1);
           }
         }
-        const bodyHtml = renderMarkdown(innerLines.join("\n"), { depth: depth + 1, threadId, deferImages });
+        const bodyHtml = renderMarkdown(innerLines.join("\n"), { depth: depth + 1, threadId, deferImages, basePath });
         const openAttr = detailsOpen[1] ? " open" : "";
         html.push(
-          `<details class="md-details"${openAttr}><summary>${renderInlineMarkdown(summaryText, { threadId, deferImages })}</summary><div class="md-details-body">${bodyHtml}</div></details>`,
+          `<details class="md-details"${openAttr}><summary>${renderInlineMarkdown(summaryText, { threadId, deferImages, basePath })}</summary><div class="md-details-body">${bodyHtml}</div></details>`,
         );
         i = closeIdx + 1;
         continue;
@@ -619,9 +627,9 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
           bodyRows.push(splitTableCells(rowLine));
           i += 1;
         }
-        const thead = `<thead>${renderTableRowCells("th", headerCells, colCount, nextAligns, { threadId, deferImages })}</thead>`;
+        const thead = `<thead>${renderTableRowCells("th", headerCells, colCount, nextAligns, { threadId, deferImages, basePath })}</thead>`;
         const tbody = bodyRows.length
-          ? `<tbody>${bodyRows.map((cells) => renderTableRowCells("td", cells, colCount, nextAligns, { threadId, deferImages })).join("")}</tbody>`
+          ? `<tbody>${bodyRows.map((cells) => renderTableRowCells("td", cells, colCount, nextAligns, { threadId, deferImages, basePath })).join("")}</tbody>`
           : "";
         html.push(`<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`);
         continue;
@@ -644,7 +652,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
         rows.push(cells);
         i += 1;
       }
-      const tbody = `<tbody>${rows.map((cells) => renderTableRowCells("td", cells, colCount, [], { threadId, deferImages })).join("")}</tbody>`;
+      const tbody = `<tbody>${rows.map((cells) => renderTableRowCells("td", cells, colCount, [], { threadId, deferImages, basePath })).join("")}</tbody>`;
       html.push(`<div class="md-table-wrap"><table class="md-table is-headless">${tbody}</table></div>`);
       continue;
     }
@@ -660,7 +668,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
     const headingMatch = line.match(HEADING_RE);
     if (headingMatch) {
       const level = headingMatch[1].length;
-      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2], { threadId, deferImages })}</h${level}>`);
+      html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2], { threadId, deferImages, basePath })}</h${level}>`);
       i += 1;
       continue;
     }
@@ -681,15 +689,15 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
           ...quoteLines.slice(1),
         ];
         const bodyHtml = restLines.join("\n").trim()
-          ? renderMarkdown(restLines.join("\n"), { depth: depth + 1, threadId, deferImages })
+          ? renderMarkdown(restLines.join("\n"), { depth: depth + 1, threadId, deferImages, basePath })
           : "";
         html.push(
           `<div class="md-alert is-${kind}"><div class="md-alert-title"><span class="md-alert-icon" aria-hidden="true">${meta.icon}</span><span>${meta.label}</span></div>${bodyHtml ? `<div class="md-alert-body">${bodyHtml}</div>` : ""}</div>`,
         );
       } else {
         const innerHtml = depth < 4
-          ? renderMarkdown(quoteLines.join("\n"), { depth: depth + 1, threadId, deferImages })
-          : `<p>${quoteLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />")}</p>`;
+          ? renderMarkdown(quoteLines.join("\n"), { depth: depth + 1, threadId, deferImages, basePath })
+          : `<p>${quoteLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages, basePath })).join("<br />")}</p>`;
         html.push(`<blockquote>${innerHtml}</blockquote>`);
       }
       continue;
@@ -730,7 +738,7 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
         }
         break;
       }
-      html.push(renderListItemsHtml(listItems, { threadId, deferImages }));
+      html.push(renderListItemsHtml(listItems, { threadId, deferImages, basePath }));
       continue;
     }
 
@@ -741,10 +749,10 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
       i += 1;
     }
     if (paraLines.length) {
-      html.push(`<p>${paraLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages })).join("<br />")}</p>`);
+      html.push(`<p>${paraLines.map((ln) => renderInlineMarkdown(ln, { threadId, deferImages, basePath })).join("<br />")}</p>`);
     } else {
       // Defensive advance if a non-empty line wasn't claimed above (e.g. unclosed <details>).
-      html.push(`<p>${renderInlineMarkdown(lines[i], { threadId, deferImages })}</p>`);
+      html.push(`<p>${renderInlineMarkdown(lines[i], { threadId, deferImages, basePath })}</p>`);
       i += 1;
     }
   }

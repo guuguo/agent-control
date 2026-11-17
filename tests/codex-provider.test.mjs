@@ -13,6 +13,7 @@ import { loadCodexThreadHistory } from "../src/providers/codex-thread-history.mj
 import { parseCodexQueuedPayload, readIndexedThreadById, readIndexedThreads } from "../src/providers/codex-thread-index.mjs";
 import { ProviderHub } from "../src/provider-hub.mjs";
 import { createAgentControlServer } from "../src/server.mjs";
+import { renderMarkdown } from "../public/markdown.js";
 
 const MOCK_CODEX_BIN = fileURLToPath(new URL("./helpers/mock-codex-cli.mjs", import.meta.url));
 
@@ -552,10 +553,10 @@ test("Codex image wrappers, Files mentioned headers, question replies, and /api/
   assert.ok(largePngBuf.length > 160 * 1024);
   const largePngRel = "demo-studio/episodes/ep01/large-scene.png";
   const planRel = "demo-studio/episodes/ep01/提交计划.md";
-  await mkdir(resolve(workspace, "demo-studio/episodes/ep01"), { recursive: true });
+  await mkdir(resolve(workspace, "demo-studio/episodes/ep01/正文"), { recursive: true });
   await Promise.all([
     writeFile(resolve(workspace, largePngRel), largePngBuf),
-    writeFile(resolve(workspace, planRel), "# 提交计划\n\n第1幕：pass\n第2幕：pass\n", "utf8"),
+    writeFile(resolve(workspace, planRel), "# 提交计划\n\n| 章 | 正文 |\n|---|---|\n|001|[第一章](正文/001.md)|\n", "utf8"),
     writeFile(resolve(workspace, "hack.mjs"), "const a = 1;\nconst b = 2;\n", "utf8"),
     writeFile(resolve(workspace, ".env"), "API_KEY=secret\n", "utf8"),
     writeFile(resolve(dir, "outside.txt"), "secret outside", "utf8"),
@@ -590,6 +591,21 @@ test("Codex image wrappers, Files mentioned headers, question replies, and /api/
   ).then((r) => r.json());
   assert.equal(bareNameRes.kind, "markdown");
   assert.match(bareNameRes.displayPath, /提交计划\.md/);
+
+  await writeFile(resolve(workspace, "demo-studio/episodes/ep01/正文/001.md"), "# 第一章测试文件\n\n[下一章](002.md)");
+  await writeFile(resolve(workspace, "demo-studio/episodes/ep01/正文/002.md"), "# 第二章测试文件");
+  const previewLink = (meta) => renderMarkdown(meta.content, { threadId: "codex:default:thr-img-1", basePath: meta.displayPath }).match(/data-local-file-path="([^"]+)"/)?.[1];
+  const readLink = async (path) => {
+    const response = await fetch(`${srv.url}/api/thread/file?threadId=${encodeURIComponent("codex:default:thr-img-1")}&path=${encodeURIComponent(path)}`);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  // Bare filename lookup can find a nested directory: child links must use displayPath, not the original request.
+  const chapter = await readLink(previewLink(bareNameRes));
+  assert.match(chapter.content, /第一章测试文件/);
+  const nextChapter = await readLink(previewLink(chapter));
+  assert.match(nextChapter.content, /第二章测试文件/);
+
 
   const anchorRes = await fetch(
     `${srv.url}/api/thread/file?threadId=${encodeURIComponent("codex:default:thr-img-1")}&path=${encodeURIComponent("hack.mjs#L2")}`,

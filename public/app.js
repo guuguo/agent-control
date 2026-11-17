@@ -65,7 +65,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261117skill";
+} from "./markdown.js?v=20261117filelinks";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -3463,7 +3463,7 @@ function renderFilePreviewBody(meta, { threadId = "", rawMode = false } = {}) {
   if (!bodyEl || !meta) return;
   const targetLine = meta.startLine || 0;
   if (meta.kind === "markdown" && !rawMode) {
-    bodyEl.innerHTML = `<div class="file-preview-md md-body">${renderMarkdown(meta.content || "", { threadId })}</div>`;
+    bodyEl.innerHTML = `<div class="file-preview-md md-body">${renderMarkdown(meta.content || "", { threadId, basePath: meta.displayPath || meta.requestPath || "" })}</div>`;
     return;
   }
   if (meta.kind === "video") {
