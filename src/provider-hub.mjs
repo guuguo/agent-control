@@ -2376,6 +2376,10 @@ export class ProviderHub {
     threadId,
     upToTurnIndex = null,
     upToTurnId = "",
+    targetProvider = "",
+    targetProfileId = "",
+    model = "",
+    effort = "",
   } = {}) {
     const cleanThreadId = String(threadId || "").trim();
     if (!cleanThreadId) {
@@ -2398,12 +2402,24 @@ export class ProviderHub {
     const isTruncated = cutIndex >= 0 && cutIndex < turns.length - 1;
     const lastTurnId = String(keptTurns[keptTurns.length - 1]?.id || "");
     const baseName = String(origThread.name || origThread.title || "新会话").replace(/\s*\(分叉(?:\s*\d+)?\)\s*$/i, "").trim() || "新会话";
-    const forkName = `${baseName} (分叉)`;
     const parsed = parseCompositeThreadId(cleanThreadId);
-    const provider = this.getProvider(parsed.provider);
+    const providerId = targetProvider || parsed.provider;
+    const provider = this.getProvider(providerId);
+    const profileId = targetProvider ? targetProfileId : parsed.profileId;
+    let profileLabel = origThread.profileLabel || "";
+    if (targetProvider) {
+      const profiles = await provider.listProfiles();
+      const profile = profiles.find((item) => item.id === profileId);
+      if (!profile || !profile.installed || this.#metaStore.getProfileMeta(formatProfileKey(providerId, profileId))?.disabled) {
+        throw Object.assign(new Error("请选择已安装且启用的目标 Agent 实例"), { status: 400 });
+      }
+      profileLabel = profile.label || "";
+    }
+    const forkName = `${baseName} (${targetProvider ? `${PROVIDER_LABELS[providerId]} 接续` : "分叉"})`;
 
     if (
       parsed.provider === "codex"
+      && !targetProvider
       && !this.#forkStore.get(cleanThreadId)
       && typeof provider.forkThread === "function"
       && (!isTruncated || lastTurnId)
@@ -2434,13 +2450,13 @@ export class ProviderHub {
     }
 
     const forkEntry = await this.#forkStore.create({
-      provider: parsed.provider,
-      profileId: parsed.profileId,
-      profileLabel: origThread.profileLabel || "",
+      provider: providerId,
+      profileId,
+      profileLabel,
       cwd: origThread.cwd || "",
       name: forkName,
-      model: origThread.model || "",
-      reasoningEffort: origThread.reasoningEffort || "",
+      model: targetProvider ? model : origThread.model || "",
+      reasoningEffort: targetProvider ? effort : origThread.reasoningEffort || "",
       permissionMode: origThread.permissionMode || "workspace",
       forkedFrom: {
         threadId: cleanThreadId,

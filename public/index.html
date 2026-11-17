@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261117qoder" />
+  <meta name="ac-ui-version" content="20261117continue" />
   <title>Agent Control · 多智能体远程控制台</title>
-  <link rel="stylesheet" href="./app.css?v=20261117qoder" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261117qoder" />
+  <link rel="stylesheet" href="./app.css?v=20261117continue" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261117continue" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -313,6 +313,27 @@
       <div class="modal-foot">
         <button type="button" class="btn-secondary" data-close-modal="newThreadModal">取消</button>
         <button type="submit" id="createThreadSubmitBtn" class="btn-primary">创建会话</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="continueThreadModal" class="modal-dialog">
+    <form id="continueThreadForm" method="dialog" class="modal-card">
+      <div class="modal-head">
+        <h3>换 Agent 继续</h3>
+        <button type="button" class="icon-btn" data-close-modal="continueThreadModal" aria-label="关闭"><span data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body">
+        <p id="continueThreadSource"></p>
+        <p>携带近期对话上下文和原项目目录，原会话保持不动。创建后输入指令继续。</p>
+        <label class="field"><span>Agent · 账号实例</span><select id="continueAgentSelect" required></select></label>
+        <label class="field"><span>模型</span><select id="continueModelSelect"></select></label>
+        <label class="field"><span>思考强度</span><select id="continueEffortSelect"></select></label>
+        <div id="continueThreadError" class="composer-status is-error" role="alert" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn-secondary" data-close-modal="continueThreadModal">取消</button>
+        <button type="submit" id="continueThreadSubmitBtn" class="btn-primary">新建接续会话</button>
       </div>
     </form>
   </dialog>
@@ -734,6 +755,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="./app.js?v=20261117qoder"></script>
+  <script type="module" src="./app.js?v=20261117continue"></script>
 </body>
 </html>

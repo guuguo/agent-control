@@ -816,11 +816,15 @@ export async function createAgentControlServer({
         return;
       }
 
-      if (pathname === "/api/thread/fork" && request.method === "POST") {
+      if (["/api/thread/fork", "/api/thread/continue"].includes(pathname) && request.method === "POST") {
         const body = await readJsonBody(request);
         context.threadId = body.threadId || "";
         const result = await hub.forkThread({
           threadId: body.threadId,
+          targetProvider: body.targetProvider || "",
+          targetProfileId: body.targetProfileId || "",
+          model: body.model || "",
+          effort: body.effort || "",
           ...(body.upToTurnIndex !== undefined && body.upToTurnIndex !== null ? { upToTurnIndex: Number(body.upToTurnIndex) } : {}),
           ...(body.upToTurnId ? { upToTurnId: String(body.upToTurnId) } : {}),
         });

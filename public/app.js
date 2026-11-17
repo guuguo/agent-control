@@ -2073,6 +2073,70 @@ async function forkThreadAction(threadId, { upToTurnIndex = null, upToTurnId = "
   }
 }
 
+function selectedContinueProfile() {
+  return state.profiles.find((profile) => `${profile.provider}:${profile.id}` === $("continueAgentSelect").value);
+}
+
+function syncContinueThreadEffort() {
+  const profile = selectedContinueProfile();
+  if (!profile) return;
+  const models = resolveModelsForProvider(state.modelsByProvider, state.allModels, profile.provider);
+  const model = models.find((item) => (item.id || item.model) === $("continueModelSelect").value);
+  const efforts = (model?.supportedReasoningEfforts || []).map(normalizeEffortOptionValue).filter(Boolean);
+  const select = $("continueEffortSelect");
+  const labels = { low: "低思考", medium: "中思考", high: "高思考", xhigh: "超高思考", max: "最高思考" };
+  select.innerHTML = efforts.length
+    ? efforts.map((effort) => `<option value="${escapeHtml(effort)}">${escapeHtml(labels[effort] || effort)}</option>`).join("")
+    : '<option value="">默认强度</option>';
+  select.disabled = !efforts.length;
+  const preferred = getNewThreadPrefs(profile.provider).effort;
+  select.value = efforts.includes(preferred) ? preferred : (model?.defaultReasoningEffort || efforts[0] || "");
+}
+
+function syncContinueThreadModels(preferredModel = "") {
+  const profile = selectedContinueProfile();
+  if (!profile) return;
+  const models = resolveModelsForProvider(state.modelsByProvider, state.allModels, profile.provider);
+  const select = $("continueModelSelect");
+  select.innerHTML = models.length ? renderModelOptionsHtml(models) : '<option value="">默认模型</option>';
+  const selected = pickDefaultModelForProvider(models, profile.provider, preferredModel || getNewThreadPrefs(profile.provider).model);
+  if (selected) select.value = selected.id || selected.model;
+  syncContinueThreadEffort();
+}
+
+async function refreshContinueThreadModels() {
+  const profile = selectedContinueProfile();
+  const submit = $("continueThreadSubmitBtn");
+  submit.disabled = !profile;
+  if (!profile) return;
+  syncContinueThreadModels();
+  submit.disabled = true;
+  await refreshModelsForProfile(profile.provider, profile.id);
+  if ($("continueAgentSelect").value === `${profile.provider}:${profile.id}`) {
+    syncContinueThreadModels($("continueModelSelect").value);
+    submit.disabled = false;
+  }
+}
+
+function openContinueThreadModal(threadId) {
+  const thread = state.threads.find((item) => item.id === threadId);
+  if (!thread) return;
+  const modal = $("continueThreadModal");
+  modal.dataset.threadId = threadId;
+  $("continueThreadSource").textContent = `接续：${thread.title || thread.name || "原会话"}`;
+  $("continueThreadError").hidden = true;
+  const profiles = state.profiles.filter((profile) => profile.installed && !profile.health?.disabled);
+  $("continueAgentSelect").innerHTML = profiles.length ? profiles.map((profile) =>
+    `<option value="${escapeHtml(`${profile.provider}:${profile.id}`)}">${escapeHtml(`${providerDisplayName(profile.provider)} · ${profile.label || profile.id}`)}</option>`,
+  ).join("") : '<option value="">暂无已安装的 Agent</option>';
+  const preferred = profiles.find((profile) => profile.provider !== thread.provider) || profiles[0];
+  if (preferred) $("continueAgentSelect").value = `${preferred.provider}:${preferred.id}`;
+  $("continueModelSelect").innerHTML = '<option value="">默认模型</option>';
+  $("continueEffortSelect").innerHTML = '<option value="">默认强度</option>';
+  modal.showModal();
+  void refreshContinueThreadModels();
+}
+
 function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
   closeThreadContextMenu();
   const thread = state.threads.find((t) => t.id === threadId);
@@ -2083,6 +2147,7 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
   menu.setAttribute("role", "menu");
   menu.innerHTML = `
     <button type="button" class="thread-context-menu-item" data-menu-action="fork">${iconSvg("fork", { size: 14 })}<span>分叉会话</span></button>
+    <button type="button" class="thread-context-menu-item" data-menu-action="continue-agent">${iconSvg("refresh", { size: 14 })}<span>换 Agent 继续</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="rename">${iconSvg("edit", { size: 14 })}<span>重命名</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="archive">${iconSvg("archive", { size: 14 })}<span>${thread.archived ? "取消归档" : "归档会话"}</span></button>
   `;
@@ -2117,6 +2182,8 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
 
     if (action === "fork") {
       await forkThreadAction(threadId);
+    } else if (action === "continue-agent") {
+      openContinueThreadModal(threadId);
     } else if (action === "rename") {
       const next = prompt("输入新的会话标题：", thread.title || thread.name || "");
       if (!next || !next.trim()) return;
@@ -10057,6 +10124,49 @@ function bindEvents() {
       cwd: state.activeThread?.cwd || state.newThreadCwd || "",
       provider: defaultNewThreadProvider(),
     });
+  });
+
+  $("continueAgentSelect").addEventListener("change", () => { void refreshContinueThreadModels(); });
+  $("continueModelSelect").addEventListener("change", syncContinueThreadEffort);
+  $("continueThreadForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const submit = $("continueThreadSubmitBtn");
+    const profile = selectedContinueProfile();
+    if (submit.disabled || !profile) return;
+    const modal = $("continueThreadModal");
+    const errorEl = $("continueThreadError");
+    const model = $("continueModelSelect").value;
+    const effort = $("continueEffortSelect").value;
+    const effortDisabled = $("continueEffortSelect").disabled;
+    for (const id of ["continueAgentSelect", "continueModelSelect", "continueEffortSelect"]) $(id).disabled = true;
+    errorEl.hidden = true;
+    submit.disabled = true;
+    submit.textContent = "创建中…";
+    try {
+      const result = await apiPost("api/thread/continue", {
+        threadId: modal.dataset.threadId,
+        targetProvider: profile.provider,
+        targetProfileId: profile.id,
+        model,
+        effort,
+      });
+      saveNewThreadPrefs(profile.provider, { model, effort });
+      if (state.providerFilter !== "all" && state.providerFilter !== profile.provider) setProviderFilter("all");
+      await refreshThreads();
+      await selectThread(result.thread.id);
+      modal.close();
+      $("promptInput").focus();
+      setComposerStatus("success", "已带入上下文，输入指令即可继续", { autoClearMs: 3000 });
+    } catch (error) {
+      errorEl.textContent = formatActionError(error, "创建接续会话失败");
+      errorEl.hidden = false;
+    } finally {
+      $("continueAgentSelect").disabled = false;
+      $("continueModelSelect").disabled = false;
+      $("continueEffortSelect").disabled = effortDisabled;
+      submit.disabled = false;
+      submit.textContent = "新建接续会话";
+    }
   });
 
   $("newThreadForm").addEventListener("submit", async (e) => {
