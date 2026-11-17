@@ -1,5 +1,6 @@
 import { iconSvg, providerIconSvg } from "./icons.js";
 import { extractCodexGoalContext } from "./codex-goal-context.js?v=20261117goalcontext";
+import { extractCodexSkillContexts } from "./codex-skill-context.js?v=20261117skill";
 
 export function escapeHtml(value) {
   return String(value ?? "")
@@ -1071,7 +1072,8 @@ function cleanUserBubbleText(value) {
 
 function extractClientCodexUserText(rawText = "") {
   const goal = extractCodexGoalContext(rawText);
-  let working = goal.text;
+  const skillContext = extractCodexSkillContexts(goal.text);
+  let working = skillContext.text;
   const images = [];
   const files = [];
   const questionReplies = [];
@@ -1086,6 +1088,7 @@ function extractClientCodexUserText(rawText = "") {
         questionReplies,
         heartbeat: parsedHb.heartbeat,
         goalContext: goal.goalContext,
+        skills: skillContext.skills,
         taskNotifications: [],
         crossSessionMessages: [],
         bashEvents: [],
@@ -1150,6 +1153,7 @@ function extractClientCodexUserText(rawText = "") {
     questionReplies,
     heartbeat: null,
     goalContext: goal.goalContext,
+    skills: skillContext.skills,
     taskNotifications: claudeEvents.taskNotifications,
     crossSessionMessages: claudeEvents.crossSessionMessages,
     bashEvents: claudeEvents.bashEvents,
@@ -1257,6 +1261,7 @@ export function parseUserMessageContent(item) {
     questionReplies,
     heartbeat,
     goalContext: item?.goalContext || parsedText.goalContext || null,
+    skills: parsedText.skills,
     taskNotifications: parsedText.taskNotifications || [],
     crossSessionMessages: parsedText.crossSessionMessages || [],
     bashEvents: parsedText.bashEvents || [],
@@ -1302,6 +1307,25 @@ function renderGoalContextCard(goalContext, { threadId = "" } = {}) {
         <span class="heartbeat-msg">${escapeHtml(objective)}</span>
       </summary>
       <div class="heartbeat-quiet-body md-body">${renderMarkdown(objective, { threadId })}</div>
+    </details>
+  </div>`;
+}
+
+function renderSkillContextCard(skill, { threadId = "" } = {}) {
+  const file = threadId
+    ? `<button type="button" class="msg-file-chip is-clickable" data-local-file-path="${escapeHtml(skill.path)}" title="${escapeHtml(skill.path)}">${iconSvg("paperclip", { size: 12 })}<span>打开 SKILL.md</span></button>`
+    : "";
+  return `<div class="msg-row msg-skill-context">
+    <details class="skill-context-card task-notif-card heartbeat-disclosure">
+      <summary class="task-notif-summary" title="展开技能说明">
+        <span class="task-notif-badge">${iconSvg("bolt", { size: 12 })}<span>技能加载</span></span>
+        <strong class="skill-context-name">${escapeHtml(skill.name)}</strong>
+        <span class="task-notif-chevron">${iconSvg("chevron-down", { size: 12 })}</span>
+      </summary>
+      <div class="task-notif-body">
+        <div class="skill-context-source"><code>${escapeHtml(skill.path)}</code>${file}${renderMessageCopyButton(skill.body)}</div>
+        <div class="skill-context-content md-body">${renderMarkdown(skill.body, { threadId, deferImages: true })}</div>
+      </div>
     </details>
   </div>`;
 }
@@ -1454,17 +1478,20 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
     questionReplies,
     heartbeat,
     goalContext,
+    skills,
     taskNotifications,
     crossSessionMessages,
     bashEvents,
     slashCommands,
   } = parseUserMessageContent(item);
   const hasNormalUserContent = Boolean(images.length || files.length || questionReplies.length || textParts.length);
+  const skillCards = skills.map((skill) => renderSkillContextCard(skill, { threadId }));
   if (heartbeat && !hasNormalUserContent) {
-    return renderHeartbeatUserTrigger(heartbeat, { threadId });
+    return skillCards.join("") + renderHeartbeatUserTrigger(heartbeat, { threadId });
   }
   const eventCards = [
     ...(goalContext ? [renderGoalContextCard(goalContext, { threadId })] : []),
+    ...skillCards,
     ...taskNotifications.map((n) => renderTaskNotificationCard(n, { threadId })),
     ...crossSessionMessages.map((m) => renderCrossSessionMessageCard(m, { threadId })),
     ...bashEvents.map((b) => renderClaudeBashCard(b)),

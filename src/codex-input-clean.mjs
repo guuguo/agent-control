@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { extractCodexGoalContext } from "../public/codex-goal-context.js";
+import { extractCodexSkillContexts } from "../public/codex-skill-context.js";
 
 const CODEX_IMAGE_TAG_RE = /<image\b([^>\n]*\b(?:name|path)\s*=[^>\n]*)>(?:\s*<\/image>)?/gi;
 const CODEX_IMAGE_TRUNCATED_RE = /<image\b(?=[^>\n]*\b(?:name|path)\s*=)[^>\n]*$/i;
@@ -357,7 +358,7 @@ export function stripCodexPromptWrappers(rawText = "") {
     preserveQuestionReplies: true,
     truncatedPreview: true,
   });
-  return extracted.text;
+  return extractCodexSkillContexts(extracted.text, { truncatedPreview: true }).text;
 }
 
 /**
