@@ -55,13 +55,13 @@ Requires **Node.js 22+** and **Git** (the installer guides you if missing).
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -91,13 +91,13 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.s
 **macOS / Linux:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
+curl -fsSL https://hub.guuguo.top/uninstall/agent-control.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://hub.guuguo.top/uninstall/agent-control.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---

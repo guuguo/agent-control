@@ -47,13 +47,13 @@
 **macOS / Linux**（打开「终端」粘贴回车）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 ```
 
 **Windows**（打开 **PowerShell** 粘贴回车）：
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -89,13 +89,13 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.s
 **macOS / Linux：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
+curl -fsSL https://hub.guuguo.top/uninstall/agent-control.sh | bash
 ```
 
 **Windows (PowerShell)：**
 
 ```powershell
-(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://hub.guuguo.top/uninstall/agent-control.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -121,16 +121,16 @@ agent-control update              # 拉取最新版本并更新桌面端
 
 ```bash
 # 默认：Cloudflare 免费临时隧道
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote cloudflare
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote cloudflare
 
 # Tailscale Funnel（0 元免域名固定链接）
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote tailscale
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote tailscale
 
 # 直接连接自己的中继服务器
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote relay --relay-url https://relay.example.com --invite 你的邀请码
 
 # 仅本机使用
-curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash -s -- --remote local
+curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash -s -- --remote local
 ```
 
 ### 3. 一键容器部署固定中继（Sealos 约 ¥5~15/月 · Docker）
