@@ -1,23 +1,24 @@
-import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117goalcontext";
-import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117goalcontext";
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117qoder";
+import { loadHiddenProviderTabs, saveHiddenProviderTabs, renderProviderTabsHtml, renderProviderTabsSettingsHtml, visibleProviderFilter } from "./provider-tabs.js?v=20261117qoder";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117qoder";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
   submitComposerRequest,
-} from "./composer-mode.js?v=20261117goalcontext";
+} from "./composer-mode.js?v=20261117qoder";
 import {
   closeCustomSelectMenu,
   initComposerCustomSelects,
   syncAllCustomSelects,
-} from "./custom-select.js?v=20261117goalcontext";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117goalcontext";
+} from "./custom-select.js?v=20261117qoder";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117qoder";
 import {
   compressImageFileForUpload,
   estimateDataUrlBytes,
   formatByteSize,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261117goalcontext";
+} from "./image-attachment.js?v=20261117qoder";
 import {
   abbreviateMiddleText,
   buildSelectableTelemetryItems,
@@ -48,8 +49,8 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261117goalcontext";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117goalcontext";
+} from "./instance-switcher.js?v=20261117qoder";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117qoder";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
@@ -64,7 +65,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261117goalcontext";
+} from "./markdown.js?v=20261117qoder";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -78,14 +79,14 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261117goalcontext";
-import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117goalcontext";
+} from "./project-board.js?v=20261117qoder";
+import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117qoder";
 import {
   applySlashCommandSelection,
   filterSlashCommands,
   parseSlashTrigger,
   renderSlashMenuHtml,
-} from "./slash-commands.js?v=20261117goalcontext";
+} from "./slash-commands.js?v=20261117qoder";
 import {
   base64ToUint8Array,
   buildVoiceLiveProgressItems,
@@ -108,7 +109,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261117goalcontext";
+} from "./voice-copilot.js?v=20261117qoder";
 
 const $ = (id) => document.getElementById(id);
 
@@ -467,6 +468,7 @@ const state = {
   projectsMeta: {},
   warnings: [],
   providerFilter: "all",
+  hiddenProviderTabs: loadHiddenProviderTabs(),
   profileFilter: "all",
   quotaExpanded: false,
   quotaRefreshing: false,
@@ -756,12 +758,14 @@ function defaultNewThreadProvider() {
 }
 
 function setProviderFilter(nextFilter = "all") {
-  state.providerFilter = nextFilter || "all";
-  for (const tab of $("providerTabs")?.querySelectorAll(".provider-tab") || []) {
-    tab.classList.toggle("is-active", tab.dataset.provider === state.providerFilter);
-  }
+  state.providerFilter = visibleProviderFilter(nextFilter || "all", state.hiddenProviderTabs);
   syncProfileSelectors();
   renderThreadList();
+}
+
+function renderProviderTabs() {
+  $("providerTabs").innerHTML = renderProviderTabsHtml(state.hiddenProviderTabs, state.providerFilter);
+  $("providerTabsSettingsMenu").innerHTML = renderProviderTabsSettingsHtml(state.hiddenProviderTabs);
 }
 
 function defaultProfileForProvider(provider) {
@@ -915,11 +919,12 @@ function currentComposerProfileId() {
 }
 
 function syncProfileSelectors() {
+  renderProviderTabs();
   state.profileFilter = "all";
 
   const providerSelect = $("composerProviderSelect");
   const newProviderSelect = $("newProviderSelect");
-  const providerOpts = ["antigravity", "codex", "claude", "grok"].map((id) =>
+  const providerOpts = ["antigravity", "codex", "claude", "grok", "qoder"].map((id) =>
     `<option value="${id}">${escapeHtml(providerDisplayName(id))}</option>`,
   ).join("");
   const prevCompProvider = providerSelect.dataset.initialized ? providerSelect.value : defaultProviderValue();
@@ -1049,7 +1054,7 @@ function buildMergedTelemetrySnapshot(nowMs = Date.now()) {
   let queuedCount = 0;
   let tokensPerSec = 0;
 
-  for (const prov of ["codex", "claude", "antigravity", "grok"]) {
+  for (const prov of ["codex", "claude", "antigravity", "grok", "qoder"]) {
     const serverStat = base?.byProvider?.[prov] || {};
     const liveThreadsFallback = base
       ? []
@@ -5833,7 +5838,13 @@ async function triggerRestartService() {
     });
   } catch (error) {
     try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
-    showToastBanner("重启服务失败", { detail: formatActionError(error, "重启失败"), error: true });
+    const errMsg = Number(error?.status) === 404
+      ? "当前后台进程尚未加载重启接口，请先在终端执行一次 restart"
+      : formatActionError(error, "重启失败");
+    if (state.updateStatus) {
+      state.updateStatus = { ...state.updateStatus, phase: "error", phaseMessage: errMsg, lastError: errMsg };
+    }
+    showToastBanner("重启服务失败", { detail: errMsg, error: true });
   } finally {
     renderUpdateIndicators();
     if ($("updateModal")?.open) renderUpdateModal();
@@ -8589,6 +8600,21 @@ function bindEvents() {
     if (!btn) return;
     setProviderFilter(btn.dataset.provider);
   });
+  $("providerTabsSettingsMenu").addEventListener("change", (e) => {
+    const input = e.target.closest("[data-provider-tab-visible]");
+    if (!input) return;
+    const id = input.dataset.providerTabVisible;
+    state.hiddenProviderTabs = state.hiddenProviderTabs.filter((value) => value !== id);
+    if (!input.checked) state.hiddenProviderTabs.push(id);
+    saveHiddenProviderTabs(state.hiddenProviderTabs);
+    setProviderFilter(state.providerFilter);
+  });
+  $("providerTabsSettingsMenu").addEventListener("click", (e) => {
+    if (!e.target.closest("[data-provider-tabs-reset]")) return;
+    state.hiddenProviderTabs = [];
+    saveHiddenProviderTabs([]);
+    setProviderFilter(state.providerFilter);
+  });
 
   $("agentQuotaStrip")?.addEventListener("click", (e) => {
     if (e.target.closest("[data-quota-refresh]")) {
@@ -10783,6 +10809,7 @@ async function checkUiVersionAndReloadIfStale() {
 }
 
 async function init() {
+  renderProviderTabs();
   window.addEventListener("online", () => {
     if (!state.sseConnected || !state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
       connectEvents();
