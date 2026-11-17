@@ -79,7 +79,7 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261117qoder";
+} from "./project-board.js?v=20261118threadmenu";
 import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117qoder";
 import {
   applySlashCommandSelection,
@@ -9020,6 +9020,13 @@ function bindEvents() {
   });
 
   $("threadList").addEventListener("click", (e) => {
+    const menuBtn = e.target.closest("[data-thread-menu]");
+    if (menuBtn) {
+      e.stopPropagation();
+      const rect = menuBtn.getBoundingClientRect();
+      openThreadContextMenu(menuBtn.dataset.threadMenu, rect.right, rect.bottom);
+      return;
+    }
     const foldBtn = e.target.closest("[data-batch-fold-cwd]");
     if (foldBtn) {
       e.stopPropagation();

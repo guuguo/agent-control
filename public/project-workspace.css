@@ -178,6 +178,43 @@
   border-left: 1px solid rgba(118, 145, 192, 0.2);
 }
 
+.thread-item-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.thread-item-menu-btn { display: none; }
+
+@media (pointer: coarse), (max-width: 960px) {
+  .thread-item-wrap.has-menu .thread-item {
+    min-height: 44px;
+    padding-right: 48px;
+  }
+
+  .thread-item-menu-btn {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    touch-action: manipulation;
+  }
+
+  .thread-item-menu-btn:focus-visible,
+  .thread-item-menu-btn:active { background: rgba(76, 141, 255, 0.14); }
+
+  .thread-context-menu-item { min-height: 44px; }
+}
+
 .thread-item {
   width: 100%;
   text-align: left;

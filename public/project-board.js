@@ -630,6 +630,7 @@ function renderSidebarProjectGroupHtml(group, {
         const timeHtml = !t.live ? `<span class="thread-item-time">${escapeHtml(formatCompactRelativeTime(t.updatedAt))}</span>` : "";
 
         return `
+          <div class="thread-item-wrap${selectionMode ? "" : " has-menu"}">
           <button type="button" class="${itemClasses}" data-thread-id="${escapeHtml(t.id)}"${selectionMode ? ` aria-pressed="${isBatchChecked ? "true" : "false"}"` : ""}>
             <span class="thread-item-top">
               ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
@@ -644,6 +645,8 @@ function renderSidebarProjectGroupHtml(group, {
               </span>
             ` : ""}
           </button>
+          ${!selectionMode ? `<button type="button" class="thread-item-menu-btn" data-thread-menu="${escapeHtml(t.id)}" aria-label="更多操作" aria-haspopup="menu" title="更多操作">${iconSvg("more", { size: 16 })}</button>` : ""}
+          </div>
         `;
       }).join("")}
       ${hiddenCount > 0 ? (() => {
