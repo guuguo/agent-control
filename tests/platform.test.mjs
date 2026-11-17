@@ -316,6 +316,7 @@ test("service renderers emit valid launchd, systemd, and Windows runner artifact
   });
   assert.match(winScripts.cmdContent, /^@echo off\r\nchcp 65001 >nul\r\n/);
   assert.match(winScripts.cmdContent, /set "PORT=43310"/);
+  assert.match(winScripts.cmdContent, /set "PYTHONUTF8=1"/);
   assert.match(winScripts.cmdContent, /cd \/d "D:\\dev\\agent-control"/);
   assert.match(winScripts.vbsContent, /WScript\.Shell/);
   const vbsBuf = encodeWindowsVbsBuffer(winScripts.vbsContent);

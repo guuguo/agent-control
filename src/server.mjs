@@ -1294,13 +1294,34 @@ const isMain = Boolean(
   && (process.platform === "win32" ? entryArg.toLowerCase() === entrySelf.toLowerCase() : entryArg === entrySelf),
 );
 if (isMain) {
-  const control = await createAgentControlServer();
-  await control.start();
-  process.stdout.write(`Agent Control listening at ${control.url} (instance=${control.identity.instanceId})\n`);
-  const shutdown = async () => {
-    await control.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  try {
+    const control = await createAgentControlServer();
+    await control.start();
+    process.stdout.write(`Agent Control listening at ${control.url} (instance=${control.identity.instanceId})\n`);
+    const shutdown = async () => {
+      await control.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  } catch (err) {
+    const port = process.env.PORT || "43310";
+    const host = process.env.HOST || "127.0.0.1";
+    const dataDir = defaultDataDir(process.env);
+    let hint = "请检查下方错误详情与最近日志。";
+    if (err?.code === "EADDRINUSE") {
+      hint = `端口 ${port} 已被占用，可设置 PORT=43315 后重启服务。`;
+    } else if (err?.code === "EACCES") {
+      hint = `无权监听 ${host}:${port}（Windows 常见于 Hyper-V/WSL2 保留端口段），可改用 PORT=43315 重试。`;
+    }
+    process.stderr.write([
+      `[Agent Control 启动失败] ${err?.message || err}`,
+      `排查提示: ${hint}`,
+      `数据目录: ${dataDir}`,
+      `日志目录: ${resolve(dataDir, "logs")}`,
+      err?.stack ? `堆栈:\n${err.stack}` : "",
+      "",
+    ].filter(Boolean).join("\n"));
+    process.exit(1);
+  }
 }

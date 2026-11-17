@@ -122,6 +122,8 @@ export function renderWindowsRunScripts({
     "setlocal",
     `set "PORT=${String(port)}"`,
     `set "AGENT_CONTROL_DATA_DIR=${String(dataDir)}"`,
+    'set "PYTHONUTF8=1"',
+    'set "PYTHONIOENCODING=utf-8"',
     `cd /d "${String(rootDir)}"`,
     `"${String(nodeBin)}" "${String(serverEntry)}" >> "${stdoutLog}" 2>> "${stderrLog}"`,
     "",
@@ -165,6 +167,8 @@ function spawnDetachedWindowsServer({
         ...process.env,
         PORT: String(port),
         AGENT_CONTROL_DATA_DIR: String(dataDir),
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
       },
       detached: true,
       windowsHide: true,
@@ -206,13 +210,25 @@ function printLogs(dataDir) {
 function printStatus(dataDir) {
   const lease = readLease(dataDir);
   const leaseFile = join(dataDir, "control-runtime.json");
+  const logDir = join(dataDir, "logs");
   if (!lease) {
-    process.stderr.write(`未检测到运行中的 Agent Control 租约 (${leaseFile})\n`);
+    process.stderr.write([
+      `未检测到运行中的 Agent Control 租约 (${leaseFile})`,
+      `排查路径:`,
+      `  源码目录: ${ROOT_DIR}`,
+      `  日志目录: ${logDir}`,
+      `  查看日志: node scripts/service.mjs logs`,
+      `  前台启动: node scripts/service.mjs run`,
+      "",
+    ].join("\n"));
     process.exit(1);
   }
   const alive = isProcessAlive(lease.pid);
-  process.stdout.write(`${JSON.stringify({ ...lease, alive }, null, 2)}\n`);
-  if (!alive) process.exit(1);
+  process.stdout.write(`${JSON.stringify({ ...lease, alive, dataDir, logDir, rootDir: ROOT_DIR }, null, 2)}\n`);
+  if (!alive) {
+    process.stderr.write(`进程 pid=${lease.pid} 已退出，请执行 node scripts/service.mjs logs 或查看 ${join(logDir, "stderr.log")}\n`);
+    process.exit(1);
+  }
 }
 
 function tryExec(bin, args, opts = {}) {
