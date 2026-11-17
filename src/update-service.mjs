@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { normalizePlatform, prepareCrossPlatformSpawn, resolveExecutableCrossPlatform, resolveUserHome } from "./platform.mjs";
+import { resolveServerNodeArgs } from "../scripts/service.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -1182,7 +1183,7 @@ export class UpdateService {
       await this.#onUnattendedRestart();
     }
     const serverEntry = resolve(this.#rootDir, "src", "server.mjs");
-    const prepared = prepareCrossPlatformSpawn(process.execPath, [serverEntry], {
+    const prepared = prepareCrossPlatformSpawn(process.execPath, resolveServerNodeArgs(serverEntry), {
       cwd: this.#rootDir,
       env: this.#env,
       detached: true,

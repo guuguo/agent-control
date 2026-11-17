@@ -263,8 +263,14 @@ function tryExec(bin, args, opts = {}) {
 function stopWindowsInstance(dataDir) {
   const lease = readLease(dataDir);
   if (lease?.pid && isProcessAlive(lease.pid)) {
-    tryExec("taskkill", ["/PID", String(lease.pid), "/T", "/F"]);
-    try { process.kill(Number(lease.pid)); } catch {}
+    const targetPid = Number(lease.pid);
+    // Avoid /T when service.mjs was spawned by the target server itself (e.g. self-update restart),
+    // otherwise taskkill /T terminates this restart helper before it can spawn the new server.
+    const args = targetPid === process.ppid
+      ? ["/PID", String(targetPid), "/F"]
+      : ["/PID", String(targetPid), "/T", "/F"];
+    tryExec("taskkill", args);
+    try { process.kill(targetPid); } catch {}
   }
 }
 
