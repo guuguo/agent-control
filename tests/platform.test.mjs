@@ -323,4 +323,13 @@ test("service renderers emit valid launchd, systemd, and Windows runner artifact
   assert.equal(vbsBuf[0], 0xff);
   assert.equal(vbsBuf[1], 0xfe);
   assert.equal(vbsBuf.subarray(2).toString("utf16le"), winScripts.vbsContent);
+
+  const legacyNodeWin = renderWindowsRunScripts({
+    nodeBin: "C:\\Program Files\\nodejs\\node.exe",
+    rootDir: "D:\\dev\\agent-control",
+    serverEntry: "D:\\dev\\agent-control\\src\\server.mjs",
+    dataDir: "C:\\Users\\Admin\\AppData\\Roaming\\Agent Control",
+    nodeVersion: "22.9.0",
+  });
+  assert.match(legacyNodeWin.cmdContent, /"--experimental-sqlite" "D:\\dev\\agent-control\\src\\server\.mjs"/);
 });

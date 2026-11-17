@@ -29,6 +29,17 @@ function systemdQuote(str) {
   return `"${String(str || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
 }
 
+export function resolveServerNodeArgs(serverEntry = SERVER_ENTRY, nodeVersion = process.versions.node) {
+  const [major = 0, minor = 0] = String(nodeVersion || "")
+    .replace(/^v/i, "")
+    .split(".")
+    .map((n) => Number.parseInt(n, 10) || 0);
+  // Node 22.5~22.12 requires --experimental-sqlite to expose node:sqlite; 22.13+ enables it by default.
+  return major === 22 && minor >= 5 && minor < 13
+    ? ["--experimental-sqlite", serverEntry]
+    : [serverEntry];
+}
+
 export function renderLaunchdPlist({
   nodeBin = process.execPath,
   rootDir = ROOT_DIR,
@@ -36,9 +47,13 @@ export function renderLaunchdPlist({
   port = "43310",
   dataDir = resolvePlatformDataDir({ platform: "darwin" }),
   homeDir = resolveUserHome(process.env, "darwin"),
+  nodeVersion = process.versions.node,
 } = {}) {
   const logDir = join(dataDir, "logs");
   const pathValue = `/opt/homebrew/bin:/usr/local/bin:${homeDir}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+  const programArgs = [nodeBin, ...resolveServerNodeArgs(serverEntry, nodeVersion)]
+    .map((arg) => `    <string>${xmlEscape(arg)}</string>`)
+    .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -47,8 +62,7 @@ export function renderLaunchdPlist({
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${xmlEscape(nodeBin)}</string>
-    <string>${xmlEscape(serverEntry)}</string>
+${programArgs}
   </array>
   <key>WorkingDirectory</key>
   <string>${xmlEscape(rootDir)}</string>
@@ -80,8 +94,10 @@ export function renderSystemdUnit({
   serverEntry = SERVER_ENTRY,
   port = "43310",
   dataDir = resolvePlatformDataDir({ platform: "linux" }),
+  nodeVersion = process.versions.node,
 } = {}) {
   const logDir = join(dataDir, "logs");
+  const execArgs = resolveServerNodeArgs(serverEntry, nodeVersion).map(systemdQuote).join(" ");
   return `[Unit]
 Description=Agent Control Local Console
 After=network.target
@@ -89,7 +105,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${systemdQuote(rootDir)}
-ExecStart=${systemdQuote(nodeBin)} ${systemdQuote(serverEntry)}
+ExecStart=${systemdQuote(nodeBin)} ${execArgs}
 Environment=${systemdQuote(`PORT=${port}`)}
 Environment=${systemdQuote(`AGENT_CONTROL_DATA_DIR=${dataDir}`)}
 Restart=always
@@ -108,6 +124,7 @@ export function renderWindowsRunScripts({
   serverEntry = SERVER_ENTRY,
   port = "43310",
   dataDir = resolvePlatformDataDir({ platform: "win32" }),
+  nodeVersion = process.versions.node,
 } = {}) {
   const binDir = join(dataDir, "bin");
   const logDir = join(dataDir, "logs");
@@ -115,6 +132,9 @@ export function renderWindowsRunScripts({
   const vbsPath = join(binDir, "run-hidden.vbs");
   const stdoutLog = join(logDir, "stdout.log");
   const stderrLog = join(logDir, "stderr.log");
+  const nodeArgs = resolveServerNodeArgs(serverEntry, nodeVersion)
+    .map((arg) => `"${String(arg)}"`)
+    .join(" ");
 
   const cmdContent = [
     "@echo off",
@@ -125,7 +145,7 @@ export function renderWindowsRunScripts({
     'set "PYTHONUTF8=1"',
     'set "PYTHONIOENCODING=utf-8"',
     `cd /d "${String(rootDir)}"`,
-    `"${String(nodeBin)}" "${String(serverEntry)}" >> "${stdoutLog}" 2>> "${stderrLog}"`,
+    `"${String(nodeBin)}" ${nodeArgs} >> "${stdoutLog}" 2>> "${stderrLog}"`,
     "",
   ].join("\r\n");
 
@@ -161,7 +181,7 @@ function spawnDetachedWindowsServer({
   const outFd = openSync(stdoutPath, "a");
   const errFd = openSync(stderrPath, "a");
   try {
-    const child = spawn(nodeBin, [serverEntry], {
+    const child = spawn(nodeBin, resolveServerNodeArgs(serverEntry), {
       cwd: rootDir,
       env: {
         ...process.env,
@@ -268,7 +288,7 @@ function runCommand(cmd = "run") {
   const logDir = join(dataDir, "logs");
 
   if (cmd === "run") {
-    const child = spawn(process.execPath, [SERVER_ENTRY], {
+    const child = spawn(process.execPath, resolveServerNodeArgs(SERVER_ENTRY), {
       cwd: ROOT_DIR,
       env: process.env,
       stdio: "inherit",
@@ -355,18 +375,24 @@ function runCommand(cmd = "run") {
         execFileSync(
           "schtasks",
           ["/Create", "/TN", WIN_TASK_NAME, "/SC", "ONLOGON", "/TR", taskCmd, "/F"],
-          { stdio: "inherit", windowsHide: true },
+          { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", windowsHide: true },
         );
       } catch (err) {
         taskInstalled = false;
-        process.stderr.write(`警告: 注册登录自启任务失败 (${err?.message || err})，将继续直接启动后台服务。\n`);
+        const detail = `${err?.stderr || ""}\n${err?.stdout || ""}\n${err?.message || ""}`.trim();
+        const isAccessDenied = /access is denied|拒绝访问|privilege|elevation/i.test(detail);
+        process.stderr.write(
+          isAccessDenied
+            ? "提示: 当前为普通用户权限，已跳过开机自启注册（不影响本次使用，将继续直接启动后台服务）。\n"
+            : `提示: 未能注册开机自启任务（不影响本次使用，将继续直接启动后台服务）。原因: ${err?.message || err}\n`,
+        );
       }
       stopWindowsInstance(dataDir);
       const pid = spawnDetachedWindowsServer({ port, dataDir, logDir });
       process.stdout.write(
         taskInstalled
           ? `已安装 Windows 登录自启任务 (${WIN_TASK_NAME}) 并在后台启动 (pid=${pid})\n`
-          : `已在后台启动 Windows 服务 (pid=${pid})，未注册开机自启\n`,
+          : `已在后台启动 Windows 服务 (pid=${pid})，本次可直接使用；如需开机自启，请以管理员身份运行: node "${fileURLToPath(import.meta.url)}" install\n`,
       );
       return;
     }
