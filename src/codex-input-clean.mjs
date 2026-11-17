@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { extractCodexGoalContext } from "../public/codex-goal-context.js";
 
 const CODEX_IMAGE_TAG_RE = /<image\b([^>\n]*\b(?:name|path)\s*=[^>\n]*)>(?:\s*<\/image>)?/gi;
 const CODEX_IMAGE_TRUNCATED_RE = /<image\b(?=[^>\n]*\b(?:name|path)\s*=)[^>\n]*$/i;
@@ -242,7 +243,8 @@ export function extractCodexUserAttachmentsAndText(rawText = "", {
   preserveQuestionReplies = false,
   truncatedPreview = false,
 } = {}) {
-  let working = String(rawText || "").replace(/\r\n?/g, "\n");
+  const goal = extractCodexGoalContext(rawText, { truncatedPreview });
+  let working = goal.text;
   const images = [];
   const files = [];
   const questionReplies = [];
@@ -256,6 +258,7 @@ export function extractCodexUserAttachmentsAndText(rawText = "", {
         files,
         questionReplies,
         heartbeat: parsedHb.heartbeat,
+        goalContext: goal.goalContext,
       };
     }
   }
@@ -342,6 +345,7 @@ export function extractCodexUserAttachmentsAndText(rawText = "", {
     files,
     questionReplies,
     heartbeat: null,
+    goalContext: goal.goalContext,
   };
 }
 
@@ -548,6 +552,7 @@ export function normalizeCodexUserMessageItem(item, { automationNames = null } =
     content: nextContent,
     ...(mergedReplies.length ? { questionReplies: mergedReplies } : {}),
     ...(mergedHeartbeat ? { heartbeat: mergedHeartbeat } : {}),
+    ...((item.goalContext || extracted.goalContext) ? { goalContext: item.goalContext || extracted.goalContext } : {}),
   };
 }
 

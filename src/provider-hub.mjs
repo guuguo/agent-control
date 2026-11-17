@@ -66,6 +66,7 @@ function extractLastAgentMessageFromCodexParams(params) {
 const DEFAULT_SSE_INLINE_DATA_CHARS = 24 * 1024;
 const DEFAULT_THREAD_SINGLE_IMAGE_CHARS = 2_200_000;
 const DEFAULT_THREAD_TOTAL_IMAGE_CHARS = 4_200_000;
+const DEFAULT_THREAD_TOOL_TEXT_CHARS = 24 * 1024;
 const MAX_PREVIEW_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_PREVIEW_OUTPUT_FILE_BYTES = 80 * 1024 * 1024;
 
@@ -450,6 +451,89 @@ export function capOversizedThreadInlineImages(thread, {
     }
   }
 
+  return turnsChanged ? { ...thread, turns: nextTurns } : thread;
+}
+
+function truncateToolTextForRead(str, maxChars) {
+  if (typeof str !== "string" || str.length <= maxChars) return str;
+  const cleaned = str
+    .replace(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]{256,}/gi, "[图片Base64已省略]")
+    .replace(/"data"\s*:\s*"[A-Za-z0-9+/=\s]{4096,}"/g, '"data":"[Base64已省略]"');
+  if (cleaned.length <= maxChars) return cleaned;
+  return `${cleaned.slice(0, maxChars)}…[已省略 ${cleaned.length - maxChars} 字符]`;
+}
+
+/**
+ * Cap oversized tool-call payloads on initial/summary thread reads (detail !== "full")
+ * so megabyte-scale MCP/command outputs or JSON-wrapped base64 images don't bloat /api/thread.
+ */
+export function capOversizedThreadToolOutputs(thread, {
+  maxToolTextChars = DEFAULT_THREAD_TOOL_TEXT_CHARS,
+} = {}) {
+  if (!thread || typeof thread !== "object" || !Array.isArray(thread.turns) || !thread.turns.length) {
+    return thread;
+  }
+  let turnsChanged = false;
+  const nextTurns = thread.turns.map((turn) => {
+    if (!turn || !Array.isArray(turn.items) || !turn.items.length) return turn;
+    let itemsChanged = false;
+    const nextItems = turn.items.map((item) => {
+      if (!item || typeof item !== "object") return item;
+      if (item.type !== "mcpToolCall" && item.type !== "commandExecution" && item.type !== "fileChange") {
+        return item;
+      }
+      let nextItem = null;
+      const ensureItem = () => {
+        if (!nextItem) nextItem = { ...item };
+        return nextItem;
+      };
+      if (typeof item.aggregatedOutput === "string" && item.aggregatedOutput.length > maxToolTextChars) {
+        ensureItem().aggregatedOutput = truncateToolTextForRead(item.aggregatedOutput, maxToolTextChars);
+      }
+      if (typeof item.output === "string" && item.output.length > maxToolTextChars) {
+        ensureItem().output = truncateToolTextForRead(item.output, maxToolTextChars);
+      }
+      if (item.result && typeof item.result === "object") {
+        let nextResult = null;
+        const ensureResult = () => {
+          if (!nextResult) nextResult = { ...item.result };
+          return nextResult;
+        };
+        if (typeof item.result.output === "string" && item.result.output.length > maxToolTextChars) {
+          ensureResult().output = truncateToolTextForRead(item.result.output, maxToolTextChars);
+        }
+        if (Array.isArray(item.result.content)) {
+          let contentChanged = false;
+          const nextContent = item.result.content.map((part) => {
+            if (!part || typeof part !== "object") return part;
+            if (typeof part.text === "string" && part.text.length > maxToolTextChars) {
+              contentChanged = true;
+              return { ...part, text: truncateToolTextForRead(part.text, maxToolTextChars) };
+            }
+            if (typeof part.content === "string" && part.content.length > maxToolTextChars) {
+              contentChanged = true;
+              return { ...part, content: truncateToolTextForRead(part.content, maxToolTextChars) };
+            }
+            return part;
+          });
+          if (contentChanged) {
+            ensureResult().content = nextContent;
+          }
+        }
+        if (nextResult) {
+          ensureItem().result = nextResult;
+        }
+      }
+      if (nextItem) {
+        itemsChanged = true;
+        return nextItem;
+      }
+      return item;
+    });
+    if (!itemsChanged) return turn;
+    turnsChanged = true;
+    return { ...turn, items: nextItems };
+  });
   return turnsChanged ? { ...thread, turns: nextTurns } : thread;
 }
 
@@ -2004,7 +2088,9 @@ export class ProviderHub {
         ...forkDraft,
         turns: forkDraft.prefixTurns || [],
       }, { fromReadThread: true });
-      const thread = detail !== "full" ? capOversizedThreadInlineImages(enriched) : enriched;
+      const thread = detail !== "full"
+        ? capOversizedThreadToolOutputs(capOversizedThreadInlineImages(enriched))
+        : enriched;
       return {
         thread,
         hasMoreTurns: false,
@@ -2048,7 +2134,9 @@ export class ProviderHub {
       ...(forkParent ? { turns: rawTurns } : {}),
       nativeQueuedCount: nativeQueuedTurns.length,
     }, { fromReadThread: true });
-    const thread = detail !== "full" ? capOversizedThreadInlineImages(enriched) : enriched;
+    const thread = detail !== "full"
+      ? capOversizedThreadToolOutputs(capOversizedThreadInlineImages(enriched))
+      : enriched;
     const controlQueued = this.#queue.list(compositeId);
     const queuedTurns = mergeQueuedTurnLists(nativeQueuedTurns, controlQueued);
     const cqSig = controlQueued.map((item) => item.id).join(",");

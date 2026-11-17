@@ -7,6 +7,27 @@ export const SIDEBAR_STALE_THREAD_AGE_SEC = 12 * 3600;
 export const SIDEBAR_MANUAL_HOLD_MS = 30 * 60 * 1000;
 export const SIDEBAR_ACTIVE_LIVE_WINDOW_SEC = 20 * 60;
 export const SIDEBAR_AUTO_EXPAND_LIVE_COUNT = 2;
+export const THREAD_EXPAND_STEP = 10;
+
+function resolveExtraExpandedCount(expandedStore, cwd, step = THREAD_EXPAND_STEP) {
+  if (!expandedStore || !cwd) return 0;
+  if (expandedStore instanceof Map) {
+    const val = expandedStore.get(cwd);
+    if (val === true || val === Infinity) return Infinity;
+    const num = Math.floor(Number(val) || 0);
+    return num > 0 ? num : 0;
+  }
+  if (expandedStore instanceof Set) {
+    return expandedStore.has(cwd) ? step : 0;
+  }
+  if (typeof expandedStore === "object") {
+    const val = expandedStore[cwd];
+    if (val === true || val === Infinity) return Infinity;
+    const num = Math.floor(Number(val) || 0);
+    return num > 0 ? num : 0;
+  }
+  return 0;
+}
 
 export function toEpochSeconds(value) {
   const n = Number(value);
@@ -502,7 +523,7 @@ function renderSidebarProjectGroupHtml(group, {
     activeLiveWindowSec,
     autoExpandLiveCount,
   });
-  const isExpandedAll = hasQuery || Boolean(expandedSidebarGroups?.has?.(cwd));
+  const extraExpandedCount = hasQuery ? Infinity : resolveExtraExpandedCount(expandedSidebarGroups, cwd, THREAD_EXPAND_STEP);
   const groupTitle = group.name || projectBaseName(cwd);
 
   const mustKeep = (t) => (
@@ -541,10 +562,16 @@ function renderSidebarProjectGroupHtml(group, {
   const defaultHiddenItems = allItems.filter((t) => !defaultVisibleIds.has(t.id));
   const allHiddenAreStale = defaultHiddenItems.length > 0
     && defaultHiddenItems.every((t) => isStaleThread(t) && !mustKeep(t));
-  const visibleItems = isExpandedAll
+  const revealedHiddenSlice = hasQuery
+    ? defaultHiddenItems
+    : defaultHiddenItems.slice(0, Math.min(extraExpandedCount, defaultHiddenItems.length));
+  const revealedHiddenIds = new Set(revealedHiddenSlice.map((t) => t.id));
+  const visibleItems = hasQuery
     ? allItems
-    : allItems.filter((t) => defaultVisibleIds.has(t.id));
-  const hiddenCount = isExpandedAll ? 0 : defaultHiddenItems.length;
+    : allItems.filter((t) => defaultVisibleIds.has(t.id) || revealedHiddenIds.has(t.id));
+  const hiddenCount = hasQuery ? 0 : Math.max(0, defaultHiddenItems.length - revealedHiddenSlice.length);
+  const expandedCount = hasQuery ? 0 : revealedHiddenSlice.length;
+  const kindSuffix = `${allHiddenAreStale ? "较早" : ""}会话`;
 
   const selectedSet = toSelectedIdSet(selectedThreadIds);
   const groupSel = selectionMode ? computeProjectGroupSelectionState(group, selectedSet) : null;
@@ -619,11 +646,25 @@ function renderSidebarProjectGroupHtml(group, {
           </button>
         `;
       }).join("")}
-      ${hiddenCount > 0 ? `
-        <button type="button" class="sidebar-more-btn" data-sidebar-expand-cwd="${escapeHtml(cwd)}">
-          展开其余 ${hiddenCount} 条${allHiddenAreStale ? "较早" : ""}会话
-        </button>
-      ` : (!hasQuery && expandedSidebarGroups?.has?.(cwd) && defaultHiddenItems.length > 0 ? `
+      ${hiddenCount > 0 ? (() => {
+        const expandLabel = hiddenCount <= THREAD_EXPAND_STEP
+          ? `展开其余 ${hiddenCount} 条${kindSuffix}`
+          : `${expandedCount > 0 ? "继续展开" : "展开"} ${THREAD_EXPAND_STEP} 条${kindSuffix}（剩余 ${hiddenCount} 条）`;
+        const expandBtn = `
+          <button type="button" class="sidebar-more-btn" data-sidebar-expand-cwd="${escapeHtml(cwd)}">
+            ${expandLabel}
+          </button>
+        `;
+        if (!hasQuery && expandedCount > 0) {
+          return `
+            <div class="sidebar-more-row">
+              ${expandBtn}
+              <button type="button" class="sidebar-more-btn is-collapse is-inline" data-sidebar-collapse-cwd="${escapeHtml(cwd)}">收起</button>
+            </div>
+          `;
+        }
+        return expandBtn;
+      })() : (!hasQuery && expandedCount > 0 ? `
         <button type="button" class="sidebar-more-btn is-collapse" data-sidebar-collapse-cwd="${escapeHtml(cwd)}">
           ${allHiddenAreStale ? "收起较早会话" : "收起会话列表"}
         </button>
@@ -757,13 +798,18 @@ export function renderSidebarThreadListHtml(groups = [], {
 function renderProjectCardHtml(group, {
   activeThreadId = "",
   expanded = false,
+  extraExpandedCount = 0,
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
 } = {}) {
-  const visibleCount = expanded ? group.threads.length : 4;
+  const baseLimit = 4;
+  const visibleCount = expanded === true
+    ? group.threads.length
+    : Math.min(group.threads.length, baseLimit + Math.max(0, Number(extraExpandedCount) || 0));
   const shownThreads = group.threads.slice(0, visibleCount);
   const hiddenCount = Math.max(0, group.threads.length - shownThreads.length);
+  const actualExpanded = Math.max(0, shownThreads.length - baseLimit);
   const selectedSet = toSelectedIdSet(selectedThreadIds);
   const groupSel = selectionMode ? computeProjectGroupSelectionState(group, selectedSet) : null;
   const cardClasses = [
@@ -822,11 +868,25 @@ function renderProjectCardHtml(group, {
       <div class="board-task-list">
         ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles })).join("")}
       </div>
-      ${hiddenCount > 0 ? `
-        <button type="button" class="board-expand-tasks-btn" data-expand-project-cwd="${escapeHtml(group.cwd)}">
-          展开其余 ${hiddenCount} 个任务
-        </button>
-      ` : (expanded && group.threads.length > 4 ? `
+      ${hiddenCount > 0 ? (() => {
+        const expandLabel = hiddenCount <= THREAD_EXPAND_STEP
+          ? `展开其余 ${hiddenCount} 个任务`
+          : `${actualExpanded > 0 ? "继续展开" : "展开"} ${THREAD_EXPAND_STEP} 个任务（剩余 ${hiddenCount} 个）`;
+        const expandBtn = `
+          <button type="button" class="board-expand-tasks-btn" data-expand-project-cwd="${escapeHtml(group.cwd)}">
+            ${expandLabel}
+          </button>
+        `;
+        if (actualExpanded > 0) {
+          return `
+            <div class="board-expand-tasks-row">
+              ${expandBtn}
+              <button type="button" class="board-expand-tasks-btn is-collapse" data-collapse-project-cwd="${escapeHtml(group.cwd)}">收起</button>
+            </div>
+          `;
+        }
+        return expandBtn;
+      })() : (actualExpanded > 0 ? `
         <button type="button" class="board-expand-tasks-btn" data-collapse-project-cwd="${escapeHtml(group.cwd)}">
           收起部分任务
         </button>
@@ -928,7 +988,7 @@ export function renderProjectBoardHtml({
         <div class="board-grid">
           ${pinnedGroups.map((g) => renderProjectCardHtml(g, {
             activeThreadId,
-            expanded: expandedProjects.has(g.cwd),
+            extraExpandedCount: resolveExtraExpandedCount(expandedProjects, g.cwd, THREAD_EXPAND_STEP),
             selectionMode,
             selectedThreadIds,
             profiles,
@@ -950,7 +1010,7 @@ export function renderProjectBoardHtml({
         <div class="board-grid">
           ${visibleUnpinned.map((g) => renderProjectCardHtml(g, {
             activeThreadId,
-            expanded: expandedProjects.has(g.cwd),
+            extraExpandedCount: resolveExtraExpandedCount(expandedProjects, g.cwd, THREAD_EXPAND_STEP),
             selectionMode,
             selectedThreadIds,
             profiles,

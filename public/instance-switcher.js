@@ -1,4 +1,4 @@
-import { iconSvg, providerIconSvg } from "./icons.js?v=20261116ae";
+import { iconSvg, providerIconSvg } from "./icons.js?v=20261117a";
 
 export const PROVIDER_META = Object.freeze({
   all: { id: "all", label: "全部", short: "全部" },

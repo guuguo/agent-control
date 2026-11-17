@@ -1,23 +1,23 @@
-import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117draft";
-import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117draft";
+import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117goalcontext";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117goalcontext";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
   submitComposerRequest,
-} from "./composer-mode.js?v=20261117draft";
+} from "./composer-mode.js?v=20261117goalcontext";
 import {
   closeCustomSelectMenu,
   initComposerCustomSelects,
   syncAllCustomSelects,
-} from "./custom-select.js?v=20261117draft";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117draft";
+} from "./custom-select.js?v=20261117goalcontext";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117goalcontext";
 import {
   compressImageFileForUpload,
   estimateDataUrlBytes,
   formatByteSize,
   validateImageBatchBudget,
-} from "./image-attachment.js?v=20261117draft";
+} from "./image-attachment.js?v=20261117goalcontext";
 import {
   abbreviateMiddleText,
   buildSelectableTelemetryItems,
@@ -48,8 +48,8 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261117draft";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117draft";
+} from "./instance-switcher.js?v=20261117goalcontext";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117goalcontext";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
@@ -64,9 +64,10 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261117draft";
+} from "./markdown.js?v=20261117goalcontext";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
+  THREAD_EXPAND_STEP,
   buildProjectGroups,
   computeProjectGroupSelectionState,
   isSidebarManualPrefActive,
@@ -77,14 +78,14 @@ import {
   renderProjectTaskStripHtml,
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
-} from "./project-board.js?v=20261117draft";
-import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117draft";
+} from "./project-board.js?v=20261117goalcontext";
+import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117goalcontext";
 import {
   applySlashCommandSelection,
   filterSlashCommands,
   parseSlashTrigger,
   renderSlashMenuHtml,
-} from "./slash-commands.js?v=20261117draft";
+} from "./slash-commands.js?v=20261117goalcontext";
 import {
   base64ToUint8Array,
   buildVoiceLiveProgressItems,
@@ -107,7 +108,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261117draft";
+} from "./voice-copilot.js?v=20261117goalcontext";
 
 const $ = (id) => document.getElementById(id);
 
@@ -340,7 +341,7 @@ function saveLocalThreadPrefs(threadId, patch = {}) {
 function loadSidebarFoldState(nowMs = Date.now()) {
   const sidebarFoldPrefs = {};
   const expandedThreadsAt = {};
-  const expandedSidebarGroups = new Set();
+  const expandedSidebarGroups = new Map();
   let showStaleProjects = false;
   let staleProjectsOpenedAt = 0;
   try {
@@ -357,11 +358,15 @@ function loadSidebarFoldState(nowMs = Date.now()) {
         }
       }
       if (parsed.expandedThreads && typeof parsed.expandedThreads === "object") {
-        for (const [cwd, tsRaw] of Object.entries(parsed.expandedThreads)) {
-          const ts = Number(tsRaw);
+        for (const [cwd, val] of Object.entries(parsed.expandedThreads)) {
+          const ts = typeof val === "object" && val ? Number(val.updatedAt) : Number(val);
+          const rawCount = typeof val === "object" && val ? Number(val.count) : THREAD_EXPAND_STEP;
+          const count = Number.isFinite(rawCount) && rawCount > 0
+            ? Math.max(THREAD_EXPAND_STEP, Math.floor(rawCount))
+            : THREAD_EXPAND_STEP;
           if (cwd && Number.isFinite(ts) && ts > 0 && (nowMs < ts || (nowMs - ts) < SIDEBAR_MANUAL_HOLD_MS)) {
             expandedThreadsAt[cwd] = ts;
-            expandedSidebarGroups.add(cwd);
+            expandedSidebarGroups.set(cwd, count);
           }
         }
       }
@@ -392,9 +397,16 @@ function saveSidebarFoldState() {
           .slice(0, limit),
       );
     };
+    const expandedThreadsPayload = {};
+    for (const [cwd, ts] of Object.entries(trimEntries(state.expandedThreadsAt, (v) => v))) {
+      expandedThreadsPayload[cwd] = {
+        count: Math.max(THREAD_EXPAND_STEP, Math.floor(Number(state.expandedSidebarGroups?.get?.(cwd)) || THREAD_EXPAND_STEP)),
+        updatedAt: Number(ts) || Date.now(),
+      };
+    }
     localStorage.setItem(SIDEBAR_FOLD_PREFS_KEY, JSON.stringify({
       groups: trimEntries(state.sidebarFoldPrefs, (v) => v?.updatedAt),
-      expandedThreads: trimEntries(state.expandedThreadsAt, (v) => v),
+      expandedThreads: expandedThreadsPayload,
       staleProjectsOpenedAt: state.showStaleProjects ? (Number(state.staleProjectsOpenedAt) || Date.now()) : 0,
     }));
   } catch {}
@@ -471,7 +483,7 @@ const state = {
   searchText: "",
   showArchived: false,
   showAllProjects: false,
-  expandedProjects: new Set(),
+  expandedProjects: new Map(),
   expandedSidebarGroups: initialSidebarFold.expandedSidebarGroups,
   sidebarFoldPrefs: initialSidebarFold.sidebarFoldPrefs,
   expandedThreadsAt: initialSidebarFold.expandedThreadsAt,
@@ -3285,6 +3297,23 @@ function renderComposerImages() {
 
 const PREVIEW_RASTER_RE = /\.(?:png|jpe?g|webp|gif)$/i;
 
+function resolveImagePreviewLocalPath(src) {
+  try {
+    const url = new URL(src, location.href);
+    const imageEndpoint = new URL("./api/thread/image", location.href);
+    const fileEndpoint = new URL("./api/thread/file", location.href);
+    if (url.origin !== imageEndpoint.origin || ![imageEndpoint.pathname, fileEndpoint.pathname].includes(url.pathname)) return "";
+    const path = url.searchParams.get("path") || "";
+    if (path.startsWith("/")) return path.startsWith("//") ? "" : path;
+    if (!path || path.startsWith("~") || /^[a-z][a-z0-9+.-]*:/i.test(path)) return "";
+    const threadId = url.searchParams.get("threadId");
+    const thread = state.activeThread?.id === threadId
+      ? state.activeThread
+      : state.threads.find((item) => item.id === threadId);
+    return thread?.cwd?.startsWith("/") ? `${thread.cwd.replace(/\/$/, "")}/${path}` : "";
+  } catch { return ""; }
+}
+
 function openImagePreviewModal(src, caption = "", rawSrc = "") {
   const modal = $("imagePreviewModal");
   const img = $("imagePreviewImg");
@@ -3298,6 +3327,12 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
   const resolvedRaw = rawSrc || "";
   state.imagePreview = { src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0 };
 
+  const localPath = resolveImagePreviewLocalPath(resolvedRaw || src);
+  for (const target of [img, capEl]) {
+    if (!target) continue;
+    if (localPath) target.dataset.localFilePath = localPath;
+    else delete target.dataset.localFilePath;
+  }
   img.src = src;
   img.alt = caption || "图片预览";
   img.style.transform = "";
@@ -4516,7 +4551,7 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     const failoverContext = altProfile ? {
       provider: failedProvider,
       altProfile,
-      cwd: state.activeThread?.cwd || "",
+      cwd: state.activeThread?.cwd || state.newThreadCwd || "",
       text,
       images: savedImages,
       model,
@@ -4574,19 +4609,19 @@ async function relayThreadWithProfile(altProfile, context = {}) {
     "turbo",
   );
   const goalMode = Boolean(context.goalMode ?? state.composerGoal);
-  const cwd = context.cwd || state.activeThread?.cwd || "";
+  const cwd = context.cwd || state.activeThread?.cwd || state.newThreadCwd || "";
 
   setComposerConfigOpen(false);
   if (!text.trim() && !cleanImages.length) {
-    openNewThreadModal({
+    await openNewThreadModal({
       cwd,
       provider: altProfile.provider,
       model,
     });
-    const newSelect = $("newProfileSelect");
+    const newSelect = $("composerProfileSelect");
     if (newSelect && [...newSelect.options].some((o) => o.value === altProfile.id)) {
       newSelect.value = altProfile.id;
-      syncNewProfileSelect();
+      syncComposerProfileSelect();
     }
     setComposerStatus("success", `已切换到 ${altProfile.label || altProfile.id}，输入指令即可在同目录开始`, { autoClearMs: 3200 });
     return;
@@ -6262,13 +6297,14 @@ async function promptProjectAlias(cwd) {
   }
 }
 
-async function openNewThreadDraft({ cwd, provider = "", model = "", promptText = "" }) {
+async function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "" } = {}) {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
+  const chosenProvider = provider || defaultNewThreadProvider();
   await selectThread("", { newThreadCwd: cwd });
-  if (provider) $("composerProviderSelect").value = provider;
+  $("composerProviderSelect").value = chosenProvider;
   syncComposerProfileSelect();
-  if (model) saveNewThreadPrefs(currentComposerProvider(), { model });
+  if (model) saveNewThreadPrefs(chosenProvider, { model });
   syncModelAndEffortSelectors();
   state.composerGoal = false;
   state.images = [];
@@ -6277,28 +6313,6 @@ async function openNewThreadDraft({ cwd, provider = "", model = "", promptText =
   renderTopbarAndControls();
   setSidebarOpen(false);
   $("promptInput").focus();
-}
-
-function openNewThreadModal({ cwd = "", provider = "", model = "", promptText = "" } = {}) {
-  setTopbarMenuOpen(false);
-  setComposerConfigOpen(false);
-  $("newThreadError").hidden = true;
-  $("newThreadError").textContent = "";
-  const titleEl = $("newModalTitle");
-  if (titleEl) {
-    titleEl.textContent = cwd ? `在「${projectBaseName(cwd)}」新建会话` : "新建远程会话";
-  }
-  const chosenProvider = provider || defaultNewThreadProvider();
-  if ([...$("newProviderSelect").options].some((o) => o.value === chosenProvider)) {
-    $("newProviderSelect").value = chosenProvider;
-  }
-  syncNewProviderPills();
-  syncNewProfileSelect();
-  if (model) syncNewModelSelect(model);
-  $("newPermissionSelect").value = normalizeUiPermissionMode(state.defaultPermissionMode || "turbo", "turbo");
-  if (cwd) $("newCwdInput").value = cwd;
-  if (promptText) $("newPromptInput").value = promptText;
-  $("newThreadModal").showModal();
 }
 
 function openProjectBoardView() {
@@ -8718,7 +8732,7 @@ function bindEvents() {
 
   $("topbarNewInProjectBtn")?.addEventListener("click", () => {
     openNewThreadModal({
-      cwd: state.activeThread?.cwd || "",
+      cwd: state.activeThread?.cwd || state.newThreadCwd || "",
       provider: defaultNewThreadProvider(),
     });
   });
@@ -8778,7 +8792,7 @@ function bindEvents() {
     }
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const pill = e.target.closest("[data-strip-thread-id]");
@@ -8823,8 +8837,12 @@ function bindEvents() {
 
     const expandBtn = e.target.closest("[data-expand-project-cwd]");
     if (expandBtn) {
-      state.expandedProjects.add(expandBtn.dataset.expandProjectCwd);
-      renderProjectBoard();
+      const cwd = expandBtn.dataset.expandProjectCwd;
+      if (cwd) {
+        const prevCount = Number(state.expandedProjects.get(cwd)) || 0;
+        state.expandedProjects.set(cwd, prevCount + THREAD_EXPAND_STEP);
+        renderProjectBoard();
+      }
       return;
     }
 
@@ -8862,7 +8880,7 @@ function bindEvents() {
 
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
-      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
 
@@ -8884,7 +8902,7 @@ function bindEvents() {
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
       e.stopPropagation();
-      void openNewThreadDraft({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
+      void openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
       return;
     }
     const staleBtn = e.target.closest("[data-sidebar-stale-projects]");
@@ -8906,7 +8924,8 @@ function bindEvents() {
     if (expandBtn) {
       e.stopPropagation();
       const cwd = normalizeProjectCwd(expandBtn.dataset.sidebarExpandCwd) || "默认工作区";
-      state.expandedSidebarGroups.add(cwd);
+      const prevCount = Number(state.expandedSidebarGroups.get(cwd)) || 0;
+      state.expandedSidebarGroups.set(cwd, prevCount + THREAD_EXPAND_STEP);
       state.expandedThreadsAt[cwd] = Date.now();
       setSidebarGroupManualPref(cwd, "expand");
       renderThreadList();
@@ -9974,11 +9993,10 @@ function bindEvents() {
   });
 
   $("newThreadBtn").addEventListener("click", () => {
-    if (state.activeThread?.cwd || state.newThreadCwd !== null) {
-      void openNewThreadDraft({ cwd: state.activeThread?.cwd || state.newThreadCwd, provider: defaultNewThreadProvider() });
-    } else {
-      openNewThreadModal({ provider: defaultNewThreadProvider() });
-    }
+    openNewThreadModal({
+      cwd: state.activeThread?.cwd || state.newThreadCwd || "",
+      provider: defaultNewThreadProvider(),
+    });
   });
 
   $("newThreadForm").addEventListener("submit", async (e) => {

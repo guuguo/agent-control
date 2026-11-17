@@ -1287,7 +1287,12 @@ export async function createAgentControlServer({
   };
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+const entryArg = process.argv[1] ? resolve(process.argv[1]) : "";
+const entrySelf = resolve(fileURLToPath(import.meta.url));
+const isMain = Boolean(
+  entryArg
+  && (process.platform === "win32" ? entryArg.toLowerCase() === entrySelf.toLowerCase() : entryArg === entrySelf),
+);
 if (isMain) {
   const control = await createAgentControlServer();
   await control.start();

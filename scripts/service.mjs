@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -118,6 +118,7 @@ export function renderWindowsRunScripts({
 
   const cmdContent = [
     "@echo off",
+    "chcp 65001 >nul",
     "setlocal",
     `set "PORT=${String(port)}"`,
     `set "AGENT_CONTROL_DATA_DIR=${String(dataDir)}"`,
@@ -133,6 +134,48 @@ export function renderWindowsRunScripts({
   ].join("\r\n");
 
   return { cmdPath, vbsPath, cmdContent, vbsContent };
+}
+
+export function encodeWindowsVbsBuffer(vbsContent) {
+  return Buffer.from(`\ufeff${String(vbsContent || "")}`, "utf16le");
+}
+
+function writeWindowsRunScripts(scripts) {
+  writeFileSync(scripts.cmdPath, scripts.cmdContent, "utf8");
+  writeFileSync(scripts.vbsPath, encodeWindowsVbsBuffer(scripts.vbsContent));
+}
+
+function spawnDetachedWindowsServer({
+  nodeBin = process.execPath,
+  rootDir = ROOT_DIR,
+  serverEntry = SERVER_ENTRY,
+  port = "43310",
+  dataDir,
+  logDir,
+}) {
+  mkdirSync(logDir, { recursive: true });
+  const stdoutPath = join(logDir, "stdout.log");
+  const stderrPath = join(logDir, "stderr.log");
+  const outFd = openSync(stdoutPath, "a");
+  const errFd = openSync(stderrPath, "a");
+  try {
+    const child = spawn(nodeBin, [serverEntry], {
+      cwd: rootDir,
+      env: {
+        ...process.env,
+        PORT: String(port),
+        AGENT_CONTROL_DATA_DIR: String(dataDir),
+      },
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", outFd, errFd],
+    });
+    child.unref();
+    return child.pid;
+  } finally {
+    try { closeSync(outFd); } catch {}
+    try { closeSync(errFd); } catch {}
+  }
 }
 
 function readLease(dataDir) {
@@ -189,6 +232,13 @@ function stopWindowsInstance(dataDir) {
   }
 }
 
+export function restartLaunchAgent({
+  uid = typeof process.getuid === "function" ? process.getuid() : undefined,
+  execute = execFileSync,
+} = {}) {
+  execute("launchctl", ["kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`], { stdio: "inherit" });
+}
+
 function runCommand(cmd = "run") {
   const platform = normalizePlatform(process.platform);
   const port = String(process.env.PORT || "43310");
@@ -240,14 +290,8 @@ function runCommand(cmd = "run") {
         process.stderr.write(`未检测到已安装的 LaunchAgent (${plistPath})，请先执行 install\n`);
         process.exit(1);
       }
-      const uid = typeof process.getuid === "function" ? process.getuid() : "";
-      if (uid !== "" && tryExec("launchctl", ["kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`])) {
-        process.stdout.write(`已重启 LaunchAgent: ${LAUNCHD_LABEL}\n`);
-      } else {
-        tryExec("launchctl", ["unload", plistPath]);
-        execFileSync("launchctl", ["load", plistPath], { stdio: "inherit" });
-        process.stdout.write(`已重新加载 LaunchAgent: ${plistPath}\n`);
-      }
+      restartLaunchAgent();
+      process.stdout.write(`已重启 LaunchAgent: ${LAUNCHD_LABEL}\n`);
       return;
     }
     if (cmd === "uninstall") {
@@ -288,37 +332,35 @@ function runCommand(cmd = "run") {
     if (cmd === "install") {
       mkdirSync(dirname(scripts.cmdPath), { recursive: true });
       mkdirSync(logDir, { recursive: true });
-      writeFileSync(scripts.cmdPath, scripts.cmdContent, "utf8");
-      writeFileSync(scripts.vbsPath, scripts.vbsContent, "utf8");
+      writeWindowsRunScripts(scripts);
       const taskCmd = `wscript.exe "${scripts.vbsPath}"`;
-      execFileSync(
-        "schtasks",
-        ["/Create", "/TN", WIN_TASK_NAME, "/SC", "ONLOGON", "/TR", taskCmd, "/F"],
-        { stdio: "inherit", windowsHide: true },
-      );
+      let taskInstalled = true;
+      try {
+        execFileSync(
+          "schtasks",
+          ["/Create", "/TN", WIN_TASK_NAME, "/SC", "ONLOGON", "/TR", taskCmd, "/F"],
+          { stdio: "inherit", windowsHide: true },
+        );
+      } catch (err) {
+        taskInstalled = false;
+        process.stderr.write(`警告: 注册登录自启任务失败 (${err?.message || err})，将继续直接启动后台服务。\n`);
+      }
       stopWindowsInstance(dataDir);
-      const child = spawn("wscript.exe", [scripts.vbsPath], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      child.unref();
-      process.stdout.write(`已安装 Windows 登录自启任务 (${WIN_TASK_NAME}) 并在后台启动\n`);
+      const pid = spawnDetachedWindowsServer({ port, dataDir, logDir });
+      process.stdout.write(
+        taskInstalled
+          ? `已安装 Windows 登录自启任务 (${WIN_TASK_NAME}) 并在后台启动 (pid=${pid})\n`
+          : `已在后台启动 Windows 服务 (pid=${pid})，未注册开机自启\n`,
+      );
       return;
     }
     if (cmd === "restart") {
-      if (!existsSync(scripts.vbsPath)) {
-        process.stderr.write(`未检测到启动脚本 (${scripts.vbsPath})，请先执行 install\n`);
-        process.exit(1);
-      }
+      mkdirSync(dirname(scripts.cmdPath), { recursive: true });
+      mkdirSync(logDir, { recursive: true });
+      writeWindowsRunScripts(scripts);
       stopWindowsInstance(dataDir);
-      const child = spawn("wscript.exe", [scripts.vbsPath], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      child.unref();
-      process.stdout.write(`已重启 Windows 后台服务: ${WIN_TASK_NAME}\n`);
+      const pid = spawnDetachedWindowsServer({ port, dataDir, logDir });
+      process.stdout.write(`已重启 Windows 后台服务: ${WIN_TASK_NAME} (pid=${pid})\n`);
       return;
     }
     if (cmd === "uninstall") {
@@ -337,7 +379,12 @@ function runCommand(cmd = "run") {
   process.exit(2);
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+const entryArg = process.argv[1] ? resolve(process.argv[1]) : "";
+const entrySelf = resolve(fileURLToPath(import.meta.url));
+const isMain = Boolean(
+  entryArg
+  && (process.platform === "win32" ? entryArg.toLowerCase() === entrySelf.toLowerCase() : entryArg === entrySelf),
+);
 if (isMain) {
   runCommand(process.argv[2] || "run");
 }

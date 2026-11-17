@@ -1,4 +1,5 @@
 import { iconSvg, providerIconSvg } from "./icons.js";
+import { extractCodexGoalContext } from "./codex-goal-context.js?v=20261117goalcontext";
 
 export function escapeHtml(value) {
   return String(value ?? "")
@@ -1069,7 +1070,8 @@ function cleanUserBubbleText(value) {
 }
 
 function extractClientCodexUserText(rawText = "") {
-  let working = String(rawText || "").replace(/\r\n?/g, "\n");
+  const goal = extractCodexGoalContext(rawText);
+  let working = goal.text;
   const images = [];
   const files = [];
   const questionReplies = [];
@@ -1083,6 +1085,7 @@ function extractClientCodexUserText(rawText = "") {
         files,
         questionReplies,
         heartbeat: parsedHb.heartbeat,
+        goalContext: goal.goalContext,
         taskNotifications: [],
         crossSessionMessages: [],
         bashEvents: [],
@@ -1146,6 +1149,7 @@ function extractClientCodexUserText(rawText = "") {
     files,
     questionReplies,
     heartbeat: null,
+    goalContext: goal.goalContext,
     taskNotifications: claudeEvents.taskNotifications,
     crossSessionMessages: claudeEvents.crossSessionMessages,
     bashEvents: claudeEvents.bashEvents,
@@ -1252,6 +1256,7 @@ export function parseUserMessageContent(item) {
     files,
     questionReplies,
     heartbeat,
+    goalContext: item?.goalContext || parsedText.goalContext || null,
     taskNotifications: parsedText.taskNotifications || [],
     crossSessionMessages: parsedText.crossSessionMessages || [],
     bashEvents: parsedText.bashEvents || [],
@@ -1286,6 +1291,19 @@ function renderHeartbeatUserTrigger(heartbeat, { threadId = "" } = {}) {
       ` : ""}
     </div>
   `;
+}
+
+function renderGoalContextCard(goalContext, { threadId = "" } = {}) {
+  const objective = String(goalContext.objective || "");
+  return `<div class="msg-row msg-goal-context">
+    <details class="goal-context-card heartbeat-disclosure">
+      <summary class="heartbeat-quiet-summary">
+        <span class="heartbeat-badge">${iconSvg("target", { size: 12 })}<span>目标续跑</span></span>
+        <span class="heartbeat-msg">${escapeHtml(objective)}</span>
+      </summary>
+      <div class="heartbeat-quiet-body md-body">${renderMarkdown(objective, { threadId })}</div>
+    </details>
+  </div>`;
 }
 
 const TASK_NOTIF_STATUS_META = {
@@ -1435,6 +1453,7 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
     files,
     questionReplies,
     heartbeat,
+    goalContext,
     taskNotifications,
     crossSessionMessages,
     bashEvents,
@@ -1445,6 +1464,7 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
     return renderHeartbeatUserTrigger(heartbeat, { threadId });
   }
   const eventCards = [
+    ...(goalContext ? [renderGoalContextCard(goalContext, { threadId })] : []),
     ...taskNotifications.map((n) => renderTaskNotificationCard(n, { threadId })),
     ...crossSessionMessages.map((m) => renderCrossSessionMessageCard(m, { threadId })),
     ...bashEvents.map((b) => renderClaudeBashCard(b)),

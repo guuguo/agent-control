@@ -251,6 +251,15 @@ rl.on("line", (line) => {
   }
 
   if (method === "turn/start") {
+    const policyFile = resolve(process.env.CODEX_HOME || "", ".mock-expected-turn-policy");
+    if (existsSync(policyFile)) {
+      const expected = JSON.parse(readFileSync(policyFile, "utf8"));
+      const actual = { approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy };
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        send({ id, error: { code: -32000, message: `Unexpected turn policy: ${JSON.stringify(actual)}` } });
+        return;
+      }
+    }
     const errorFile = resolve(process.env.CODEX_HOME || "", ".mock-turn-start-error");
     if (existsSync(errorFile)) {
       send({ id, error: { code: -32000, message: readFileSync(errorFile, "utf8").trim() } });

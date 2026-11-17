@@ -74,17 +74,7 @@ EOF
     echo "已安装并启动 LaunchAgent: $PLIST_PATH"
     ;;
   restart)
-    if [ ! -f "$PLIST_PATH" ]; then
-      echo "未检测到已安装的 LaunchAgent ($PLIST_PATH)，请先执行: $0 install" >&2
-      exit 1
-    fi
-    if launchctl kickstart -k "gui/$(id -u)/com.guuguo.agent-control" >/dev/null 2>&1; then
-      echo "已重启 LaunchAgent: com.guuguo.agent-control"
-    else
-      launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
-      launchctl load "$PLIST_PATH"
-      echo "已重新加载 LaunchAgent: $PLIST_PATH"
-    fi
+    exec "$NODE_BIN" "$ROOT_DIR/scripts/service.mjs" restart
     ;;
   uninstall)
     launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true

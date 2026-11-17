@@ -43,6 +43,7 @@ import {
 } from "../public/image-attachment.js";
 import {
   capOversizedThreadInlineImages,
+  capOversizedThreadToolOutputs,
   sanitizeEventForSse,
   summarizeQueuedTurnEntry,
 } from "../src/provider-hub.mjs";
@@ -96,6 +97,7 @@ import {
   unwrapToolText,
 } from "../public/markdown.js";
 import {
+  THREAD_EXPAND_STEP,
   buildProjectGroups,
   computeProjectGroupSelectionState,
   dedupeThreadPreview,
@@ -2890,6 +2892,115 @@ test("sidebar auto-expands busy projects, collapses idle ones with manual-expand
   assert.equal(partitioned.staleGroups.length, 0);
 });
 
+test("sidebar and project board expand older threads progressively in steps of 10 with inline collapse", () => {
+  assert.equal(THREAD_EXPAND_STEP, 10);
+  const nowSec = 1_794_800_000;
+  const nowMs = nowSec * 1000;
+  const H = 3600;
+  const cwd = "/tmp/customer-issues";
+  const profiles = [{ key: "codex:default", provider: "codex", id: "default", label: "Codex" }];
+
+  // Build 4 fresh threads (2 live + 2 recent idle) + 30 stale threads = 34 total (matches screenshot scenario).
+  const threads = [
+    { id: "codex:default:f-1", provider: "codex", profileId: "default", cwd, title: "近期运行一", updatedAt: nowSec - 10, live: true },
+    { id: "codex:default:f-2", provider: "codex", profileId: "default", cwd, title: "近期运行二", updatedAt: nowSec - 20, live: true },
+    { id: "codex:default:f-3", provider: "codex", profileId: "default", cwd, title: "近期完成三", updatedAt: nowSec - 1200, live: false },
+    { id: "codex:default:f-4", provider: "codex", profileId: "default", cwd, title: "近期完成四", updatedAt: nowSec - 2400, live: false },
+    ...Array.from({ length: 30 }, (_, idx) => ({
+      id: `codex:default:old-${idx + 1}`,
+      provider: "codex",
+      profileId: "default",
+      cwd,
+      title: `较早会话-${idx + 1}`,
+      updatedAt: nowSec - (20 + idx) * H,
+      live: false,
+    })),
+  ];
+  const groups = buildProjectGroups(threads);
+
+  const countRenderedThreads = (html) => (html.match(/data-thread-id="/g) || []).length;
+
+  // Step 0: only 4 fresh visible, expand button shows "展开 10 条较早会话（剩余 30 条）", no collapse button yet.
+  const step0Html = renderSidebarThreadListHtml(groups, { profiles, nowMs });
+  assert.equal(countRenderedThreads(step0Html), 4);
+  assert.match(step0Html, /data-sidebar-expand-cwd="\/tmp\/customer-issues"[\s\S]*?展开 10 条较早会话（剩余 30 条）/);
+  assert.doesNotMatch(step0Html, /data-sidebar-collapse-cwd="\/tmp\/customer-issues"/);
+
+  // Step 1: 4 + 10 = 14 visible, button shows "继续展开 10 条较早会话（剩余 20 条）" + inline collapse button.
+  const step1Html = renderSidebarThreadListHtml(groups, {
+    profiles,
+    nowMs,
+    expandedSidebarGroups: new Map([[cwd, 10]]),
+  });
+  assert.equal(countRenderedThreads(step1Html), 14);
+  assert.match(step1Html, /较早会话-10/);
+  assert.doesNotMatch(step1Html, /较早会话-11/);
+  assert.match(step1Html, /sidebar-more-row/);
+  assert.match(step1Html, /继续展开 10 条较早会话（剩余 20 条）/);
+  assert.match(step1Html, /data-sidebar-collapse-cwd="\/tmp\/customer-issues"[^>]*>收起<\/button>/);
+
+  // Step 2: 4 + 20 = 24 visible, remaining is 10 (<= 10) -> "展开其余 10 条较早会话" + inline collapse button.
+  const step2Html = renderSidebarThreadListHtml(groups, {
+    profiles,
+    nowMs,
+    expandedSidebarGroups: new Map([[cwd, 20]]),
+  });
+  assert.equal(countRenderedThreads(step2Html), 24);
+  assert.match(step2Html, /较早会话-20/);
+  assert.doesNotMatch(step2Html, /较早会话-21/);
+  assert.match(step2Html, /展开其余 10 条较早会话/);
+  assert.match(step2Html, /data-sidebar-collapse-cwd="\/tmp\/customer-issues"[^>]*>收起<\/button>/);
+
+  // Step 3: all 34 visible, expand button gone, full collapse button shown.
+  const step3Html = renderSidebarThreadListHtml(groups, {
+    profiles,
+    nowMs,
+    expandedSidebarGroups: new Map([[cwd, 30]]),
+  });
+  assert.equal(countRenderedThreads(step3Html), 34);
+  assert.doesNotMatch(step3Html, /data-sidebar-expand-cwd="\/tmp\/customer-issues"/);
+  assert.match(step3Html, /data-sidebar-collapse-cwd="\/tmp\/customer-issues"[\s\S]*?收起较早会话/);
+
+  // Project board card (28 tasks) expands progressively: 4 -> 14 -> 24 -> 28.
+  const boardGroups = buildProjectGroups(threads.slice(0, 28));
+  const countBoardTasks = (html) => (html.match(/data-board-open-thread="/g) || []).length;
+
+  const board0 = renderProjectBoardHtml({ groups: boardGroups, allGroups: boardGroups, profiles });
+  assert.equal(countBoardTasks(board0), 4);
+  assert.match(board0, /展开 10 个任务（剩余 24 个）/);
+  assert.doesNotMatch(board0, /data-collapse-project-cwd=/);
+
+  const board1 = renderProjectBoardHtml({
+    groups: boardGroups,
+    allGroups: boardGroups,
+    profiles,
+    expandedProjects: new Map([[cwd, 10]]),
+  });
+  assert.equal(countBoardTasks(board1), 14);
+  assert.match(board1, /board-expand-tasks-row/);
+  assert.match(board1, /继续展开 10 个任务（剩余 14 个）/);
+  assert.match(board1, /data-collapse-project-cwd="\/tmp\/customer-issues"/);
+
+  const board2 = renderProjectBoardHtml({
+    groups: boardGroups,
+    allGroups: boardGroups,
+    profiles,
+    expandedProjects: new Map([[cwd, 20]]),
+  });
+  assert.equal(countBoardTasks(board2), 24);
+  assert.match(board2, /展开其余 4 个任务/);
+
+  const board3 = renderProjectBoardHtml({
+    groups: boardGroups,
+    allGroups: boardGroups,
+    profiles,
+    expandedProjects: new Map([[cwd, 30]]),
+  });
+  assert.equal(countBoardTasks(board3), 28);
+  assert.doesNotMatch(board3, /data-expand-project-cwd=/);
+  assert.match(board3, /收起部分任务/);
+});
+
 test("image-attachment calculates bytes, scales oversized images cleanly, keeps small PNGs, and enforces batch budgets", () => {
   const rawBuf = Buffer.alloc(1024, 0x42);
   const dataUrl1k = `data:image/png;base64,${rawBuf.toString("base64")}`;
@@ -3099,6 +3210,35 @@ test("provider-hub summarizes queued images, strips huge base64 from SSE broadca
   // Original thread object was not mutated.
   assert.equal(rawThread.turns[1].items[0].content[0].url, hugeLegacyUrl);
   assert.equal(rawThread.turns[0].items[1].result.content[0].url, toolBigUrl);
+
+  // capOversizedThreadToolOutputs strips JSON-wrapped base64 and huge tool text without touching user/agent messages.
+  const jsonWrappedImg = JSON.stringify({
+    type: "image",
+    source: { type: "base64", data: "E".repeat(60_000) },
+  });
+  const longAgentText = "Z".repeat(40_000);
+  const rawToolThread = {
+    id: "claude:default:t-tool-cap",
+    turns: [
+      {
+        id: "t-1",
+        items: [
+          { type: "userMessage", content: [{ type: "text", text: longAgentText }] },
+          { type: "mcpToolCall", tool: "screenshot", result: { content: [{ type: "text", text: jsonWrappedImg }] } },
+          { type: "commandExecution", command: "cat big.log", aggregatedOutput: "L".repeat(50_000) },
+          { type: "agentMessage", text: longAgentText },
+        ],
+      },
+    ],
+  };
+  const cappedTools = capOversizedThreadToolOutputs(rawToolThread, { maxToolTextChars: 1000 });
+  assert.equal(cappedTools.turns[0].items[0].content[0].text, longAgentText);
+  assert.equal(cappedTools.turns[0].items[3].text, longAgentText);
+  assert.match(cappedTools.turns[0].items[1].result.content[0].text, /Base64已省略/);
+  assert.ok(cappedTools.turns[0].items[1].result.content[0].text.length < 1000);
+  assert.match(cappedTools.turns[0].items[2].aggregatedOutput, /已省略/);
+  assert.ok(cappedTools.turns[0].items[2].aggregatedOutput.length < 1100);
+  assert.equal(rawToolThread.turns[0].items[1].result.content[0].text, jsonWrappedImg);
 });
 
 test("renderQueuedTurnsPanelHtml renders multi-line items, source tags, media badges, readonly native hints, and collapsible header", () => {
@@ -3562,7 +3702,7 @@ test("spawn ENOENT is never treated as recoverable and failed turn reload preser
   assert.equal(isRecoverableToolErrorText("ENOENT: no such file or directory, open '/tmp/foo.txt'"), true);
 
   const appJs = await readFile(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
-  assert.match(appJs, /async function selectThread\(compositeId,\s*\{\s*focusScroll = true,\s*preserveStatus = false\s*\}\s*=\s*\{\}\)/);
+  assert.match(appJs, /async function selectThread\(compositeId,\s*\{\s*focusScroll = true,\s*preserveStatus = false,\s*newThreadCwd = null\s*\}\s*=\s*\{\}\)/);
   assert.match(appJs, /preserveStatus:\s*isFailed/);
   assert.match(appJs, /reloadActiveThreadAfterTurnCompletion\(\{[\s\S]*?turnId:\s*evt\.turnId \|\| ""/);
 });

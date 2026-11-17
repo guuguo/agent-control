@@ -134,6 +134,44 @@ test("claude-history parses tool_use/tool_result/custom-title and filters noisy 
   assert.equal(items[3].type, "fileChange");
   assert.equal(items[4].type, "agentMessage");
 
+  const toolImageParsed = parseClaudeJsonlTranscript([
+    JSON.stringify({
+      type: "user",
+      uuid: "u-img-res",
+      timestamp: "2026-11-14T01:50:00Z",
+      message: { role: "user", content: "截一张图" },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      uuid: "a-img-res",
+      timestamp: "2026-11-14T01:50:01Z",
+      message: {
+        id: "msg-img-res",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tool-shot-1", name: "screenshot", input: {} }],
+      },
+    }),
+    JSON.stringify({
+      type: "user",
+      uuid: "u-img-res-2",
+      timestamp: "2026-11-14T01:50:02Z",
+      message: {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "tool-shot-1",
+          content: [
+            { type: "text", text: "截图完成" },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: "I".repeat(50_000) } },
+          ],
+          is_error: false,
+        }],
+      },
+    }),
+  ], { rawId: "shot-1" });
+  const shotItem = toolImageParsed.turns[0].items.find((it) => it.id === "tool-shot-1");
+  assert.equal(shotItem?.result?.content?.[0]?.text, "截图完成\n[图片Base64已省略]");
+
   const multiStep = parseClaudeJsonlTranscript([
     JSON.stringify({
       type: "user",

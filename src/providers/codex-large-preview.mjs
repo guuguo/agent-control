@@ -5,10 +5,17 @@ import {
   normalizeCodexUserMessageItem,
 } from "../codex-input-clean.mjs";
 
-const DEFAULT_TAIL_BYTES = 512 * 1024;
+const DEFAULT_TAIL_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_SCAN_BYTES = 64 * 1024 * 1024;
+const FALLBACK_NO_TURN_MAX_SCAN_BYTES = 256 * 1024 * 1024;
+const LARGE_PREVIEW_CACHE_MAX = 64;
 const CURSOR_PREFIX = "tail:";
 const DUPLICATE_MESSAGE_WINDOW_MS = 2_000;
+const BUF_TYPE_EVENT_MSG = Buffer.from('"type":"event_msg"');
+const BUF_TYPE_RESPONSE_ITEM = Buffer.from('"type":"response_item"');
+const BUF_PAYLOAD_MESSAGE = Buffer.from('"payload":{"type":"message"');
+const BUF_TYPE_TURN_CONTEXT = Buffer.from('"type":"turn_context"');
+const largePreviewCache = new Map();
 const PREVIEW_EVENT_TYPES = new Set([
   "task_started",
   "task_complete",
@@ -58,8 +65,9 @@ function previewMessageIdentity(item) {
     const replies = Array.isArray(item.questionReplies)
       ? item.questionReplies.map((r) => `${r.question || ""}:${r.answer || ""}`).join("|")
       : "";
-    if (text || replies) {
-      return `user\n${text}\n${replies}`.trim();
+    const goal = item.goalContext?.objective || "";
+    if (text || replies || goal) {
+      return `user\n${text}\n${replies}${goal ? `\ngoal\n${goal}` : ""}`.trim();
     }
     const imgKey = content
       .map((part) => part?.path || part?.url || part?.name || "")
@@ -273,69 +281,153 @@ function previewTurns(records, limit, { automationNames = null } = {}) {
   return collapseSilentHeartbeatTurns(turns).slice(-Math.max(1, Number(limit) || 1));
 }
 
+function automationCacheSig(automationNames) {
+  if (!(automationNames instanceof Map) || !automationNames.size) return "";
+  return [...automationNames.entries()]
+    .map(([key, value]) => `${key}=${value}`)
+    .join("|");
+}
+
+function getCachedLargePreview(cacheKey, mtimeMs, size) {
+  const entry = largePreviewCache.get(cacheKey);
+  if (!entry) return null;
+  if (entry.mtimeMs !== mtimeMs || entry.size !== size) {
+    largePreviewCache.delete(cacheKey);
+    return null;
+  }
+  // Refresh insertion order for LRU eviction.
+  largePreviewCache.delete(cacheKey);
+  largePreviewCache.set(cacheKey, entry);
+  return {
+    turns: structuredClone(entry.result.turns),
+    nextCursor: entry.result.nextCursor,
+  };
+}
+
+function setCachedLargePreview(cacheKey, mtimeMs, size, result) {
+  if (largePreviewCache.has(cacheKey)) {
+    largePreviewCache.delete(cacheKey);
+  }
+  largePreviewCache.set(cacheKey, {
+    mtimeMs,
+    size,
+    result: {
+      turns: structuredClone(result.turns),
+      nextCursor: result.nextCursor,
+    },
+  });
+  while (largePreviewCache.size > LARGE_PREVIEW_CACHE_MAX) {
+    const oldestKey = largePreviewCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    largePreviewCache.delete(oldestKey);
+  }
+}
+
 export async function readLargeThreadPreview(path, {
   endOffset = null,
   limit = 12,
   maxBytes = DEFAULT_TAIL_BYTES,
-  maxScanBytes = Math.max(DEFAULT_MAX_SCAN_BYTES, maxBytes * 4),
+  maxScanBytes = null,
   automationNames = null,
 } = {}) {
+  const chunkBytes = Math.max(1024, Number(maxBytes) || DEFAULT_TAIL_BYTES);
+  const explicitMaxScan = Number(maxScanBytes);
+  const hasExplicitMaxScan = Number.isFinite(explicitMaxScan) && explicitMaxScan > 0;
+  const baseScanLimit = hasExplicitMaxScan
+    ? explicitMaxScan
+    : Math.max(DEFAULT_MAX_SCAN_BYTES, chunkBytes * 4);
+  const extendedScanLimit = hasExplicitMaxScan
+    ? baseScanLimit
+    : Math.max(baseScanLimit, FALLBACK_NO_TURN_MAX_SCAN_BYTES);
+
   const file = await open(path, "r");
   try {
-    const { size } = await file.stat();
+    const fileStat = await file.stat();
+    const size = fileStat.size;
     const end = Number.isSafeInteger(endOffset) ? Math.min(Math.max(0, endOffset), size) : size;
-    const records = [];
+    const cacheKey = `${path}\0${end}\0${limit}\0${chunkBytes}\0${baseScanLimit}\0${automationCacheSig(automationNames)}`;
+    const cached = getCachedLargePreview(cacheKey, fileStat.mtimeMs, size);
+    if (cached) return cached;
+
+    const chunks = [];
     let scanEnd = end;
     let scanned = 0;
-    const chunkBytes = Math.max(1024, Number(maxBytes) || DEFAULT_TAIL_BYTES);
-    while (scanEnd > 0 && scanned < maxScanBytes) {
-      const start = Math.max(0, scanEnd - Math.min(chunkBytes, maxScanBytes - scanned));
+    let taskStartedCount = 0;
+    let totalMatchedRecords = 0;
+
+    while (scanEnd > 0) {
+      const activeLimit = taskStartedCount === 0 && totalMatchedRecords > 0
+        ? extendedScanLimit
+        : baseScanLimit;
+      if (scanned >= activeLimit) break;
+
+      const start = Math.max(0, scanEnd - Math.min(chunkBytes, activeLimit - scanned));
       const buffer = Buffer.allocUnsafe(scanEnd - start);
       if (buffer.length) await file.read(buffer, 0, buffer.length, start);
       scanned += buffer.length;
 
       const firstNewline = start > 0 ? buffer.indexOf(0x0a) : -1;
-      let position = start > 0 ? firstNewline + 1 : 0;
-      if (position < 0) {
+      if (start > 0 && firstNewline < 0) {
+        // Chunk sits entirely inside a single oversized line; step back without UTF-8 allocation.
         scanEnd = start;
         continue;
       }
+      let position = start > 0 ? firstNewline + 1 : 0;
       const olderBoundary = start + position;
       const chunkRecords = [];
       while (position < buffer.length) {
         const newline = buffer.indexOf(0x0a, position);
         if (newline < 0) break;
         const offset = start + position;
-        const line = buffer.subarray(position, newline).toString("utf8");
+        const lineBuf = buffer.subarray(position, newline);
         position = newline + 1;
-        const mayBeEvent = line.includes('"type":"event_msg"');
-        const mayBeMessage = line.includes('"type":"response_item"')
-          && line.includes('"payload":{"type":"message"');
-        const mayBeTurnCtx = line.includes('"type":"turn_context"');
+
+        const mayBeEvent = lineBuf.includes(BUF_TYPE_EVENT_MSG);
+        const mayBeMessage = lineBuf.includes(BUF_TYPE_RESPONSE_ITEM)
+          && lineBuf.includes(BUF_PAYLOAD_MESSAGE);
+        const mayBeTurnCtx = lineBuf.includes(BUF_TYPE_TURN_CONTEXT);
         if (!mayBeEvent && !mayBeMessage && !mayBeTurnCtx) continue;
+
+        const line = lineBuf.toString("utf8");
         let record;
         try { record = JSON.parse(line); } catch { continue; }
-        if (previewRecordType(record)) {
+        const recType = previewRecordType(record);
+        if (recType) {
           chunkRecords.push({ record, offset });
+          totalMatchedRecords += 1;
+          if (recType === "task_started") {
+            taskStartedCount += 1;
+          }
         }
       }
-      records.unshift(...chunkRecords);
-      const starts = records.filter(({ record }) => previewRecordType(record) === "task_started").length;
+      if (chunkRecords.length) {
+        chunks.push(chunkRecords);
+      }
       if (start === 0) break;
-      if (starts >= limit) {
-        const collapsedCount = previewTurns(records, limit * 8, { automationNames }).length;
+      if (taskStartedCount >= limit) {
+        const ordered = [];
+        for (let i = chunks.length - 1; i >= 0; i -= 1) {
+          ordered.push(...chunks[i]);
+        }
+        const collapsedCount = previewTurns(ordered, limit * 8, { automationNames }).length;
         if (collapsedCount >= limit) break;
       }
       scanEnd = olderBoundary > start && olderBoundary < scanEnd ? olderBoundary : start;
     }
 
+    const records = [];
+    for (let i = chunks.length - 1; i >= 0; i -= 1) {
+      records.push(...chunks[i]);
+    }
     const selected = previewTurns(records, limit, { automationNames });
     const nextOffset = selected[0]?._offset ?? scanEnd;
     const turns = selected.map(({ _offset, ...turn }) => turn);
-    return {
+    const result = {
       turns,
       nextCursor: nextOffset > 0 ? encodeTailCursor(nextOffset) : null,
     };
+    setCachedLargePreview(cacheKey, fileStat.mtimeMs, size, result);
+    return result;
   } finally {
     await file.close();
   }

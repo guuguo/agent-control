@@ -446,7 +446,13 @@ function toolResultText(block) {
   if (typeof block?.content === "string") return block.content;
   if (Array.isArray(block?.content)) {
     return block.content
-      .map((part) => (typeof part === "string" ? part : (part?.text || JSON.stringify(part))))
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && part.type === "image" && part.source?.type === "base64") {
+          return "[图片Base64已省略]";
+        }
+        return part?.text || JSON.stringify(part);
+      })
       .join("\n");
   }
   return block?.content ? JSON.stringify(block.content) : "";

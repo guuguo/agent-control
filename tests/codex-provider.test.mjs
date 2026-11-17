@@ -964,3 +964,44 @@ test("Codex steer resumes unloaded thread and falls back to turn/start when stal
   assert.ok(sent?.turn?.id);
   assert.notEqual(sent.steered, true);
 });
+
+test("readLargeThreadPreview skips oversized non-message lines across chunk boundaries and invalidates mtime/size cache on append", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-codex-large-cache-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const rolloutPath = resolve(dir, "rollout-huge-lines.jsonl");
+  const giantOutput = "A".repeat(48 * 1024);
+  const initialLines = [
+    JSON.stringify({ timestamp: "2026-11-17T00:00:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "t-big-1" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:00:01Z", type: "event_msg", payload: { type: "user_message", message: "首轮提问" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:00:02Z", type: "response_item", payload: { type: "function_call_output", output: giantOutput } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:00:03Z", type: "response_item", payload: { type: "function_call_output", output: giantOutput } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:00:04Z", type: "event_msg", payload: { type: "agent_message", message: "首轮完成" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:00:05Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t-big-1" } }),
+  ];
+  await writeFile(rolloutPath, `${initialLines.join("\n")}\n`, "utf8");
+
+  // Chunk size (16 KB) is smaller than the giant function_call_output lines (~49 KB each).
+  const first = await readLargeThreadPreview(rolloutPath, { limit: 12, maxBytes: 16 * 1024 });
+  assert.equal(first.turns.length, 1);
+  assert.equal(first.turns[0].items[0].content[0].text, "首轮提问");
+  assert.equal(first.turns[0].items[1].text, "首轮完成");
+
+  // Cached hit returns cloned copy; mutating it does not pollute cache.
+  first.turns[0].items[1].text = "MUTATED";
+  const second = await readLargeThreadPreview(rolloutPath, { limit: 12, maxBytes: 16 * 1024 });
+  assert.equal(second.turns[0].items[1].text, "首轮完成");
+
+  // Appending a new turn changes file size/mtime and invalidates the cache.
+  const appendedLines = [
+    JSON.stringify({ timestamp: "2026-11-17T00:01:00Z", type: "event_msg", payload: { type: "task_started", turn_id: "t-big-2" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:01:01Z", type: "event_msg", payload: { type: "user_message", message: "第二轮提问" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:01:02Z", type: "event_msg", payload: { type: "agent_message", message: "第二轮完成" } }),
+    JSON.stringify({ timestamp: "2026-11-17T00:01:03Z", type: "event_msg", payload: { type: "task_complete", turn_id: "t-big-2" } }),
+  ];
+  await writeFile(rolloutPath, `${[...initialLines, ...appendedLines].join("\n")}\n`, "utf8");
+
+  const third = await readLargeThreadPreview(rolloutPath, { limit: 12, maxBytes: 16 * 1024 });
+  assert.equal(third.turns.length, 2);
+  assert.equal(third.turns[1].items[1].text, "第二轮完成");
+});

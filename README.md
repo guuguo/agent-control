@@ -51,7 +51,7 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.s
 **Windows**（打开 **PowerShell** 粘贴回车）：
 
 ```powershell
-irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1 | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall
 **Windows (PowerShell)：**
 
 ```powershell
-irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1 | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---

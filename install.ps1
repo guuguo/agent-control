@@ -48,14 +48,12 @@ if ($Remote -eq "relay" -and -not $RelayUrl -and [Environment]::UserInteractive)
 Write-Host "[1/5] 检查 Node.js (>= 22) 与 Git 环境..." -ForegroundColor Cyan
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 if (-not $nodeCmd) {
-  Write-Error "未检测到 Node.js。请先安装 Node.js 22+：winget install OpenJS.NodeJS.LTS"
-  exit 1
+  throw "未检测到 Node.js。请先安装 Node.js 22+：winget install OpenJS.NodeJS.LTS"
 }
 
 $nodeMajor = [int](& node -p "Number(process.versions.node.split('.')[0])")
 if ($nodeMajor -lt 22) {
-  Write-Error "当前 Node.js 版本过低（需要 >= 22.0.0）：$(& node -v)。请升级后重试。"
-  exit 1
+  throw "当前 Node.js 版本过低（需要 >= 22.0.0）：$(& node -v)。请升级后重试。"
 }
 
 $appDir = $null
@@ -64,8 +62,7 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "src\server.mjs")) -a
   Write-Host "[2/5] 使用本地源码目录: $appDir" -ForegroundColor Cyan
 } else {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Error "未检测到 Git。请先安装 Git：winget install Git.Git"
-    exit 1
+    throw "未检测到 Git。请先安装 Git：winget install Git.Git"
   }
   $parentDir = Split-Path -Parent $InstallDir
   if (-not (Test-Path $parentDir)) {
@@ -74,11 +71,14 @@ if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot "src\server.mjs")) -a
   if (Test-Path (Join-Path $InstallDir ".git")) {
     Write-Host "[2/5] 正在更新仓库: $InstallDir" -ForegroundColor Cyan
     & git -C $InstallDir fetch --depth 1 origin $RepoBranch
+    if ($LASTEXITCODE -ne 0) { throw "git fetch 失败 (exit=$LASTEXITCODE)" }
     & git -C $InstallDir checkout -B $RepoBranch "origin/$RepoBranch"
+    if ($LASTEXITCODE -ne 0) { throw "git checkout 失败 (exit=$LASTEXITCODE)" }
   } else {
     Write-Host "[2/5] 正在克隆 Agent Control 到: $InstallDir" -ForegroundColor Cyan
     if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir }
     & git clone --depth 1 --branch $RepoBranch $RepoUrl $InstallDir
+    if ($LASTEXITCODE -ne 0) { throw "git clone 失败 (exit=$LASTEXITCODE)" }
   }
   $appDir = $InstallDir
 }
@@ -87,7 +87,7 @@ Write-Host "[3/5] 正在安装依赖..." -ForegroundColor Cyan
 Push-Location $appDir
 try {
   & npm install --omit=dev --no-audit --no-fund
-  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  if ($LASTEXITCODE -ne 0) { throw "npm install 失败 (exit=$LASTEXITCODE)" }
 
   if ($Remote -eq "cloudflare" -or $Remote -eq "named") {
     Write-Host "[4/5] 正在检查 cloudflared ($Remote 模式)..." -ForegroundColor Cyan
@@ -110,7 +110,7 @@ try {
   if (-not $NoService) {
     Write-Host "[5/5] 正在安装并启动 Windows 后台任务 (端口 $Port)..." -ForegroundColor Cyan
     & node scripts\service.mjs install
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) { throw "注册或启动后台服务失败 (exit=$LASTEXITCODE)" }
   }
 } finally {
   Pop-Location
@@ -125,7 +125,7 @@ if ($desktopDir -and (Test-Path $desktopDir)) {
 
 $healthy = $false
 if (-not $NoService) {
-  for ($i = 0; $i -lt 20; $i++) {
+  for ($i = 0; $i -lt 30; $i++) {
     try {
       $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 1 -UseBasicParsing
       if ($resp.StatusCode -eq 200) {
@@ -133,7 +133,23 @@ if (-not $NoService) {
         break
       }
     } catch {}
-    Start-Sleep -Milliseconds 400
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $healthy) {
+    Write-Host ""
+    Write-Host "[错误] 后台服务未能成功监听 http://127.0.0.1:$Port/health" -ForegroundColor Red
+    Write-Host "常见原因：端口 $Port 被占用或被 Windows Hyper-V/WSL2 保留（可改用 `$env:PORT=43315 后重试），或 Node 启动异常。" -ForegroundColor Yellow
+    Push-Location $appDir
+    try {
+      Write-Host "--- 最近服务日志 ---" -ForegroundColor Cyan
+      & node scripts\service.mjs logs
+    } finally {
+      Pop-Location
+    }
+    if ([Environment]::UserInteractive) {
+      Read-Host "按回车键继续..." | Out-Null
+    }
+    throw "Agent Control 服务启动失败，无法访问 http://127.0.0.1:$Port"
   }
 }
 

@@ -23,6 +23,7 @@ import { resolveAgyAcpLaunch } from "../src/providers/antigravity-acp-client.mjs
 import { decodeSlugFallback } from "../src/providers/claude-history.mjs";
 import { QuickTunnelManager } from "../src/quick-tunnel.mjs";
 import {
+  encodeWindowsVbsBuffer,
   renderLaunchdPlist,
   renderSystemdUnit,
   renderWindowsRunScripts,
@@ -311,9 +312,14 @@ test("service renderers emit valid launchd, systemd, and Windows runner artifact
     nodeBin: "C:\\Program Files\\nodejs\\node.exe",
     rootDir: "D:\\dev\\agent-control",
     serverEntry: "D:\\dev\\agent-control\\src\\server.mjs",
-    dataDir: "C:\\Users\\Alice\\AppData\\Roaming\\Agent Control",
+    dataDir: "C:\\Users\\张三\\AppData\\Roaming\\Agent Control",
   });
+  assert.match(winScripts.cmdContent, /^@echo off\r\nchcp 65001 >nul\r\n/);
   assert.match(winScripts.cmdContent, /set "PORT=43310"/);
   assert.match(winScripts.cmdContent, /cd \/d "D:\\dev\\agent-control"/);
   assert.match(winScripts.vbsContent, /WScript\.Shell/);
+  const vbsBuf = encodeWindowsVbsBuffer(winScripts.vbsContent);
+  assert.equal(vbsBuf[0], 0xff);
+  assert.equal(vbsBuf[1], 0xfe);
+  assert.equal(vbsBuf.subarray(2).toString("utf16le"), winScripts.vbsContent);
 });
