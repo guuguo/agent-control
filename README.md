@@ -43,7 +43,7 @@
 ### 1. Desktop Console · Multi-Engine & Multi-Account Hub
 Consolidate every running and historical session by project workspace, switch models/reasoning levels, and monitor per-account Codex quotas side by side.
 <p align="center">
-  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control Desktop Console" width="760" />
+  <img src="docs/tutorial/01-desktop-console-en.png" alt="Agent Control Desktop Console" width="760" />
 </p>
 
 ### 2. Mobile Browser · Live Monitor, Approvals & Queued Follow-Ups

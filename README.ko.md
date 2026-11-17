@@ -5,7 +5,7 @@
 > **Codex**, **Claude Code**, **Antigravity**, **Grok**을 PC와 스마트폰에서 하나로 제어하는 셀프 호스팅 원격 콘솔입니다. 한 줄 명령어로 설치되며 기존 도구의 설정이나 DB를 절대 수정하지 않습니다.
 
 <p align="center">
-  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 데스크톱 콘솔" width="760" />
+  <img src="docs/tutorial/01-desktop-console-ko.png" alt="Agent Control 데스크톱 콘솔" width="760" />
 </p>
 
 ## 🔒 보안 및 프라이버시 원칙

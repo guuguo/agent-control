@@ -5,7 +5,7 @@
 > **Codex**・**Claude Code**・**Antigravity**・**Grok** を PC とスマホから一括管理できるセルフホスト型リモートコンソール。1 行のコマンドで導入でき、元ツールの設定や履歴 DB は一切変更しません。
 
 <p align="center">
-  <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control デスクトップコンソール" width="760" />
+  <img src="docs/tutorial/01-desktop-console-ja.png" alt="Agent Control デスクトップコンソール" width="760" />
 </p>
 
 ## 🔒 セキュリティとプライバシー
