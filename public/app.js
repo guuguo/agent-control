@@ -5515,6 +5515,7 @@ function renderUpdateModal() {
   const pendingCountEl = $("updatePendingCount");
   const pendingListEl = $("updatePendingList");
   const desktopBtn = $("applyDesktopUpdateBtn");
+  const restartBtn = $("restartServiceBtn");
   const checkBtn = $("checkUpdateBtn");
   const applyBtn = $("applyUpdateBtn");
 
@@ -5668,6 +5669,10 @@ function renderUpdateModal() {
     else desktopBtn.textContent = "重编桌面 App";
   }
 
+  if (restartBtn) {
+    restartBtn.disabled = isBusy;
+    restartBtn.textContent = snap?.restartPending ? "重启服务中…" : "重启服务";
+  }
   if (checkBtn) {
     checkBtn.disabled = isBusy;
     checkBtn.textContent = state.updateChecking || snap?.checking ? "检查中…" : "立即检查";
@@ -5699,13 +5704,14 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
         const currentMeta = document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "";
         const shaChanged = parsed?.prevSha && snap.localSha && parsed.prevSha !== snap.localSha;
         const uiChanged = snap.uiVersion && currentMeta && snap.uiVersion !== currentMeta;
-        if (!snap.updating && !snap.restartPending && (shaChanged || uiChanged)) {
+        const manualRestart = Boolean(parsed?.manualRestart);
+        if (!snap.updating && !snap.restartPending && (shaChanged || uiChanged || manualRestart)) {
           sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY);
           if (uiChanged && !($("promptInput")?.value || "").trim()) {
             location.reload();
             return;
           }
-          showToastBanner("Agent Control 已更新完成", {
+          showToastBanner(manualRestart ? "后台服务已重启完成" : "Agent Control 已更新完成", {
             detail: snap.localShortSha ? `当前版本 ${snap.localShortSha}` : "服务已重新启动",
           });
         }
@@ -5801,6 +5807,34 @@ async function triggerApplyUpdate() {
     }
   } finally {
     state.updateApplying = false;
+    renderUpdateIndicators();
+    if ($("updateModal")?.open) renderUpdateModal();
+  }
+}
+
+async function triggerRestartService() {
+  if (state.updateApplying || state.desktopUpdating || state.updateStatus?.restartPending) return;
+  const anyRunning = Number(state.telemetry?.totals?.runningCount || 0) > 0;
+  if (anyRunning && !window.confirm("当前仍有智能体正在运行，立即重启服务会中断活跃流式输出。确定现在重启吗？")) {
+    return;
+  }
+  try {
+    sessionStorage.setItem(UPDATE_RESTART_FLAG_KEY, JSON.stringify({
+      manualRestart: true,
+      prevSha: state.updateStatus?.localSha || "",
+      prevUiVersion: document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "",
+    }));
+  } catch {}
+  try {
+    const res = await apiPost("api/update/restart", { reason: "manual" }, { timeoutMs: 15_000 });
+    if (res?.status) applyUpdateStatusSnapshot(res.status);
+    showToastBanner("正在重启后台服务", {
+      detail: res?.message || "页面将在服务恢复后自动重连",
+    });
+  } catch (error) {
+    try { sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY); } catch {}
+    showToastBanner("重启服务失败", { detail: formatActionError(error, "重启失败"), error: true });
+  } finally {
     renderUpdateIndicators();
     if ($("updateModal")?.open) renderUpdateModal();
   }
@@ -10313,6 +10347,7 @@ function bindEvents() {
   $("automationsModal")?.addEventListener("click", (e) => {
     if (e.target === $("automationsModal")) $("automationsModal").close();
   });
+  $("restartServiceBtn")?.addEventListener("click", () => void triggerRestartService());
   $("applyDesktopUpdateBtn")?.addEventListener("click", () => void triggerDesktopAppUpdate());
   $("checkUpdateBtn")?.addEventListener("click", () => void triggerCheckUpdates());
   $("applyUpdateBtn")?.addEventListener("click", () => void triggerApplyUpdate());

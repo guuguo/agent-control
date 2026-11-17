@@ -1151,6 +1151,13 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/update/restart" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await updateService.restartService({ reason: body?.reason || "manual" });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/update/desktop" && request.method === "POST") {
         const body = await readJsonBody(request);
         const result = await updateService.applyDesktopUpdate({

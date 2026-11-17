@@ -1132,6 +1132,34 @@ export class UpdateService {
     }
   }
 
+  async restartService({ reason = "manual" } = {}) {
+    if (this.#updating || this.#restartPending) {
+      throw Object.assign(new Error("当前正在更新或重启中，请稍候"), { status: 409 });
+    }
+    this.#persisted.lastError = "";
+    this.#restartPending = true;
+    this.#phase = "restarting";
+    this.#phaseMessage = "正在平滑重启后台服务…";
+    await this.#saveState();
+    const postSnap = this.#emitStatus();
+
+    const timer = setTimeout(() => {
+      void Promise.resolve(this.#restartService({
+        reason,
+        managedService: this.#repoInfo.managedService,
+        serviceKind: this.#repoInfo.serviceKind,
+      })).catch(() => {});
+    }, this.#restartDelayMs);
+    timer.unref?.();
+
+    return {
+      ok: true,
+      restarting: true,
+      message: "后台服务正在重启，页面将在重连后自动恢复",
+      status: postSnap,
+    };
+  }
+
   async #defaultRestartService() {
     const service = detectManagedService({
       platform: this.#platform,

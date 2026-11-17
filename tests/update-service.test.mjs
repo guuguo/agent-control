@@ -393,4 +393,28 @@ test("UpdateService detects desktop shell drift, builds via /api/update/desktop,
   await new Promise((r) => setTimeout(r, 40));
   assert.equal(serviceRestartCalls, 1);
   assert.equal(relaunchCalls, 2);
+
+  // Standalone manual restart endpoint triggers service restart without requiring remote updates.
+  const restartRes = await fetch(`${srv.url}/api/update/restart`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: "manual" }),
+  });
+  assert.equal(restartRes.status, 409); // restartPending from applyUpdate above is still true
+
+  const svcOnly = new UpdateService({
+    rootDir: appDir,
+    dataDir: resolve(baseDir, "data-restart-only"),
+    disableAutoCheck: true,
+    restartDelayMs: 10,
+    restartService: () => { serviceRestartCalls += 1; },
+  });
+  const restarted = await svcOnly.restartService({ reason: "manual" });
+  assert.equal(restarted.ok, true);
+  assert.equal(restarted.restarting, true);
+  assert.equal(restarted.status.restartPending, true);
+  await assert.rejects(svcOnly.restartService({ reason: "manual" }), (err) => err?.status === 409);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(serviceRestartCalls, 2);
+  svcOnly.close();
 });
