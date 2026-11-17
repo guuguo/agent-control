@@ -175,3 +175,7 @@ npm run desktop:install   # macOS 构建安装 /Applications/Agent Control.app
 ## License
 
 [AGPL-3.0-only](LICENSE)
+
+## 致谢与社区认可
+
+- 感谢 [LINUX DO](https://linux.do/) 社区佬友们的交流与反馈
