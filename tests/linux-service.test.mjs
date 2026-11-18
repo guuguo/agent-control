@@ -36,7 +36,9 @@ test("Linux 上用 systemd 原生工具验证生成的用户服务配置", { ski
   const root = await mkdtemp(join(os.tmpdir(), "ac-systemd-verify-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const unitPath = join(root, "agent-control.service");
+  const workingDir = join(root, "project with spaces");
   await mkdir(join(root, "logs"));
-  await writeFile(unitPath, renderSystemdUnit({ dataDir: root }));
+  await mkdir(workingDir);
+  await writeFile(unitPath, renderSystemdUnit({ dataDir: root, rootDir: workingDir }));
   execFileSync("systemd-analyze", ["verify", unitPath], { stdio: "pipe" });
 });

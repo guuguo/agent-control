@@ -10,13 +10,13 @@ import { parseCompositeThreadId } from "../src/composite-id.mjs";
 import { qoderPermissionMode } from "../src/providers/qoder-acp-client.mjs";
 
 const mock = fileURLToPath(new URL("./helpers/mock-qoder-cli.mjs", import.meta.url));
-async function setup(t) {
+async function setup(t, beforeCleanup = null) {
   const root = await mkdtemp(resolve(tmpdir(), "ac-qoder-"));
   const cwd = resolve(root, "项目 含空格");
   await mkdir(cwd); await chmod(mock, 0o755);
   const env = { ...process.env, HOME: root, USERPROFILE: root, QODER_BIN: mock, AGENT_CONTROL_QODER_CONFIG_DIR: resolve(root, "config") };
   const dataDir = resolve(root, "data");
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => { await beforeCleanup?.(); await rm(root, { recursive: true, force: true }); });
   return { env, dataDir, cwd };
 }
 async function waitFor(check) {
@@ -58,10 +58,10 @@ test("Qoder 使用官方 ACP 参数，支持图文、流式工具和思考，并
 });
 
 test("Qoder 审批、中断与控制端排队通过 Hub 路由，不创建新会话", async (t) => {
-  const options = await setup(t);
+  let hub;
+  const options = await setup(t, () => hub?.close());
   const provider = new QoderProvider(options);
-  const hub = new ProviderHub({ ...options, providers: [provider] });
-  t.after(() => hub.close());
+  hub = new ProviderHub({ ...options, providers: [provider] });
   await hub.init();
   const first = await hub.startThread({ provider: "qoder", profileId: "default", cwd: options.cwd, text: "approval", permissionMode: "workspace" });
   const request = await waitFor(() => hub.allPendingRequests()[0]);

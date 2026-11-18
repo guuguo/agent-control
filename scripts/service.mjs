@@ -114,7 +114,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=${systemdQuote(rootDir)}
+WorkingDirectory=${rootDir}
 ExecStart=${systemdQuote(nodeBin)} ${execArgs}
 Environment=${systemdQuote(`PORT=${port}`)}
 Environment=${systemdQuote(`AGENT_CONTROL_DATA_DIR=${dataDir}`)}
