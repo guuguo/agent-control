@@ -2317,6 +2317,21 @@ body.is-resizing-sidebar * {
   color: #e6c07b;
 }
 
+.live-cmd-output-details {
+  margin: 4px 0 2px 20px;
+}
+
+.live-cmd-output-details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 0;
+}
+
+.live-cmd-output-details[open] + .live-cmd-snippet {
+  display: none;
+}
+
 .live-cmd-snippet {
   margin: 4px 0 2px 20px;
   padding: 6px 8px;

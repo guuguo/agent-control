@@ -1730,14 +1730,6 @@ function mergeProcessStatus(prevStatus, nextStatus) {
   return nextStatus || prevStatus || "completed";
 }
 
-function tailCompactOutput(output) {
-  const text = String(output || "").trim();
-  if (!text) return "";
-  const lines = text.split("\n");
-  const clipped = lines.length > 15 ? lines.slice(-15).join("\n") : text;
-  return clipped.length > 800 ? clipped.slice(-800) : clipped;
-}
-
 function extractReasoningText(item) {
   if (!item || typeof item !== "object" || item.type !== "reasoning") return "";
   const lines = (
@@ -2395,7 +2387,14 @@ function renderLiveProgressFeedHtml(processItems, digest, { liveThought = "", li
         .join("\n")
         .slice(-240);
       if (tailLines) {
-        cmdSnippetHtml = `<pre class="live-cmd-snippet">${escapeHtml(tailLines)}</pre>`;
+        const outputLabel = tailLines === step.output.trim() ? "命令输出" : "输出末尾预览";
+        cmdSnippetHtml = `<div class="live-cmd-output">
+          <details class="live-cmd-output-details">
+            <summary>${outputLabel} · 展开查看</summary>
+            <pre class="tool-output">${escapeHtml(step.output)}</pre>
+          </details>
+          <pre class="live-cmd-snippet">${escapeHtml(tailLines)}</pre>
+        </div>`;
       }
     }
     feedRows.push(`
@@ -2518,8 +2517,8 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
 
   for (const cmd of digest.commandMap.values()) {
     const countTag = cmd.count > 1 ? `<span class="process-count-tag">${cmd.count} 次</span>` : "";
-    const clippedOut = tailCompactOutput(cmd.output);
-    const shouldExpand = cmd.status === "failed" || Boolean(clippedOut);
+    const commandOut = String(cmd.output || "").trim();
+    const shouldExpand = cmd.status === "failed" || Boolean(commandOut);
     if (shouldExpand) {
       rows.push(`
         <details class="process-subdetail">
@@ -2530,7 +2529,7 @@ function renderProcessGroupHtml(processItems, { isRunning = false, liveThought =
             ${statusPillHtml(cmd.status)}
           </summary>
           <div class="tool-body">
-            <pre class="tool-output">${escapeHtml(clippedOut || cmd.errorMessage || "命令执行异常")}</pre>
+            <pre class="tool-output">${escapeHtml(commandOut || cmd.errorMessage || "命令执行异常")}</pre>
           </div>
         </details>
       `);

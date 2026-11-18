@@ -2578,7 +2578,7 @@ function captureTurnListOpenKeys(blocks, startIdx = 0) {
     const block = blocks[i];
     if (!block) continue;
     const turnKey = block.getAttribute("data-turn-id") || `idx:${startIdx + i}`;
-    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure");
+    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure, .live-cmd-output-details");
     for (let b = 0; b < boxes.length; b += 1) {
       if (boxes[b].open) keys.add(`${turnKey}:${b}`);
     }
@@ -2592,7 +2592,7 @@ function restoreTurnListOpenKeys(blocks, openKeys, startIdx = 0) {
     const block = blocks[i];
     if (!block) continue;
     const turnKey = block.getAttribute("data-turn-id") || `idx:${startIdx + i}`;
-    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure");
+    const boxes = block.querySelectorAll(".process-summary-box, .heartbeat-disclosure, .live-cmd-output-details");
     for (let b = 0; b < boxes.length; b += 1) {
       if (openKeys.has(`${turnKey}:${b}`)) boxes[b].open = true;
     }
