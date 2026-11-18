@@ -15,6 +15,8 @@ import {
   normalizeAcpPermissionRequest,
 } from "./antigravity-acp-client.mjs";
 import {
+  extractPendingAskQuestionFromTurns,
+  normalizeAntigravityAskQuestions,
   readAntigravityIndexedThreadById,
   readAntigravityIndexedThreads,
   readAntigravityLiveActivity,
@@ -54,6 +56,7 @@ export class AntigravityProvider {
   #knownSessions = new Map();
   #sessionPermissionModes = new Map();
   #sessionClients = new Map();
+  #resolvedAskKeys = new Set();
   #onEvent;
   #onServerRequest;
 
@@ -253,6 +256,15 @@ export class AntigravityProvider {
         active.toolTitles?.set(toolCallId, update.title);
       }
       const resolvedTitle = update.title || (toolCallId && active?.toolTitles?.get(toolCallId)) || "";
+      if (active && (update.rawInput?.questions || /ask_question/i.test(String(resolvedTitle || update.name || "")))) {
+        const parsedQuestions = normalizeAntigravityAskQuestions(update.rawInput);
+        if (parsedQuestions.length) {
+          active.pendingAskQuestions = {
+            itemId: toolCallId || `agy-ask-${active.turnId}`,
+            questions: parsedQuestions,
+          };
+        }
+      }
       if (active) {
         if (updateType === "tool_call") {
           active.lastText = "";
@@ -418,7 +430,59 @@ export class AntigravityProvider {
     return { ok: true, permissionMode: cleanPerm };
   }
 
+  #emitAskQuestionRequest(profileId, rawId, { turnId = "", itemId = "", questions = [] } = {}) {
+    if (!rawId || !Array.isArray(questions) || !questions.length) return false;
+    const askKey = `${profileId}:${rawId}:${itemId || turnId || questions[0]?.question || "ask"}`;
+    if (this.#resolvedAskKeys.has(askKey)) return false;
+    const reqId = `agy-ask-${rawId}-${itemId || turnId || "latest"}`;
+    this.#onServerRequest({
+      id: reqId,
+      rawId: reqId,
+      askKey,
+      provider: "antigravity",
+      profileId,
+      rawThreadId: rawId,
+      threadId: formatCompositeThreadId("antigravity", profileId, rawId),
+      turnId,
+      kind: "userInput",
+      isPromptFollowUp: true,
+      isBlocking: false,
+      title: "Antigravity 需要你确认以下问题",
+      questions,
+    });
+    return true;
+  }
+
   respondServerRequest(profileId, rawRequest, input) {
+    if (rawRequest?.kind === "userInput" && rawRequest?.isPromptFollowUp) {
+      if (rawRequest.askKey) this.#resolvedAskKeys.add(rawRequest.askKey);
+      const decision = String(input?.decision || "accept");
+      if (decision === "decline" || decision === "cancel") {
+        return { ok: true, skipped: true };
+      }
+      const questions = Array.isArray(rawRequest.questions) ? rawRequest.questions : [];
+      const answers = input?.answers && typeof input.answers === "object" ? input.answers : {};
+      const lines = [];
+      questions.forEach((q, idx) => {
+        const qId = String(q.id || `q_${idx}`);
+        const entry = answers[qId];
+        const list = Array.isArray(entry?.answers)
+          ? entry.answers
+          : (Array.isArray(entry) ? entry : (entry ? [String(entry)] : []));
+        const answerText = list.map((s) => String(s || "").trim()).filter(Boolean).join("、");
+        if (!answerText) return;
+        if (questions.length === 1) {
+          lines.push(answerText);
+        } else {
+          lines.push(`${idx + 1}. ${q.question || q.header || qId}\n回答：${answerText}`);
+        }
+      });
+      const followUpText = lines.join("\n\n").trim();
+      return {
+        ok: true,
+        ...(followUpText ? { followUpText } : { skipped: true }),
+      };
+    }
     const targetProfileId = rawRequest?.profileId || profileId;
     const client = (rawRequest?.clientKey && this.#clients.get(rawRequest.clientKey))
       || this.#findProfileClient(targetProfileId, { requireConnected: true })
@@ -626,6 +690,12 @@ export class AntigravityProvider {
       nativeQueuedCount: nativeQueuedTurns.length,
       updatedAt: Math.max(Number(indexed?.updatedAt) || 0, Number(thread?.updatedAt) || 0, diskLive.updatedAt || 0),
     });
+    if (!normalized.live) {
+      const pendingAsk = extractPendingAskQuestionFromTurns(normalized.turns);
+      if (pendingAsk) {
+        this.#emitAskQuestionRequest(profile.id, rawId, pendingAsk);
+      }
+    }
     return {
       thread: normalized,
       nextCursor,
@@ -818,7 +888,7 @@ export class AntigravityProvider {
       },
     });
 
-    const finalizePrompt = ({ status, stopReason = "", error = null }) => {
+      const finalizePrompt = ({ status, stopReason = "", error = null }) => {
       if (activeEntry.settled) return;
       activeEntry.settled = true;
       if (this.#activePrompts.get(rawId) === activeEntry) {
@@ -837,6 +907,24 @@ export class AntigravityProvider {
         lastAgentMessage: activeEntry.lastText,
         error,
       });
+      if (status === "completed" && !String(activeEntry.lastText || "").trim()) {
+        if (activeEntry.pendingAskQuestions?.questions?.length) {
+          this.#emitAskQuestionRequest(resolvedProfileId, rawId, {
+            turnId,
+            itemId: activeEntry.pendingAskQuestions.itemId,
+            questions: activeEntry.pendingAskQuestions.questions,
+          });
+        } else {
+          void readAntigravityThreadHistory(profile.home, rawId, {
+            detail: "full",
+            limit: 4,
+            isThreadLive: false,
+          }).then((hist) => {
+            const pendingAsk = extractPendingAskQuestionFromTurns(hist?.thread?.turns);
+            if (pendingAsk) this.#emitAskQuestionRequest(resolvedProfileId, rawId, pendingAsk);
+          }).catch(() => {});
+        }
+      }
     };
 
     const promptBlocks = buildAcpPromptBlocks(text, images);

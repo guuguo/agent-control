@@ -47,6 +47,16 @@ const ICON_PATHS = Object.freeze({
   sun: `<circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.45"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.58 3.58l1.06 1.06M11.36 11.36l1.06 1.06M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>`,
   moon: `<path d="M12.85 9.95A5.25 5.25 0 0 1 6.05 3.15a5.25 5.25 0 1 0 6.8 6.8Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/>`,
   monitor: `<rect x="2" y="2.75" width="12" height="8.25" rx="1.4" stroke="currentColor" stroke-width="1.45"/><path d="M5.5 13.25h5M8 11v2.25" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/>`,
+  maximize: `<path d="M2.75 6V2.75H6M10 2.75h3.25V6M13.25 10v3.25H10M6 13.25H2.75V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+  minimize: `<path d="M6 2.75V6H2.75M10 2.75V6h3.25M13.25 10H10v3.25M2.75 10H6v3.25" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+  coin: `<circle cx="8" cy="8" r="5.75" stroke="currentColor" stroke-width="1.45"/><path d="M8 4.6v6.8M9.65 6.15c0-.72-.74-1.2-1.65-1.2s-1.65.48-1.65 1.15c0 1.45 3.3.75 3.3 2.35 0 .72-.74 1.25-1.65 1.25s-1.65-.5-1.65-1.2" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>`,
+  egg: `<path d="M8 2.1C5.4 2.1 3.5 5.65 3.5 9.1a4.5 4.5 0 0 0 9 0C12.5 5.65 10.6 2.1 8 2.1Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/><path d="M5.6 8.8l1.5-1.1 1.2 1.25 1.9-1.35" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>`,
+  crown: `<path d="m2.4 12.25 1-6.5 3.1 2.55L8 4.25l1.5 4.05 3.1-2.55 1 6.5H2.4Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/>`,
+  snowflake: `<path d="M8 2v12M2.8 5l10.4 6M13.2 5 2.8 11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="m6.5 3.2 1.5 1.3 1.5-1.3M6.5 12.8 8 11.5l1.5 1.3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>`,
+  flame: `<path d="M8.5 1.9c.3 2.1-1.4 3.2-1.4 4.9 0 1 .7 1.7 1.6 1.7.95 0 1.55-.75 1.6-1.85 1.55 1.1 2.45 2.65 2.45 4.35a4.75 4.75 0 0 1-9.5 0c0-2.55 1.85-4.4 3.45-6.1.55-.58 1.25-1.65 1.8-3Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/>`,
+  split: `<path d="M2.5 8h4.2l2.6-3.5h4.2M6.7 8l2.6 3.5h4.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="m11.5 2.75 2 1.75-2 1.75M11.5 9.75l2 1.75-2 1.75" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`,
+  layers: `<path d="M8 2.25 13.5 5.2 8 8.15 2.5 5.2 8 2.25Z" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round"/><path d="m2.5 8.2 5.5 2.95 5.5-2.95M2.5 11.1 8 14.05l5.5-2.95" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>`,
+  send: `<path d="M13.75 2.25 7.1 8.9M13.75 2.25 9.4 13.75 7.1 8.9 2.25 6.6 13.75 2.25Z" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>`,
 });
 
 const PROVIDER_ICON_PATHS = Object.freeze({

@@ -978,7 +978,17 @@ export function renderProjectBoardHtml({
   return `
     <div class="board-toolbar">
       <div class="board-toolbar-heading">
-        <h2>项目与多任务总控</h2>
+        <div class="mo-title-line">
+          <h2>项目与多任务总控</h2>
+          <div class="mo-view-switch" role="tablist" aria-label="面板视图切换">
+            <button type="button" class="mo-view-tab" data-board-view-mode="tycoon3d" aria-selected="false">3D 梦工厂</button>
+            <button type="button" class="mo-view-tab is-active" data-board-view-mode="list" aria-selected="true">列表</button>
+          </div>
+          <div class="mo-view-subswitch" role="tablist" aria-label="列表分组方式">
+            <button type="button" class="mo-subview-tab" data-board-view-mode="overview" aria-selected="false">按产线</button>
+            <button type="button" class="mo-subview-tab is-active" data-board-view-mode="folders" aria-selected="true">按目录</button>
+          </div>
+        </div>
         <p>关注项目固定置顶；单项目下可直接并行管理多个智能体任务</p>
       </div>
       <div class="board-toolbar-actions">

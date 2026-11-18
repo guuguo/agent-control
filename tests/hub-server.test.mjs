@@ -324,24 +324,20 @@ test("HTTP + SSE server summarizes initial title, updates drifted follow-ups, pe
   });
   assert.equal(created.status, 200);
   const threadId = created.data.thread.id;
-  assert.equal(created.data.thread.title, "Claude·项目进度");
   await waitFor(() =>
     sse.events.find((e) => e.event === "provider_event" && e.data.threadId === threadId && e.data.method === "turn/completed"),
   );
 
-  // Continuation prompt must keep the current title intact.
+  // Follow-up turns do not auto-rename or overwrite upstream title.
   const contRes = await jsonReq(srv.url, "/api/turn", {
     method: "POST",
     body: { threadId, text: "继续" },
   });
   assert.equal(contRes.status, 200);
-  assert.equal(contRes.data.thread?.title, "Claude·项目进度");
   await waitFor(() =>
     sse.events.filter((e) => e.event === "provider_event" && e.data.threadId === threadId && e.data.method === "turn/completed").length >= 2,
   );
 
-  // Topic drift updates title, persists to thread-meta.json, and emits SSE thread_renamed.
-  const sseBeforeDrift = sse.events.length;
   const driftRes = await jsonReq(srv.url, "/api/turn", {
     method: "POST",
     body: {
@@ -350,34 +346,15 @@ test("HTTP + SSE server summarizes initial title, updates drifted follow-ups, pe
     },
   });
   assert.equal(driftRes.status, 200);
-  assert.equal(driftRes.data.thread?.title, "AgentCtrl·优化会话标题生成与更新逻辑");
-
-  const renameEvt = await waitFor(() =>
-    sse.events.slice(sseBeforeDrift).find((e) =>
-      e.event === "thread_renamed"
-      && e.data.threadId === threadId
-      && e.data.name === "AgentCtrl·优化会话标题生成与更新逻辑",
-    ),
-  );
-  assert.equal(renameEvt.data.auto, true);
-
-  const listAfterDrift = await jsonReq(srv.url, "/api/threads");
-  assert.equal(
-    listAfterDrift.data.threads.find((th) => th.id === threadId)?.title,
-    "AgentCtrl·优化会话标题生成与更新逻辑",
-  );
-  const detailAfterDrift = await jsonReq(srv.url, `/api/thread?id=${encodeURIComponent(threadId)}`);
-  assert.equal(detailAfterDrift.data.thread.title, "AgentCtrl·优化会话标题生成与更新逻辑");
 
   const metaRaw = JSON.parse(await readFile(resolve(dataDir, "thread-meta.json"), "utf8"));
-  assert.equal(metaRaw.threads?.[threadId]?.autoTitle, "AgentCtrl·优化会话标题生成与更新逻辑");
-  assert.equal(metaRaw.threads?.[threadId]?.autoTitleIsDrift, true);
+  assert.equal(metaRaw.threads?.[threadId]?.autoTitle || "", "");
 
   await waitFor(() =>
     sse.events.filter((e) => e.event === "provider_event" && e.data.threadId === threadId && e.data.method === "turn/completed").length >= 3,
   );
 
-  // Manual rename overrides title across both /api/thread and /api/threads and locks against future drift.
+  // Manual rename overrides title across both /api/thread and /api/threads and stays fixed.
   const manualRes = await jsonReq(srv.url, "/api/thread/name", {
     method: "POST",
     body: { threadId, name: "手动固定会话标题" },
@@ -394,6 +371,48 @@ test("HTTP + SSE server summarizes initial title, updates drifted follow-ups, pe
   assert.equal(driftAfterManual.data.thread?.title, "手动固定会话标题");
   const listAfterManual = await jsonReq(srv.url, "/api/threads");
   assert.equal(listAfterManual.data.threads.find((th) => th.id === threadId)?.title, "手动固定会话标题");
+
+  // Renaming by rawId (without provider:profileId prefix) resolves composite threadId cleanly.
+  const rawId = threadId.split(":").slice(2).join(":");
+  const rawRenameRes = await jsonReq(srv.url, "/api/thread/name", {
+    method: "POST",
+    body: { rawId, provider: "codex", name: "Agent 主动命名标题" },
+  });
+  assert.equal(rawRenameRes.status, 200);
+  assert.equal(rawRenameRes.data.threadId, threadId);
+  assert.equal(rawRenameRes.data.name, "Agent 主动命名标题");
+  const detailAfterRaw = await jsonReq(srv.url, `/api/thread?id=${encodeURIComponent(threadId)}`);
+  assert.equal(detailAfterRaw.data.thread.title, "Agent 主动命名标题");
+
+  // Settings switch: default agentAutoTitle is true; disabling skips source:"agent" renames but keeps manual renames working.
+  const defaultSettings = await jsonReq(srv.url, "/api/settings");
+  assert.equal(defaultSettings.status, 200);
+  assert.equal(defaultSettings.data.settings?.agentAutoTitle, true);
+
+  const disableSettings = await jsonReq(srv.url, "/api/settings", {
+    method: "POST",
+    body: { agentAutoTitle: false },
+  });
+  assert.equal(disableSettings.status, 200);
+  assert.equal(disableSettings.data.settings?.agentAutoTitle, false);
+
+  const skippedAgentRename = await jsonReq(srv.url, "/api/thread/name", {
+    method: "POST",
+    body: { rawId, provider: "codex", source: "agent", name: "关闭后不应生效" },
+  });
+  assert.equal(skippedAgentRename.status, 200);
+  assert.equal(skippedAgentRename.data.skipped, true);
+  assert.equal(skippedAgentRename.data.reason, "agent_auto_title_disabled");
+  const detailWhileDisabled = await jsonReq(srv.url, `/api/thread?id=${encodeURIComponent(threadId)}`);
+  assert.equal(detailWhileDisabled.data.thread.title, "Agent 主动命名标题");
+
+  const reenableSettings = await jsonReq(srv.url, "/api/settings", {
+    method: "POST",
+    body: { agentAutoTitle: true },
+  });
+  assert.equal(reenableSettings.status, 200);
+  assert.equal(reenableSettings.data.settings?.agentAutoTitle, true);
+
   await waitFor(() =>
     sse.events.filter((e) => e.event === "provider_event" && e.data.threadId === threadId && e.data.method === "turn/completed").length >= 4,
   );

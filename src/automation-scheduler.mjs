@@ -365,6 +365,7 @@ export class AutomationScheduler {
     enabled: true,
     overrides: {},
     customTasks: [],
+    hiddenTaskKeys: [],
   };
   #timer = null;
   #tickPromise = null;
@@ -393,6 +394,7 @@ export class AutomationScheduler {
           enabled: parsed.enabled !== false,
           overrides: parsed.overrides && typeof parsed.overrides === "object" ? parsed.overrides : {},
           customTasks: Array.isArray(parsed.customTasks) ? parsed.customTasks : [],
+          hiddenTaskKeys: Array.isArray(parsed.hiddenTaskKeys) ? parsed.hiddenTaskKeys.filter(Boolean) : [],
         };
       }
     } catch {
@@ -475,7 +477,8 @@ export class AutomationScheduler {
       });
     }
 
-    return rawTasks.map((task) => {
+    const hiddenSet = new Set(Array.isArray(this.#state.hiddenTaskKeys) ? this.#state.hiddenTaskKeys : []);
+    return rawTasks.filter((task) => !hiddenSet.has(task.taskKey)).map((task) => {
       const ov = this.#state.overrides?.[task.taskKey] || {};
       const defaultManaged = task.status === "ACTIVE";
       const managed = typeof ov.managed === "boolean" ? ov.managed : defaultManaged;
@@ -588,6 +591,30 @@ export class AutomationScheduler {
       record,
       ...this.#state.customTasks.filter((t) => t.id !== taskId),
     ];
+    await this.#saveState();
+    const snap = await this.getSnapshot();
+    this.#emit("automation_status", snap);
+    return snap;
+  }
+
+  async deleteTask(taskKeyOrId = "") {
+    const clean = String(taskKeyOrId || "").trim();
+    if (!clean) {
+      throw Object.assign(new Error("taskKey 不能为空"), { status: 400 });
+    }
+    const beforeLen = this.#state.customTasks.length;
+    this.#state.customTasks = this.#state.customTasks.filter(
+      (t) => t.id !== clean && `custom:${t.provider || "codex"}:${t.id}` !== clean,
+    );
+    const removedCustom = this.#state.customTasks.length !== beforeLen;
+    if (!removedCustom) {
+      const hidden = new Set(Array.isArray(this.#state.hiddenTaskKeys) ? this.#state.hiddenTaskKeys : []);
+      hidden.add(clean);
+      this.#state.hiddenTaskKeys = [...hidden];
+    }
+    if (this.#state.overrides && Object.hasOwn(this.#state.overrides, clean)) {
+      delete this.#state.overrides[clean];
+    }
     await this.#saveState();
     const snap = await this.getSnapshot();
     this.#emit("automation_status", snap);

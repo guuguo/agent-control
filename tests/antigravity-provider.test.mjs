@@ -1510,10 +1510,10 @@ test("ProviderHub detects topic drift on historical Antigravity sessions whose D
 
   const listed = await hub.listThreads({ provider: "antigravity" });
   const item = listed.threads.find((th) => th.id === "antigravity:desktop:conv-drift-1");
-  assert.equal(item?.title, "AgentCtrl·优化会话标题生成与更新逻辑");
+  assert.equal(item?.title, "Claude 项目进度查询");
 
   const detail = await hub.readThread("antigravity:desktop:conv-drift-1");
-  assert.equal(detail.thread.title, "AgentCtrl·优化会话标题生成与更新逻辑");
+  assert.equal(detail.thread.title, "Claude 项目进度查询");
 });
 
 test("discoverAntigravityProfiles converges to single Antigravity profile while preserving legacy cli read fallback", async (t) => {
@@ -2152,4 +2152,72 @@ test("AntigravityProvider slims acp_tool_update payloads and suppresses idle lat
     allEvents.some((e) => JSON.stringify(e).includes("STALE_IDLE_")),
     false,
   );
+});
+
+test("Antigravity ask_question parses questions, emits userInput request on readThread, formats follow-up answer, and renders cleanly", async (t) => {
+  const { parseAntigravityTranscript, extractPendingAskQuestionFromTurns } = await import("../src/providers/antigravity-history.mjs");
+  const { renderTurnHtml } = await import("../public/markdown.js");
+
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-agy-ask-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const agyHome = resolve(root, ".gemini", "antigravity");
+  const rawId = "conv-ask-1";
+  const logsDir = resolve(agyHome, "brain", rawId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  const questionsJson = JSON.stringify([
+    {
+      is_multi_select: false,
+      question: "设计树第 1 题：活跃时间窗怎么划定？",
+      options: ["(Recommended) 近 7 天活跃优先", "全量近 30 天"],
+    },
+  ]);
+  const lines = [
+    JSON.stringify({ step_index: 1, type: "USER_INPUT", status: "DONE", created_at: "2026-11-18T06:28:26Z", content: "/grill-me 面板功能" }),
+    JSON.stringify({
+      step_index: 2,
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      created_at: "2026-11-18T06:28:27Z",
+      thinking: "Thinking...",
+      tool_calls: [{ name: "ask_question", args: { questions: questionsJson } }],
+    }),
+  ];
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${lines.join("\n")}\n`, "utf8");
+
+  const parsed = parseAntigravityTranscript(lines);
+  assert.equal(parsed.turns.length, 1);
+  const pending = extractPendingAskQuestionFromTurns(parsed.turns);
+  assert.ok(pending);
+  assert.equal(pending.questions.length, 1);
+  assert.equal(pending.questions[0].options.length, 2);
+
+  const html = renderTurnHtml(parsed.turns[0], { showIncompleteSummaryHint: true });
+  assert.match(html, /设计树第 1 题/);
+  assert.match(html, /近 7 天活跃优先/);
+  assert.doesNotMatch(html, /本轮停在工具执行步/);
+
+  const requests = [];
+  const provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      HOME: root,
+      USERPROFILE: root,
+      AGY_BIN: fileURLToPath(new URL("./helpers/mock-agy-cli.mjs", import.meta.url)),
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([{ id: "desktop", home: agyHome }]),
+    },
+    onServerRequest: (req) => requests.push(req),
+  });
+  t.after(() => provider.close());
+
+  await provider.readThread("desktop", rawId, { detail: "full" });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].kind, "userInput");
+  assert.equal(requests[0].questions[0].question, "设计树第 1 题：活跃时间窗怎么划定？");
+
+  const res = provider.respondServerRequest("desktop", requests[0], {
+    decision: "accept",
+    answers: { q_0: { answers: ["(Recommended) 近 7 天活跃优先"] } },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.followUpText, "(Recommended) 近 7 天活跃优先");
 });

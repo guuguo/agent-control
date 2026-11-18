@@ -102,8 +102,48 @@ case "$REMOTE_MODE" in
     ;;
 esac
 
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+if [[ "$OS_NAME" == "Darwin" ]]; then
+  DEFAULT_DATA_DIR="${AGENT_CONTROL_DATA_DIR:-$HOME/Library/Application Support/Agent Control}"
+else
+  DEFAULT_DATA_DIR="${AGENT_CONTROL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-control}"
+fi
+
+ALREADY_INSTALLED="false"
+if [[ -d "$INSTALL_DIR/.git" ]] \
+  || [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/src/server.mjs" && -f "$SCRIPT_DIR/package.json" && -d "$SCRIPT_DIR/node_modules" ]] \
+  || [[ -x "$LOCAL_BIN/agent-control" ]] \
+  || [[ -f "$DEFAULT_DATA_DIR/remote-config.json" ]] \
+  || [[ -f "$DEFAULT_DATA_DIR/control-runtime.json" ]]; then
+  ALREADY_INSTALLED="true"
+fi
+
+detect_existing_remote_mode() {
+  local cfg="$DEFAULT_DATA_DIR/remote-config.json"
+  if [[ -f "$cfg" ]]; then
+    local detected
+    detected="$(grep -oE '"(mode|provider|tunnelProvider)"[[:space:]]*:[[:space:]]*"(cloudflare|tailscale|named|relay|local)"' "$cfg" 2>/dev/null | head -n 1 | sed -E 's/.*"([^"]+)"$/\1/' || true)"
+    if [[ -n "$detected" ]]; then
+      echo "$detected"
+      return 0
+    fi
+  fi
+  if command -v cloudflared >/dev/null 2>&1; then
+    echo "cloudflare"
+  else
+    echo "local"
+  fi
+}
+
 if [[ "$REMOTE_MODE" == "auto" ]]; then
-  if [[ -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
+  if [[ "$ALREADY_INSTALLED" == "true" ]]; then
+    REMOTE_MODE="$(detect_existing_remote_mode)"
+    echo "检测到本机已安装 Agent Control，跳过方案选择并直接更新（远程模式: $REMOTE_MODE）。"
+  elif [[ -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
     echo "" > /dev/tty
     echo "请选择手机远程接入方案（安装后可随时在页面或命令行切换）：" > /dev/tty
     echo "  [1] Cloudflare 免费临时隧道（默认推荐，安装 cloudflared；免服务器免注册，每次地址随机）" > /dev/tty
@@ -126,7 +166,7 @@ if [[ "$REMOTE_MODE" == "auto" ]]; then
   fi
 fi
 
-if [[ "$REMOTE_MODE" == "relay" && -z "$RELAY_URL" && -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
+if [[ "$ALREADY_INSTALLED" != "true" && "$REMOTE_MODE" == "relay" && -z "$RELAY_URL" && -r /dev/tty && -w /dev/tty && "${AGENT_CONTROL_NONINTERACTIVE:-0}" != "1" ]]; then
   echo "" > /dev/tty
   echo "若已部署自托管中继，可现在直接配对（留空回车可跳过，稍后在界面配对）：" > /dev/tty
   printf "  中继地址（如 https://relay.example.com）: " > /dev/tty
@@ -223,11 +263,6 @@ install_cloudflared_if_missing() {
   echo "[警告] 下载 cloudflared 失败，可稍后手动安装或切换为自托管固定中继。" >&2
   return 1
 }
-
-SCRIPT_DIR=""
-if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-fi
 
 APP_DIR=""
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/src/server.mjs" && -f "$SCRIPT_DIR/package.json" ]]; then

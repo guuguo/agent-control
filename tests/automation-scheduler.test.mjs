@@ -198,5 +198,12 @@ test("AutomationScheduler discovers Codex/Claude tasks, avoids duplicate runs wh
   assert.equal(customRun.ok, true);
   assert.equal(started[2].provider, "claude");
   assert.equal(started[2].text, "汇总今日进展");
+
+  // Deleting custom task removes it; deleting native task hides it non-invasively.
+  const afterDelCustom = await scheduler.deleteTask("custom:claude:custom-claude");
+  assert.equal(afterDelCustom.tasks.some((item) => item.id === "custom-claude"), false);
+  const afterDelNative = await scheduler.deleteTask("codex:default:paused-job");
+  assert.equal(afterDelNative.tasks.some((item) => item.taskKey === "codex:default:paused-job"), false);
+
   scheduler.close();
 });

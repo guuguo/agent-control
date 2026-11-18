@@ -828,7 +828,7 @@ export function buildVoiceLiveProgressItems({
 
 export function renderVoiceLiveProgressHtml(items = []) {
   if (!items.length) {
-    return `<div class="voice-progress-empty">暂无活跃或关注项目，直接说话可查找项目或新建任务</div>`;
+    return `<div class="voice-progress-empty">暂无活跃任务，直接输入即可派发</div>`;
   }
   return items.map((item) => {
     const pv = providerVisualMeta(item.provider);
@@ -840,21 +840,20 @@ export function renderVoiceLiveProgressHtml(items = []) {
       idle: { dot: "is-idle", badge: "空闲" },
     };
     const st = statusMap[item.status] || statusMap.idle;
+    const tipText = [item.projectName, pv.short, item.title, item.phaseText].filter(Boolean).join(" · ");
     return `
-      <div class="voice-progress-card is-${escapeHtml(item.status)}" data-voice-progress-thread="${escapeHtml(item.threadId)}">
-        <div class="voice-progress-top">
-          <span class="voice-progress-dot ${st.dot}" aria-hidden="true"></span>
-          <span class="voice-progress-project">${escapeHtml(item.projectName)}</span>
-          <span class="voice-progress-provider">${providerIconSvg(item.provider, { size: 11 })} ${escapeHtml(pv.short)}</span>
-          ${item.goalBadge ? `<span class="voice-progress-goal">${iconSvg("target", { size: 11 })} ${escapeHtml(item.goalBadge)}</span>` : ""}
-          <span class="voice-progress-state">${escapeHtml(st.badge)}</span>
-        </div>
-        <div class="voice-progress-phase">${escapeHtml(item.title)} · ${escapeHtml(item.phaseText)}</div>
+      <div class="voice-progress-pill is-${escapeHtml(item.status)}" data-voice-progress-thread="${escapeHtml(item.threadId)}" title="${escapeHtml(tipText)}">
+        <span class="voice-progress-dot ${st.dot}" aria-hidden="true"></span>
+        <span class="voice-progress-pill-project">${escapeHtml(item.projectName)}</span>
+        <span class="voice-progress-pill-sep" aria-hidden="true">·</span>
+        <span class="voice-progress-pill-title">${escapeHtml(item.title || st.badge)}</span>
+        ${item.goalBadge ? `<span class="voice-progress-goal">${iconSvg("target", { size: 11 })} ${escapeHtml(item.goalBadge)}</span>` : ""}
+        <span class="voice-progress-pill-badge">${escapeHtml(st.badge)}</span>
         ${item.pendingRequest ? `
-          <div class="voice-progress-actions">
-            <button type="button" class="btn-primary btn-xs" data-voice-approve="${escapeHtml(item.pendingRequest.id)}" data-voice-decision="accept">${iconSvg("check", { size: 12 })} 批准</button>
-            <button type="button" class="btn-danger btn-xs" data-voice-approve="${escapeHtml(item.pendingRequest.id)}" data-voice-decision="decline">${iconSvg("close", { size: 12 })} 拒绝</button>
-          </div>
+          <span class="voice-progress-pill-actions">
+            <button type="button" class="btn-primary btn-xs" data-voice-approve="${escapeHtml(item.pendingRequest.id)}" data-voice-decision="accept" title="批准">${iconSvg("check", { size: 11 })}</button>
+            <button type="button" class="btn-danger btn-xs" data-voice-approve="${escapeHtml(item.pendingRequest.id)}" data-voice-decision="decline" title="拒绝">${iconSvg("close", { size: 11 })}</button>
+          </span>
         ` : ""}
       </div>
     `;

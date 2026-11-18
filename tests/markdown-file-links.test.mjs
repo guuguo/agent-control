@@ -16,7 +16,7 @@ test("文档内链接以当前文件为基准，表格、列表、引用与折�
   }
   const html = renderMarkdown("[脚本](../脚本/ep14.md)\n\n![插图](图片/插图.png)\n\n`正文/025-示例.md`", { threadId, basePath });
   assert.match(html, /data-local-file-path="story-demo\/小说\/..\/脚本\/ep14.md"/);
-  assert.match(html, /path=%E6%88%91%E4%B8%8D%E6%83%B3%E4%B8%8B%E4%B9%A1%2F%E5%B0%8F%E8%AF%B4%2F%E5%9B%BE%E7%89%87%2F/);
+  assert.match(html, /path=story-demo%2F%E5%B0%8F%E8%AF%B4%2F%E5%9B%BE%E7%89%87%2F/);
   assert.match(html, /data-local-file-path="story-demo\/小说\/正文\/025-示例.md"/);
   const windows = renderMarkdown("[正文](正文/025.md)", { basePath: "C:\\books\\小说\\目录.md" });
   assert.match(windows, /data-local-file-path="C:\\books\\小说\\正文\/025.md"/);

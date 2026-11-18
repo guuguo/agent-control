@@ -1,0 +1,59 @@
+{
+  "updatedAt": "2026-11-18 20:35",
+  "kpis": [
+    {
+      "key": "main",
+      "label": "GitHub Star",
+      "value": "7",
+      "delta": "今日+1 · Fork 1",
+      "tone": "growth"
+    },
+    {
+      "key": "github_clones_14d",
+      "label": "近14天克隆",
+      "value": "66",
+      "delta": "34 独立克隆者",
+      "tone": "growth"
+    },
+    {
+      "key": "github_views_14d",
+      "label": "近14天访问",
+      "value": "29",
+      "delta": "4 独立访客",
+      "tone": "growth"
+    },
+    {
+      "key": "xhs_views",
+      "label": "小红书观看",
+      "value": "72",
+      "delta": "赞 2 · 手机遥控篇",
+      "tone": "growth"
+    },
+    {
+      "key": "juejin_views",
+      "label": "掘金阅读",
+      "value": "15",
+      "delta": "远程续跑首发帖",
+      "tone": "growth"
+    },
+    {
+      "key": "revenue",
+      "label": "直接创收",
+      "value": "¥0",
+      "delta": "v0.2.3 开源引流期",
+      "tone": "coin"
+    }
+  ],
+  "sources": {
+    "githubRepo": "https://api.github.com/repos/guuguo/agent-control",
+    "githubTrafficClones": "https://api.github.com/repos/guuguo/agent-control/traffic/clones",
+    "githubTrafficViews": "https://api.github.com/repos/guuguo/agent-control/traffic/views",
+    "xiaohongshuNote": "6afc9050000000002a02d735",
+    "juejinArticle": "https://juejin.cn/post/7708678244820336676"
+  },
+  "notes": [
+    "GitHub Star/Fork 与近14天克隆/访问通过已认证 GitHub REST API 于 2026-11-18 20:29（UTC+8）实时采集。",
+    "小红书视频《出门在外，手机遥控家里的AI干活》数据取自 2026-11-18 17:14 本机账号快照（账号总粉 511，未混入非本项目作品粉丝）。",
+    "掘金文章《Codex 和 Claude Code 怎么用手机远程续跑？…》数据通过掘金公开 query_list 接口于 2026-11-18 20:31 实时核验。"
+  ]
+}

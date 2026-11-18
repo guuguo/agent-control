@@ -259,8 +259,9 @@ export class ClaudeProvider {
           }
         }
       }
+      const allowHomeFallback = Boolean(!profile.managed && !profile.isDesktopInstance && (profile.id === "default" || resolve(cliDir) === defaultCliHome));
       const account = await readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null, {
-        allowHomeFallback: !profile.managed,
+        allowHomeFallback,
       });
       const loginCommand = `CLAUDE_CONFIG_DIR=${shellQuote(cliDir)} claude auth login`;
       const needsLogin = Boolean(profile.managed && !account.signedIn && !endpoint.endpointHost);

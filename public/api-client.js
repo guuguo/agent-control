@@ -8,6 +8,15 @@ export function resolveAppBaseUrl() {
   return "http://127.0.0.1/";
 }
 
+export function isDemoMode() {
+  try {
+    return typeof globalThis.location !== "undefined"
+      && new URLSearchParams(globalThis.location.search || "").get("demo") === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function apiUrl(path, base = resolveAppBaseUrl()) {
   const clean = String(path || "").replace(/^\/+/, "");
   return new URL(clean, base).toString();
@@ -55,6 +64,10 @@ function setEtagCacheEntry(key, etag, rawText) {
 }
 
 export async function apiRequest(path, { method = "GET", body = null, signal, timeoutMs = 0, useEtagCache = true } = {}) {
+  if (isDemoMode()) {
+    const { handleDemoApiRequest } = await import("./demo-fixtures.js");
+    return handleDemoApiRequest(path, { method, body });
+  }
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
   let controller = null;
   let timer = null;

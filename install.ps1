@@ -89,9 +89,36 @@ $appDir = $null
 $dataDir = Resolve-AgentControlDataDir
 
 try {
+  $hasLocalRepo = ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "src\server.mjs")) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "package.json")) -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot "node_modules")))
+  $alreadyInstalled = (
+    (Test-Path -LiteralPath (Join-Path $InstallDir ".git")) -or
+    $hasLocalRepo -or
+    (Test-Path -LiteralPath (Join-Path $dataDir "remote-config.json")) -or
+    (Test-Path -LiteralPath (Join-Path $dataDir "control-runtime.json"))
+  )
+
   if ($Remote -eq "auto") {
     if ($env:AGENT_CONTROL_REMOTE -in @("cloudflare", "tailscale", "named", "relay", "local")) {
       $Remote = $env:AGENT_CONTROL_REMOTE
+    } elseif ($alreadyInstalled) {
+      $detectedRemote = ""
+      $cfgPath = Join-Path $dataDir "remote-config.json"
+      if (Test-Path -LiteralPath $cfgPath) {
+        try {
+          $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
+          foreach ($candidate in @($cfg.mode, $cfg.provider, $cfg.tunnelProvider)) {
+            if ($candidate -in @("cloudflare", "tailscale", "named", "relay", "local")) {
+              $detectedRemote = [string]$candidate
+              break
+            }
+          }
+        } catch {}
+      }
+      if (-not $detectedRemote) {
+        $detectedRemote = if (Get-Command cloudflared -ErrorAction SilentlyContinue) { "cloudflare" } else { "local" }
+      }
+      $Remote = $detectedRemote
+      Write-Host "检测到本机已安装 Agent Control，跳过方案选择并直接更新（远程模式: $Remote）。" -ForegroundColor Cyan
     } elseif ([Environment]::UserInteractive) {
       Write-Host ""
       Write-Host "请选择手机远程接入方案（安装后可随时在页面切换）：" -ForegroundColor Cyan
@@ -113,7 +140,7 @@ try {
     }
   }
 
-  if ($Remote -eq "relay" -and -not $RelayUrl -and [Environment]::UserInteractive) {
+  if (-not $alreadyInstalled -and $Remote -eq "relay" -and -not $RelayUrl -and [Environment]::UserInteractive) {
     $RelayUrl = Read-Host "请输入自托管中继地址（留空跳过，稍后在界面配对）"
     if ($RelayUrl) {
       $InviteCode = Read-Host "请输入配对邀请码"

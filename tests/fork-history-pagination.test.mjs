@@ -78,4 +78,21 @@ test("分叉历史只接在最早一页，滚动加载后刷新尾部不丢中�
   const native = await provider.readThread("cli", rawId, { limit: 2 });
   assert.deepEqual(ids(native.thread.turns), ids(tail.thread.turns));
   assert.equal(native.nextCursor, tail.nextCursor);
+
+  // 继承历史与新会话存在相同 turn ID（如 agy-step-0）时，尾部刷新不得从头部误匹配并丢弃中间轮次。
+  const collidingExisting = [
+    { id: "agy-step-0", status: "completed", items: [] },
+    { id: "agy-step-2", status: "completed", items: [] },
+    { id: "agy-step-4", status: "completed", items: [] },
+    { id: "agy-step-0", status: "completed", items: [] },
+    { id: "agy-step-2", status: "completed", items: [] },
+  ];
+  const collidingTail = [
+    { id: "agy-step-0", status: "completed", items: [] },
+    { id: "agy-step-2", status: "inProgress", items: [] },
+  ];
+  const mergedColliding = merge(collidingExisting, collidingTail);
+  assert.equal(mergedColliding.length, 5);
+  assert.deepEqual(ids(mergedColliding), ids(collidingExisting));
+  assert.equal(mergedColliding[4].status, "inProgress");
 });

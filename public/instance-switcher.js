@@ -78,6 +78,24 @@ export const CLIENT_FALLBACK_MODELS = Object.freeze({
   ]),
   codex: Object.freeze([
     {
+      id: "gpt-6.2-sol",
+      model: "gpt-6.2-sol",
+      displayName: "GPT-6.2-Sol",
+      provider: "codex",
+      isDefault: false,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    },
+    {
+      id: "gpt-6.2-astra",
+      model: "gpt-6.2-astra",
+      displayName: "GPT-6.2-Astra",
+      provider: "codex",
+      isDefault: false,
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    },
+    {
       id: "gpt-6.1-terra",
       model: "gpt-6.1-terra",
       displayName: "GPT-6.1 Terra",
@@ -1227,6 +1245,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         + (tpsText ? `<span class="telemetry-compact-tps">${escapeAttrHtml(tpsText)}</span>` : "")
         + (fiveHourText ? `<span class="telemetry-quota-alert is-${quota.lowFiveHour <= 5 ? "danger" : "warn"}">${escapeAttrHtml(fiveHourText)}</span>` : "")
         + (quota.statusText ? `<span class="telemetry-compact-quota is-muted">${escapeAttrHtml(quota.statusText)}</span>` : "")
+        + (hasWeekly ? `<span class="telemetry-compact-percent">${Math.round(Number(quota.weeklyPercent) || 0)}%</span>` : "")
         + `</button>`;
     }).join("");
 

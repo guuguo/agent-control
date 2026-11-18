@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261118a" />
+  <meta name="ac-ui-version" content="20261118demo" />
   <title>Agent Control · 多智能体远程控制台</title>
   <script>
     (function () {
@@ -18,8 +18,8 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261118a" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261118a" />
+  <link rel="stylesheet" href="./app.css?v=20261118demo" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261118demo" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -39,7 +39,18 @@
             <strong>Agent Control</strong>
             <span id="themeToggleIcon" class="brand-theme-icon" data-icon="monitor" data-icon-size="12" aria-hidden="true"></span>
           </button>
-          <span class="host-pill" id="hostBadge">本机</span>
+          <div class="brand-row-meta">
+            <button
+              type="button"
+              id="sidebarAutomationsBtn"
+              class="brand-plan-btn"
+              title="Agent 定时计划与自动化任务"
+              aria-label="查看不同 Agent 定时计划"
+            >
+              <span class="btn-icon-glyph" data-icon="clock" data-icon-size="12" aria-hidden="true"></span>
+            </button>
+            <span class="host-pill" id="hostBadge">本机</span>
+          </div>
         </div>
         <div class="sidebar-actions">
           <button type="button" id="newThreadBtn" class="btn-primary btn-sm sidebar-new-btn">+ 新建会话</button>
@@ -69,6 +80,11 @@
           <div id="providerTabsSettingsMenu" class="provider-tabs-settings-menu"></div>
         </div>
         <button type="button" id="sidebarBatchSelectBtn" class="batch-mode-toggle-btn" title="批量选择项目或会话（也可直接长按列表项）">多选</button>
+      </div>
+
+      <div class="sidebar-search-row">
+        <input type="search" id="sidebarSearchInput" class="sidebar-search-input" placeholder="搜索会话标题、预览或项目…" autocomplete="off" />
+        <button type="button" id="sidebarSearchClearBtn" class="sidebar-search-clear" title="清除搜索" hidden>×</button>
       </div>
 
       <div id="agentQuotaStrip" class="agent-quota-strip" aria-label="智能体可用额度" hidden></div>
@@ -124,9 +140,9 @@
             <span id="telemetryTopbarDot" class="telemetry-summary-dot" aria-hidden="true"></span>
             <span id="telemetryTopbarText">额度</span>
           </button>
-          <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="AI 开车 / 免提语音通话总控">
+          <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="轻量总控助手（支持键盘对话与免提语音）">
             <span class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
-            <span class="btn-label-desktop">通话</span>
+            <span class="btn-label-desktop">助手</span>
             <span id="voiceAttentionDot" class="btn-attention-dot" hidden aria-hidden="true"></span>
           </button>
           <button type="button" id="interruptBtn" class="btn-danger btn-sm topbar-icon-action" hidden title="中断当前执行">
@@ -526,48 +542,37 @@
           <span id="voiceCallDot" class="voice-call-dot is-connecting" aria-hidden="true"></span>
           <div class="voice-call-title-wrap">
             <div class="voice-call-title-row">
-              <strong>开车 / 免提语音通话</strong>
+              <strong>轻量总控助手</strong>
               <span id="voiceCallTimer" class="voice-call-timer">00:00</span>
             </div>
             <div class="voice-model-row">
-              <select id="voiceModelSelect" class="voice-model-select" aria-label="选择语音助手轻量模型" title="选择语音助手使用的轻量模型（不限于 Gemini，也可选 Claude Haiku / Codex Mini / 本机规则）">
+              <select id="voiceModelSelect" class="voice-model-select" aria-label="选择轻量助手模型" title="选择轻量助手使用的轻量模型（不限于 Gemini，也可选 Claude Haiku / Codex Mini / 本机规则）">
                 <option value="auto">自动优选轻量模型</option>
                 <option value="local:local-rules">仅本机规则（零模型）</option>
               </select>
-              <span id="voiceModelBadge" class="voice-model-badge">免提</span>
+              <span id="voiceModelBadge" class="voice-model-badge">键盘对话</span>
             </div>
           </div>
         </div>
         <div class="voice-head-actions">
-          <button type="button" id="voiceMinimizeBtn" class="btn-secondary btn-xs" title="收起通话面板查看对话，保持后台免提通话"><span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span><span>看对话</span></button>
-          <button type="button" id="voiceAutoAnnounceBtn" class="btn-secondary btn-xs is-on" title="后台任务完成或新审批时自动语音播报"><span class="btn-icon-glyph" data-icon="bell" data-icon-size="12" aria-hidden="true"></span><span>进展播报</span></button>
-          <button type="button" id="voiceKeyboardToggleBtn" class="btn-secondary btn-xs" title="展开文字补充输入" aria-label="展开文字输入"><span class="btn-icon-glyph" data-icon="keyboard" data-icon-size="13" aria-hidden="true"></span></button>
-          <button type="button" id="voiceCloseHangupBtn" class="icon-btn" data-close-modal="voiceCopilotModal" aria-label="挂断并关闭通话窗口"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+          <button type="button" id="voiceMinimizeBtn" class="btn-secondary btn-xs" title="收起助手窗口，后台保持连接"><span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span><span>看对话</span></button>
+          <button type="button" id="voiceAutoAnnounceBtn" class="btn-secondary btn-xs is-on" title="开启语音时，后台任务完成或新审批自动语音播报"><span class="btn-icon-glyph" data-icon="bell" data-icon-size="12" aria-hidden="true"></span><span>进展播报</span></button>
+          <button type="button" id="voiceKeyboardToggleBtn" class="btn-secondary btn-xs" title="显示或隐藏文字输入框" aria-label="切换文字输入"><span class="btn-icon-glyph" data-icon="keyboard" data-icon-size="13" aria-hidden="true"></span></button>
+          <button type="button" id="voiceCloseHangupBtn" class="icon-btn" data-close-modal="voiceCopilotModal" aria-label="关闭轻量助手"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
         </div>
-      </div>
-
-      <div id="voiceScopeBar" class="voice-scope-bar" role="tablist" aria-label="语音通话模式">
-        <button type="button" id="voiceScopeThreadBtn" class="voice-scope-pill" data-voice-scope="thread" title="仅针对当前对话极速回复或派发任务">
-          <span class="btn-icon-glyph" data-icon="chat" data-icon-size="12" aria-hidden="true"></span>
-          <span id="voiceScopeThreadLabel">当前对话</span>
-        </button>
-        <button type="button" id="voiceScopeGlobalBtn" class="voice-scope-pill is-active" data-voice-scope="global" title="跨项目查询进展、切换会话与全局派单">
-          <span class="btn-icon-glyph" data-icon="radio" data-icon-size="12" aria-hidden="true"></span>
-          <span>全局总控</span>
-        </button>
       </div>
 
       <div class="voice-call-body">
         <div class="voice-call-stage">
           <div class="voice-orb-wrap">
-            <button type="button" id="voiceOrbBtn" class="voice-orb" aria-label="语音通话控制球">
+            <button type="button" id="voiceOrbBtn" class="voice-orb" aria-label="语音控制球">
               <span class="voice-orb-ring is-outer" aria-hidden="true"></span>
               <span class="voice-orb-ring is-inner" aria-hidden="true"></span>
               <span class="voice-orb-core" data-icon="mic" data-icon-size="28" aria-hidden="true"></span>
             </button>
           </div>
-          <div id="voiceStateText" class="voice-state-text">正在接入免提语音通道…</div>
-          <div id="voiceSubHintText" class="voice-sub-hint">说话停顿约 1 秒后自动发送；AI 说话时轻点光球可打断</div>
+          <div id="voiceStateText" class="voice-state-text">轻量对话就绪（全局视角）</div>
+          <div id="voiceSubHintText" class="voice-sub-hint">直接输入文字咨询、找项目或派发任务；需要免提时点击「开启语音」</div>
           <div id="voiceUnheardBanner" class="voice-unheard-banner" hidden></div>
           <div id="voiceCallTranscript" class="voice-call-transcript"></div>
         </div>
@@ -580,12 +585,12 @@
           <div id="voiceLiveProgressList" class="voice-live-progress-list"></div>
         </section>
 
-        <form id="voiceTextForm" class="voice-text-row" hidden>
+        <form id="voiceTextForm" class="voice-text-row">
           <input
             id="voiceTextInput"
             type="text"
             class="voice-text-input"
-            placeholder="不方便说话时，可输入指令由语音总控调度…"
+            placeholder="输入问题或指令：找项目、查进展、派发任务…（也可开启语音）"
           />
           <button type="submit" id="voiceTextSubmitBtn" class="btn-primary btn-sm">发送</button>
         </form>
@@ -594,19 +599,19 @@
       <div class="voice-call-dock">
         <button type="button" id="voiceMuteBtn" class="voice-dock-btn">
           <span class="voice-dock-icon" data-icon="mic" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceMuteLabel" class="voice-dock-label">静音</span>
+          <span id="voiceMuteLabel" class="voice-dock-label">开启语音</span>
         </button>
         <button type="button" id="voiceReadProgressBtn" class="voice-dock-btn is-read">
           <span class="voice-dock-icon" data-icon="speaker" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceReadLabel" class="voice-dock-label">播报进度</span>
+          <span id="voiceReadLabel" class="voice-dock-label">总结进度</span>
         </button>
         <button type="button" id="voiceTalkBtn" class="voice-dock-btn is-primary">
           <span class="voice-dock-icon" data-icon="bolt" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceTalkBtnTitle" class="voice-dock-label">立即发送</span>
+          <span id="voiceTalkBtnTitle" class="voice-dock-label">开启语音</span>
         </button>
-        <button type="button" id="voiceHangupBtn" class="voice-dock-btn is-hangup" aria-label="挂断通话">
+        <button type="button" id="voiceHangupBtn" class="voice-dock-btn is-hangup" aria-label="关闭轻量助手">
           <span class="voice-dock-icon" data-icon="offline" data-icon-size="18" aria-hidden="true"></span>
-          <span id="voiceHangupLabel" class="voice-dock-label">挂断</span>
+          <span id="voiceHangupLabel" class="voice-dock-label">关闭</span>
         </button>
       </div>
     </div>
@@ -695,6 +700,28 @@
               <small>服务端版本或桌面端代码变化时自动重新编译安装 /Applications/Agent Control.app</small>
             </span>
           </label>
+          <label class="update-toggle-row">
+            <input id="agentAutoTitleToggle" type="checkbox" checked />
+            <span class="update-toggle-copy">
+              <strong>允许 AI 会话主动同步标题</strong>
+              <small>开启后，Claude / Antigravity / Codex 可在确定主题时同步简短中文标题；关闭后仅保留上游原始标题与手动重命名</small>
+            </span>
+          </label>
+          <label class="update-toggle-row">
+            <input id="autoUpdateCliToggle" type="checkbox" checked />
+            <span class="update-toggle-copy">
+              <strong>闲时自动更新 Codex / Claude CLI</strong>
+              <small>每 6 小时检查 npm 最新版本，仅在没有任何运行中对话时自动执行全局升级</small>
+            </span>
+          </label>
+        </section>
+
+        <section id="cliUpdateCard" class="tunnel-card update-settings-card">
+          <div class="tunnel-card-head">
+            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="terminal" data-icon-size="13" aria-hidden="true"></span> CLI 工具版本</strong>
+            <button type="button" id="checkCliUpdatesBtn" class="btn-secondary btn-xs">检查 CLI 更新</button>
+          </div>
+          <div id="cliVersionsList" class="update-meta-grid"></div>
         </section>
 
         <section id="updatePendingSection" class="tunnel-card update-pending-card" hidden>
@@ -788,7 +815,7 @@
     </div>
   </dialog>
 
-  <dialog id="instanceManagerModal" class="modal-dialog" aria-label="多开实例管理">
+  <dialog id="instanceManagerModal" class="modal-dialog instance-manager-modal" aria-label="多开实例管理">
     <div class="modal-card instance-manager-modal-card">
       <div class="modal-head">
         <h3>多开实例管理</h3>
@@ -824,7 +851,7 @@
     </div>
   </dialog>
 
-  <script type="module" src="./i18n.js?v=20261118a"></script>
-  <script type="module" src="./app.js?v=20261118a"></script>
+  <script type="module" src="./i18n.js?v=20261118demo"></script>
+  <script type="module" src="./app.js?v=20261118demo"></script>
 </body>
 </html>

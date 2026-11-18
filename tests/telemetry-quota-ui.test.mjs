@@ -22,9 +22,11 @@ test("compact quota uses weekly background progress and keeps credits in expande
   const html = renderQuota(windows);
   assert.match(html, /has-weekly-quota quota-ok/);
   assert.match(html, /telemetry-weekly-fill" style="width:46%"/);
+  assert.match(html, /class="telemetry-compact-percent">46%</);
   assert.match(html, /title="周额度剩余 46%/);
   const text = html.replace(/<[^>]*>/g, "");
-  assert.doesNotMatch(text, /周|46%|5h|84%|积分|38591/);
+  assert.match(text, /46%/);
+  assert.doesNotMatch(text, /周|5h|84%|积分|38591/);
   assert.match(renderQuota(windows, { expanded: true }), /积分 38591/);
 });
 

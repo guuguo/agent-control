@@ -437,7 +437,7 @@ test("claude-history exposes firstUserText/lastUserText for drift detection and 
 
   const read = await hub.readThread(`claude:default:${sessionId}`);
   assert.notEqual(read.thread.title, "新会话");
-  assert.equal(read.thread.title, "AgentCtrl·优化会话标题生成与更新逻辑");
+  assert.equal(read.thread.title, "跑一下测试");
 });
 
 test("claude-history prefers real entry.cwd/relocatedCwd over lossy slug fallback and spawn ENOENT stays failed", async (t) => {

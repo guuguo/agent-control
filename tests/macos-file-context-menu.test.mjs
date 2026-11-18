@@ -31,7 +31,7 @@ function page(hostname = "127.0.0.1") {
 }
 
 test("Mac local file links route right-click to Finder menu without changing left-click preview", () => {
-  const path = "/Volumes/External SSD/dev/guuguo/agent-control/dist/替换并重启.command";
+  const path = "/Volumes/External SSD/dev/demo/agent-control/dist/替换并重启.command";
   const html = renderMarkdown(`[更新脚本](<${path}>)`);
   const renderedPath = html.match(/data-local-file-path="([^"]+)"/)?.[1];
   assert.equal(renderedPath, path);
@@ -54,7 +54,7 @@ test("Mac context menu preserves default handling for remote pages, web links, a
 });
 
 test("Mac local context menu handles application folders and decoded anchored file links", () => {
-  const appPath = "/Volumes/External SSD/dev/guuguo/agent-control/dist/Agent Control.app";
+  const appPath = "/Volumes/External SSD/dev/demo/agent-control/dist/Agent Control.app";
   const appHtml = renderMarkdown(`[应用](<${appPath}>)`);
   const renderedAppPath = appHtml.match(/data-local-file-path="([^"]+)"/)?.[1];
   assert.equal(renderedAppPath, appPath);

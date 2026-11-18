@@ -1,5 +1,7 @@
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import os from "node:os";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { formatCompositeThreadId } from "../composite-id.mjs";
 import { codexExecutionPolicy } from "../permissions.mjs";
@@ -287,6 +289,44 @@ export class CodexProvider {
             typeof item === "string" ? item : item.reasoningEffort,
           ).filter(Boolean),
         }));
+        const profile = await this.#getProfile(profileId).catch(() => null);
+        if (profile?.home) {
+          const isRealOpenAiProfile = !profile.endpointHost || String(profile.modelProvider || "").includes("openai");
+          const isTempTestHome = String(profile.home).startsWith(os.tmpdir());
+          const cachePaths = [resolve(profile.home, "models_cache.json")];
+          if (isRealOpenAiProfile && !isTempTestHome) {
+            const defaultCodexCache = resolve(this.#env.HOME || os.homedir(), ".codex", "models_cache.json");
+            if (defaultCodexCache !== cachePaths[0]) cachePaths.push(defaultCodexCache);
+          }
+          const existingIds = new Set(items.map((item) => item.id));
+          const extra = [];
+          for (const cachePath of cachePaths) {
+            try {
+              const rawCache = JSON.parse(readFileSync(cachePath, "utf8"));
+              for (const entry of Array.isArray(rawCache?.models) ? rawCache.models : []) {
+                const slug = String(entry?.slug || entry?.id || "").trim();
+                if (!slug || existingIds.has(slug) || entry?.visibility !== "list") continue;
+                existingIds.add(slug);
+                extra.push({
+                  id: slug,
+                  model: slug,
+                  displayName: String(entry.display_name || slug),
+                  description: String(entry.description || ""),
+                  provider: "codex",
+                  profileId,
+                  isDefault: false,
+                  defaultReasoningEffort: String(entry.default_reasoning_level || "medium"),
+                  supportedReasoningEfforts: (entry.supported_reasoning_levels || [])
+                    .map((lvl) => (typeof lvl === "string" ? lvl : lvl?.effort))
+                    .filter(Boolean),
+                });
+              }
+            } catch {
+              // Ignore missing or unreadable models_cache.json.
+            }
+          }
+          if (extra.length) items.unshift(...extra);
+        }
         this.#modelsCache.set(profileId, { at: Date.now(), items });
         return items;
       })().finally(() => {
@@ -404,6 +444,12 @@ export class CodexProvider {
   #normalizeThread(profile, rawThread) {
     const rawId = String(rawThread.id || "");
     const preview = this.#resolveCleanThreadPreview(rawThread);
+    const cleanRawName = String(rawThread.name || "").trim();
+    const cleanRawFirst = String(rawThread.firstUserText || rawThread.firstUserMessage || "").trim();
+    const isLegacyTwoPartBracket = /^【[^】｜|]+[｜|][^】｜|]+】/.test(cleanRawName);
+    const upstreamCustomTitle = (cleanRawName && cleanRawName !== cleanRawFirst && !isLegacyTwoPartBracket)
+      ? cleanRawName
+      : "";
     const thread = {
       id: formatCompositeThreadId("codex", profile.id, rawId),
       rawId,
@@ -413,6 +459,7 @@ export class CodexProvider {
       profileLabel: profile.label,
       name: rawThread.name || "",
       upstreamTitle: rawThread.name || rawThread.title || "",
+      ...(upstreamCustomTitle ? { upstreamCustomTitle } : {}),
       firstUserText: rawThread.firstUserText || rawThread.firstUserMessage || "",
       lastUserText: rawThread.lastUserText || "",
       hasFollowUpTurns: Boolean(rawThread.hasFollowUpTurns),

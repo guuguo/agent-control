@@ -69,9 +69,9 @@ test("thread-meta-store persists customName and archived without touching provid
     title: "初始标题",
     archived: false,
   });
-  assert.equal(appliedAuto.title, "偏离后自动标题");
-  assert.equal(appliedAuto.autoTitle, "偏离后自动标题");
-  assert.equal(appliedAuto.autoTitleIsDrift, true);
+  assert.equal(appliedAuto.title, "初始标题");
+  assert.equal(appliedAuto.autoTitle, "");
+  assert.equal(appliedAuto.autoTitleIsDrift, false);
 });
 
 test("goal-controller drives continuation, completion marker, interrupt, and maxTurns", async (t) => {

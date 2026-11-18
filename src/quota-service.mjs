@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { open, readdir, readFile, stat } from "node:fs/promises";
 import os from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { formatProfileKey } from "./composite-id.mjs";
 import { resolveUserHome } from "./platform.mjs";
@@ -399,7 +399,7 @@ export class QuotaService {
     const desktopClaimedByCliDir = new Map();
     await Promise.all(claudeProfiles.map(async (p) => {
       const key = p.key || formatProfileKey(p.provider, p.id);
-      const cliDir = resolve(String(p.cliConfigDir || p.home || ""));
+      const historyKey = resolve(String(p.historyDir || p.cliConfigDir || p.home || ""));
       let meta = await readClaudeDesktopSessionsMeta(p);
       if (!meta.claimedIds.size && !meta.errorEntries.length && p.id === "default") {
         const defaultDesktop = defaultClaudeDesktopUserDataDir({ env: this.#env, home: this.#homeDir });
@@ -408,11 +408,11 @@ export class QuotaService {
         }
       }
       claudeMetaByKey.set(key, meta);
-      if (p.isDesktopInstance && meta.claimedIds.size > 0 && cliDir) {
-        let set = desktopClaimedByCliDir.get(cliDir);
+      if (p.isDesktopInstance && meta.claimedIds.size > 0 && historyKey) {
+        let set = desktopClaimedByCliDir.get(historyKey);
         if (!set) {
           set = new Set();
-          desktopClaimedByCliDir.set(cliDir, set);
+          desktopClaimedByCliDir.set(historyKey, set);
         }
         for (const id of meta.claimedIds) set.add(id);
       }
@@ -855,12 +855,20 @@ export class QuotaService {
     const projectsDir = join(claudeHome, "projects");
     const hasAllowList = Boolean(allowedSessionIds && allowedSessionIds.size > 0);
     let files = [];
+    const fileSessionId = (filePath) => {
+      const base = basename(filePath, ".jsonl");
+      const parent = dirname(filePath);
+      if (basename(parent) === "subagents") {
+        return basename(dirname(parent));
+      }
+      return base;
+    };
     if (allowUnscoped || hasAllowList) {
       files = await collectFilesRecursive(projectsDir, { maxDepth: 2, ext: ".jsonl" });
       if (hasAllowList) {
-        files = files.filter((f) => allowedSessionIds.has(basename(f.path, ".jsonl")));
+        files = files.filter((f) => allowedSessionIds.has(fileSessionId(f.path)));
       } else if (excludedSessionIds && excludedSessionIds.size > 0) {
-        files = files.filter((f) => !excludedSessionIds.has(basename(f.path, ".jsonl")));
+        files = files.filter((f) => !excludedSessionIds.has(fileSessionId(f.path)));
       }
     }
     const recent = files
@@ -1105,10 +1113,12 @@ export class QuotaService {
     );
     const planSec = Number.isFinite(planSampleTsMs) && planSampleTsMs > 0 ? Math.floor(planSampleTsMs / 1000) : 0;
     const planRolledOverByReset = knownResetSec > planSec && knownResetSec <= nowSec;
+    const planUnconfirmedExhausted = id === "five_hour" && planUsedPct === 100 && !activeResetSec;
+    const effectivePlanWindowMs = planUnconfirmedExhausted ? Math.min(windowMs, 15 * 60_000) : windowMs;
     const planFresh = planUsedPct !== null
       && Number.isFinite(planSampleTsMs)
       && planSampleTsMs > 0
-      && (nowMs - planSampleTsMs) <= windowMs
+      && (nowMs - planSampleTsMs) <= effectivePlanWindowMs
       && !planRolledOverByReset;
 
     if (planFresh && (eventBucket.remainingPercent === null || planSampleTsMs >= chosenTsMs)) {
@@ -1141,9 +1151,11 @@ export class QuotaService {
   async #collectClaude(profile, base, ctx) {
     const cliConfigDir = profile.cliConfigDir || profile.home;
     const historyDir = profile.historyDir || profile.home || cliConfigDir;
+    const defaultCliHome = resolve(String(this.#env.CLAUDE_CONFIG_DIR || "").trim() || join(this.#homeDir, ".claude"));
+    const allowHomeFallback = !profile.managed && !profile.isDesktopInstance && (profile.id === "default" || resolve(cliConfigDir) === defaultCliHome);
     const claudeJson = (await readJsonSafe(join(cliConfigDir, ".claude.json")))
       || (historyDir !== cliConfigDir ? await readJsonSafe(join(historyDir, ".claude.json")) : null)
-      || (await readJsonSafe(join(this.#homeDir, ".claude.json")));
+      || (allowHomeFallback ? await readJsonSafe(join(this.#homeDir, ".claude.json")) : null);
     const settingsJson = profile.isDesktopInstance
       ? null
       : ((await readJsonSafe(join(cliConfigDir, "settings.json")))

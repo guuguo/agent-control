@@ -150,7 +150,7 @@ test("turn-taking playback completes even when background noise or user speech a
 });
 
 test("turn-taking capture buffers speech during AI playback without interrupting and merges with post-playback speech", async () => {
-  const onProcSource = appSource.match(/processor\.onaudioprocess = \(ev\) => \{[\s\S]*?\n    \};/)?.[0];
+  const onProcSource = appSource.match(/processor\.onaudioprocess = \(ev\) => \{\s*const nowMs = Date\.now\(\);[\s\S]*?\n    \};/)?.[0];
   const overlapHelpersSource = [
     appSource.match(/function clearVoiceOverlapFlushTimer\(\) \{[\s\S]*?\n\}/)?.[0],
     appSource.match(/function resetVoiceOverlapBuffer\(\) \{[\s\S]*?\n\}/)?.[0],

@@ -45,7 +45,7 @@ export function createThreadMetaStore({
   filePath = threadMetaPath(),
   profileFilePath = resolve(dirname(filePath), "profile-health.json"),
 } = {}) {
-  let state = { version: 1, threads: {}, projects: {}, profiles: {} };
+  let state = { version: 1, threads: {}, projects: {}, profiles: {}, settings: { agentAutoTitle: true, autoUpdateCli: true } };
   let loaded = false;
   let writeChain = Promise.resolve();
   let persistScheduled = null;
@@ -111,16 +111,21 @@ export function createThreadMetaStore({
           }
         }
         const fileProfiles = await readProfilesFile();
+        const rawSettings = parsed.settings && typeof parsed.settings === "object" ? parsed.settings : {};
         state = {
           version: 1,
           threads,
           projects,
           profiles: { ...legacyProfiles, ...fileProfiles },
+          settings: {
+            agentAutoTitle: rawSettings.agentAutoTitle !== false,
+            autoUpdateCli: rawSettings.autoUpdateCli !== false,
+          },
         };
       }
     } catch {
       const fileProfiles = await readProfilesFile();
-      state = { version: 1, threads: {}, projects: {}, profiles: fileProfiles };
+      state = { version: 1, threads: {}, projects: {}, profiles: fileProfiles, settings: { agentAutoTitle: true, autoUpdateCli: true } };
     }
   };
 
@@ -132,6 +137,7 @@ export function createThreadMetaStore({
           version: 1,
           threads: { ...state.threads },
           projects: { ...state.projects },
+          settings: { ...state.settings },
         };
         const next = writeChain.then(() => writeJsonAtomic(filePath, snapshot));
         writeChain = next.catch(() => {});
@@ -258,6 +264,33 @@ export function createThreadMetaStore({
     hasUnarchivedOverrides() {
       return Object.values(state.threads || {}).some((item) => item && item.archived === false);
     },
+    listThreads() {
+      const out = {};
+      for (const [id, item] of Object.entries(state.threads || {})) {
+        if (!id || !item || typeof item !== "object") continue;
+        out[id] = { ...item };
+      }
+      return out;
+    },
+    async setThreadTopic(compositeId, topicId = "", stageTag = "") {
+      await ensureLoaded();
+      if (!compositeId) return null;
+      const prev = state.threads[compositeId] || {};
+      const cleanTopic = String(topicId || "").trim().slice(0, 64);
+      const cleanStage = String(stageTag || "").replace(/[\r\n]+/g, " ").trim().slice(0, 32);
+      const next = { ...prev, updatedAt: Math.floor(Date.now() / 1000) };
+      if (cleanTopic) {
+        next.topicId = cleanTopic;
+        if (cleanStage) next.stageTag = cleanStage;
+        else delete next.stageTag;
+      } else {
+        delete next.topicId;
+        delete next.stageTag;
+      }
+      state.threads[compositeId] = next;
+      await persist();
+      return { ...next };
+    },
     async setThreadPrefs(compositeId, patch = {}) {
       await ensureLoaded();
       if (!compositeId) return null;
@@ -320,10 +353,8 @@ export function createThreadMetaStore({
       const meta = state.threads[thread.id];
       if (!meta) return thread;
       const customName = meta.customName || "";
-      const autoTitle = meta.autoTitle || "";
-      const nextName = customName || autoTitle || thread.name || "";
+      const nextName = customName || thread.name || "";
       const nextTitle = customName
-        || autoTitle
         || thread.title
         || displayThreadTitle({ ...thread, customName, name: nextName });
       return {
@@ -333,11 +364,11 @@ export function createThreadMetaStore({
         name: nextName,
         title: nextTitle,
         customName,
-        autoTitle,
-        autoTitleSourceSig: meta.autoTitleSourceSig || "",
-        autoTitleIsDrift: Boolean(meta.autoTitleIsDrift),
-        titleLocked: Boolean(meta.titleLocked),
-        titleDomainKey: meta.titleDomainKey || "",
+        autoTitle: "",
+        autoTitleSourceSig: "",
+        autoTitleIsDrift: false,
+        titleLocked: Boolean(customName),
+        titleDomainKey: "",
         titleSchemaVersion: Number(meta.titleSchemaVersion) || 0,
         archived: Boolean(meta.archived ?? thread.archived),
         pinned: Boolean(meta.pinned),
@@ -345,6 +376,27 @@ export function createThreadMetaStore({
         ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
         ...(meta.permissionMode ? { permissionMode: meta.permissionMode } : {}),
       };
+    },
+    getSettings() {
+      return {
+        agentAutoTitle: state.settings?.agentAutoTitle !== false,
+        autoUpdateCli: state.settings?.autoUpdateCli !== false,
+      };
+    },
+    async setSettings(patch = {}) {
+      await ensureLoaded();
+      const prev = {
+        agentAutoTitle: state.settings?.agentAutoTitle !== false,
+        autoUpdateCli: state.settings?.autoUpdateCli !== false,
+      };
+      const next = {
+        ...prev,
+        ...(Object.hasOwn(patch, "agentAutoTitle") ? { agentAutoTitle: Boolean(patch.agentAutoTitle) } : {}),
+        ...(Object.hasOwn(patch, "autoUpdateCli") ? { autoUpdateCli: Boolean(patch.autoUpdateCli) } : {}),
+      };
+      state.settings = next;
+      await persist();
+      return { ...next };
     },
     getProfileMeta(profileKey) {
       const key = String(profileKey || "").trim();

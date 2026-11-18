@@ -161,6 +161,93 @@ function localPathToFileHref(rawTarget = "") {
   return "#";
 }
 
+function stripOptionalMatchingQuotes(raw = "") {
+  const trimmed = String(raw || "").trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === "\"" && last === "\"") || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+export function formatPastedFileMarkdownLink(rawInput = "") {
+  const candidate = stripOptionalMatchingQuotes(rawInput);
+  if (!candidate) return "";
+  const isFileUri = /^file:\/\//i.test(candidate);
+  const { cleanPath, startLine, endLine } = splitClientFileRefAndAnchor(candidate);
+  if (!cleanPath || (!isFileUri && !isLocalFileSystemPath(cleanPath))) return "";
+  // 排除相对路径与 ~ 简写，确保链接始终带上文件绝对路径。
+  if (/^~\//.test(cleanPath)) return "";
+
+  const normalized = cleanPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const segments = normalized.split("/").filter(Boolean);
+  const baseName = segments.length ? segments[segments.length - 1] : cleanPath;
+  const label = baseName.replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+  let href = localPathToFileHref(cleanPath);
+  if (href === "#") return "";
+  if (startLine) {
+    href += endLine && endLine !== startLine ? `#L${startLine}-L${endLine}` : `#L${startLine}`;
+  }
+  const needsAngleBrackets = /[\s()<>]/.test(href);
+  return `[${label}](${needsAngleBrackets ? `<${href}>` : href})`;
+}
+
+export function formatClipboardFilesAsMarkdownLinks({
+  uriList = "",
+  plainText = "",
+  files = [],
+  includeImages = false,
+} = {}) {
+  const links = [];
+  const seen = new Set();
+  const pushFormatted = (raw) => {
+    const formatted = formatPastedFileMarkdownLink(raw);
+    if (!formatted || seen.has(formatted)) return;
+    seen.add(formatted);
+    links.push(formatted);
+  };
+
+  const uriLines = String(uriList || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && /^file:\/\//i.test(line));
+  for (const uri of uriLines) {
+    if (!includeImages && CLIENT_RASTER_IMAGE_EXT_RE.test(uri.split(/[?#]/)[0])) continue;
+    pushFormatted(uri);
+  }
+
+  for (const file of Array.isArray(files) ? files : []) {
+    const filePath = String(file?.path || "").trim();
+    if (!filePath) continue;
+    const isImage = String(file?.type || "").startsWith("image/") || CLIENT_RASTER_IMAGE_EXT_RE.test(filePath);
+    if (!includeImages && isImage) continue;
+    pushFormatted(filePath);
+  }
+
+  if (!links.length && plainText) {
+    const rawLines = String(plainText)
+      .split(/\r?\n/)
+      .map((line) => stripOptionalMatchingQuotes(line))
+      .filter(Boolean);
+    if (
+      rawLines.length > 0
+      && rawLines.every((line) => {
+        if (/^\[[^\]]+\]\(/.test(line)) return false;
+        const link = formatPastedFileMarkdownLink(line);
+        if (!link) return false;
+        return includeImages || !CLIENT_RASTER_IMAGE_EXT_RE.test(splitClientFileRefAndAnchor(line).cleanPath);
+      })
+    ) {
+      for (const line of rawLines) pushFormatted(line);
+    }
+  }
+
+  return links.join(" ");
+}
+
 function sanitizeImageSrc(rawSrc) {
   const trimmed = String(rawSrc || "").trim();
   if (!trimmed) return "";
@@ -2936,6 +3023,60 @@ function renderQuietHeartbeatTurnHtml(turn, group, { threadId = "" } = {}) {
   `;
 }
 
+function extractAskQuestionList(item) {
+  if (!item || item.type !== "mcpToolCall" || item.tool !== "ask_question") return [];
+  if (Array.isArray(item.questions) && item.questions.length) return item.questions;
+  let raw = item.arguments?.questions ?? item.arguments?.Questions;
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((q, idx) => {
+      if (!q || typeof q !== "object") return null;
+      const question = String(q.question || q.prompt || "").trim();
+      const options = (Array.isArray(q.options) ? q.options : [])
+        .map((opt) => (typeof opt === "string"
+          ? { label: opt.trim(), description: "" }
+          : { label: String(opt?.label || opt?.name || opt?.value || "").trim(), description: String(opt?.description || "").trim() }))
+        .filter((o) => o.label);
+      if (!question && !options.length) return null;
+      return {
+        id: String(q.id || `q_${idx}`),
+        header: String(q.header || `问题 ${idx + 1}`),
+        question,
+        multiSelect: Boolean(q.is_multi_select ?? q.multiSelect),
+        options,
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderAskQuestionItemHtml(item, questions) {
+  const answerText = String(item?.result?.content?.find((c) => c?.type === "text")?.text || "").trim();
+  const blocks = questions.map((q, idx) => {
+    const optsHtml = (q.options || []).map((opt, oIdx) => `
+      <li class="agy-ask-opt"><span class="agy-ask-idx">${oIdx + 1}.</span><span>${escapeHtml(opt.label)}</span></li>
+    `).join("");
+    return `
+      <div class="agy-ask-question">
+        <div class="agy-ask-qtitle">${questions.length > 1 ? `${idx + 1}. ` : ""}${escapeHtml(q.question || q.header || "请确认")}</div>
+        ${optsHtml ? `<ul class="agy-ask-opts">${optsHtml}</ul>` : ""}
+      </div>
+    `;
+  }).join("");
+  return `
+    <div class="agy-ask-card">
+      <div class="agy-ask-head">
+        <span class="agy-ask-badge">提问确认</span>
+        <span class="agy-ask-status">${answerText ? "已回答" : "等待下方卡片或消息回答"}</span>
+      </div>
+      ${blocks}
+      ${answerText ? `<div class="agy-ask-answer">已选/回答：${escapeHtml(answerText)}</div>` : ""}
+    </div>
+  `;
+}
+
 export function renderTurnHtml(turn, {
   agentLabel = "Agent",
   threadId = "",
@@ -2976,6 +3117,7 @@ export function renderTurnHtml(turn, {
 
   const parts = [];
   let pendingProcessItems = [];
+  let hasAskQuestion = false;
   const flushProcessGroup = (groupRunning = false, isFinalFlush = false) => {
     if (!pendingProcessItems.length) return;
     const html = renderProcessGroupHtml(pendingProcessItems, {
@@ -2993,7 +3135,12 @@ export function renderTurnHtml(turn, {
   for (let i = 0; i < cleanItems.length; i += 1) {
     const item = cleanItems[i];
     if (!item || typeof item !== "object") continue;
-    if (item.type === "userMessage") {
+    const askQuestions = extractAskQuestionList(item);
+    if (askQuestions.length) {
+      flushProcessGroup(false, false);
+      hasAskQuestion = true;
+      parts.push(renderAskQuestionItemHtml(item, askQuestions));
+    } else if (item.type === "userMessage") {
       flushProcessGroup(false, false);
       parts.push(renderUserItem(item, { threadId, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "" }));
     } else if (item.type === "agentMessage" && primaryAgentIndexes.has(i)) {
@@ -3030,6 +3177,7 @@ export function renderTurnHtml(turn, {
     && !isRunning
     && !hasExternalStreamingReply
     && primaryAgentIndexes.size === 0
+    && !hasAskQuestion
     && !normalizedTurn?.error?.message
     && hasProcessContent
   ) {
@@ -3127,6 +3275,25 @@ export function dedupeAdjacentTurns(turns = []) {
         effort: turn.effort || prev.effort || "",
         items: mergedItems,
       };
+      continue;
+    }
+
+    if (
+      currIsLiveTail
+      && prevReply
+      && currReply
+      && currReply.length >= 20
+      && currReply === prevReply
+      && (!prevUser || !currUser || prevUser !== currUser)
+    ) {
+      const strippedItems = (Array.isArray(turn.items) ? turn.items : []).filter(
+        (item) => !(
+          item?.type === "agentMessage"
+          && item.phase !== "commentary"
+          && String(item.text || "").trim() === prevReply
+        ),
+      );
+      result.push({ ...turn, items: strippedItems });
       continue;
     }
 

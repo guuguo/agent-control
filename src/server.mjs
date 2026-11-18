@@ -34,6 +34,7 @@ import { RemoteBridge } from "./remote-bridge.mjs";
 import { logRequestError } from "./request-logging.mjs";
 import { acquireRuntimeLease } from "./runtime-lease.mjs";
 import { AutomationScheduler } from "./automation-scheduler.mjs";
+import { MissionOverviewService } from "./mission-overview-service.mjs";
 import { UpdateService } from "./update-service.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
 
@@ -158,6 +159,13 @@ export async function createAgentControlServer({
     env,
     dataDir,
     onEvent: (eventName, payload) => broadcastSse(eventName, payload),
+  });
+
+  const overviewService = new MissionOverviewService({
+    hub,
+    env,
+    dataDir,
+    broadcast: (eventName, payload) => broadcastSse(eventName, payload),
   });
 
   const unsubscribeHub = hub.subscribe((eventName, payload) => {
@@ -369,6 +377,26 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/cli/check" && request.method === "POST") {
+        await readJsonBody(request).catch(() => ({}));
+        const cliStatus = await hub.checkCliUpdates({ force: true });
+        sendJson(response, 200, { cliStatus }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/cli/upgrade" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const provider = String(body.provider || "").trim();
+        if (!provider) {
+          sendJson(response, 400, { error: { code: "BAD_REQUEST", message: "provider 不能为空" } }, { requestId });
+          return;
+        }
+        const result = await hub.upgradeCli(provider, { force: body.force !== false });
+        const cliStatus = await hub.getCliStatus();
+        sendJson(response, 200, { ...result, cliStatus }, { requestId });
+        return;
+      }
+
       if (pathname === "/api/cli/install" && request.method === "POST") {
         const body = await readJsonBody(request);
         const provider = String(body.provider || "").trim();
@@ -376,7 +404,9 @@ export async function createAgentControlServer({
           sendJson(response, 400, { error: { code: "BAD_REQUEST", message: "provider 不能为空" } }, { requestId });
           return;
         }
-        const result = await hub.repairCli(provider, { force: body.force !== false });
+        const result = body.upgrade
+          ? await hub.upgradeCli(provider, { force: body.force !== false })
+          : await hub.repairCli(provider, { force: body.force !== false });
         const cliStatus = await hub.getCliStatus();
         sendJson(response, 200, { ...result, cliStatus }, { requestId });
         return;
@@ -472,6 +502,120 @@ export async function createAgentControlServer({
         const result = await hub.updateProjectMeta(body.cwd, {
           ...(Object.hasOwn(body, "pinned") ? { pinned: body.pinned } : {}),
           ...(Object.hasOwn(body, "alias") ? { alias: body.alias } : {}),
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview" && request.method === "GET") {
+        const trigger = url.searchParams.get("trigger") || "view";
+        const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+        const result = await overviewService.getOverview({ trigger, force });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/refresh" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        await overviewService.triggerRefresh({
+          force: true,
+          preferredModel: body.preferredModel || "",
+          cooldownMinutes: Number(body.cooldownMinutes) || 0,
+        });
+        const result = await overviewService.getOverview({ trigger: "view", force: false });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/assign" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.assignThreadTopic(
+          body.threadId || "",
+          body.topicId || "",
+          body.stageTag || "",
+        );
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/topic" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.upsertTopic(body);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/spark" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.handleSparkAction(body);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/focus" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.toggleBossFocus(body.topicId || "");
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/metrics" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.upsertTopicMetrics(body);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/dispatch-prefs" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.updateDispatchPrefs({
+          strategy: body.strategy || "",
+          providerOrder: Array.isArray(body.providerOrder) ? body.providerOrder : null,
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/dispatch" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.dispatchTask({
+          text: body.text || "",
+          topicId: body.topicId || "",
+          mode: body.mode || "auto",
+          preferredProvider: body.preferredProvider || "auto",
+          agentKey: body.agentKey || "auto",
+          model: body.model || "",
+          effort: body.effort || "",
+          priorityStrategy: body.priorityStrategy || "",
+          providerOrder: Array.isArray(body.providerOrder) ? body.providerOrder : null,
+          remember: body.remember !== false,
+          confirmOnly: Boolean(body.confirmOnly),
+          sparkId: body.sparkId || "",
+          inheritContext: body.inheritContext !== false,
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/archive-digest" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.archiveAndSummarizeTopic({
+          topicId: body.topicId || "",
+          staleDays: body.staleDays ?? 3,
+          confirmOnly: Boolean(body.confirmOnly),
+          threadIds: Array.isArray(body.threadIds) ? body.threadIds : null,
+          preferredModel: body.preferredModel || "auto",
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/overview/context" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.upsertTopicArchiveContext({
+          topicId: body.topicId || "",
+          summary: body.summary || "",
+          clear: Boolean(body.clear),
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -860,10 +1004,35 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/settings" && request.method === "GET") {
+        sendJson(response, 200, { settings: hub.getSettings() }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/settings" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const settings = await hub.setSettings(body || {});
+        sendJson(response, 200, { ok: true, settings }, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/name" && request.method === "POST") {
         const body = await readJsonBody(request);
-        context.threadId = body.threadId || "";
-        const result = await hub.renameThread(body.threadId, body.name);
+        if (String(body.source || "").trim().toLowerCase() === "agent" && hub.getSettings().agentAutoTitle === false) {
+          sendJson(response, 200, { ok: true, skipped: true, reason: "agent_auto_title_disabled" }, { requestId });
+          return;
+        }
+        let threadId = String(body.threadId || "").trim();
+        const rawId = String(body.rawId || "").trim();
+        if (!threadId || !threadId.includes(":")) {
+          threadId = await hub.resolveCompositeThreadId({
+            rawId: rawId || threadId,
+            provider: body.provider || "",
+            cwd: body.cwd || "",
+          });
+        }
+        context.threadId = threadId;
+        const result = await hub.renameThread(threadId, body.name);
         sendJson(response, 200, result, { requestId });
         return;
       }
@@ -1265,6 +1434,13 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/automations/delete" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const snapshot = await automationScheduler.deleteTask(body?.taskKey || body?.id || "");
+        sendJson(response, 200, snapshot, { requestId });
+        return;
+      }
+
       if (pathname.startsWith("/api/")) {
         sendJson(response, 404, { error: { message: "API 路由不存在" } }, { requestId });
         return;
@@ -1317,6 +1493,7 @@ export async function createAgentControlServer({
     quickTunnel,
     tunnelAuth,
     updateService,
+    overviewService,
     identity,
     get port() {
       return actualPort;

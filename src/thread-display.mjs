@@ -172,6 +172,14 @@ export function mergeActiveTurnIntoHistory(turns = [], active = null, { liveItem
     return Boolean(text) && text !== activeReply;
   });
 
+  const prevCompletedTurn = list.length >= 2 ? list[list.length - 2] : null;
+  const prevCompletedReply = prevCompletedTurn ? turnPrimaryReply(prevCompletedTurn) : "";
+  const isStaleEchoOfPrevTurn = Boolean(
+    activeReply.length >= 20
+    && prevCompletedReply
+    && activeReply === prevCompletedReply,
+  );
+
   if (lastTurn && activeUserText && lastUserText === activeUserText && !lastTurnHasCompletedReply) {
     const nextItems = Array.isArray(lastTurn.items) ? [...lastTurn.items] : [];
     const hasSameLiveReply = activeReply && nextItems.some(
@@ -179,7 +187,7 @@ export function mergeActiveTurnIntoHistory(turns = [], active = null, { liveItem
         && it.phase !== "commentary"
         && String(it.text || "").trim() === activeReply,
     );
-    if (activeReply && !hasSameLiveReply) {
+    if (activeReply && !hasSameLiveReply && !isStaleEchoOfPrevTurn) {
       nextItems.push({
         type: "agentMessage",
         id: `${active.turnId}:${liveItemSuffix}`,
@@ -216,6 +224,13 @@ export function mergeActiveTurnIntoHistory(turns = [], active = null, { liveItem
     return list;
   }
 
+  const lastTurnReply = lastTurn ? turnPrimaryReply(lastTurn) : "";
+  const isEchoOfLastCompletedTurn = Boolean(
+    activeReply.length >= 20
+    && lastTurnReply
+    && activeReply === lastTurnReply,
+  );
+
   const liveItems = [];
   if (active.userText) {
     liveItems.push({
@@ -224,7 +239,7 @@ export function mergeActiveTurnIntoHistory(turns = [], active = null, { liveItem
       content: [{ type: "text", text: active.userText }],
     });
   }
-  if (active.lastText) {
+  if (active.lastText && !isEchoOfLastCompletedTurn) {
     liveItems.push({
       type: "agentMessage",
       id: `${active.turnId}:${liveItemSuffix}`,

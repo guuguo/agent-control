@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import os from "node:os";
 import {
   execFileCrossPlatform,
@@ -7,6 +8,25 @@ import {
 } from "../platform.mjs";
 
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000;
+const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+export function extractSemver(text) {
+  const m = String(text || "").match(/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/);
+  return m ? m[1] : "";
+}
+
+export function compareSemver(a, b) {
+  const parse = (v) => String(v || "").split("-")[0].split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const pa = parse(a);
+  const pb = parse(b);
+  const len = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < len; i += 1) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da !== db) return da > db ? 1 : -1;
+  }
+  return 0;
+}
 
 export const CLI_SPECS = Object.freeze({
   codex: {
@@ -76,6 +96,17 @@ export function hasSignedInProfile(profiles = [], provider) {
   );
 }
 
+export function resolveHomebrewCask(executablePath) {
+  if (!executablePath) return "";
+  try {
+    const resolved = fs.realpathSync(executablePath);
+    const match = resolved.match(/\/Caskroom\/([^/]+)\//);
+    return match ? match[1] : "";
+  } catch {
+    return "";
+  }
+}
+
 export class CliMaintenanceManager {
   #env;
   #home;
@@ -129,17 +160,30 @@ export class CliMaintenanceManager {
       } else if (hasAuth) {
         status = "missing_manual";
       }
+      const installedVersion = cliInstalled ? (prev.installedVersion || "") : "";
+      const latestVersion = cliInstalled ? (prev.latestVersion || "") : "";
+      const updateAvailable = Boolean(
+        cliInstalled
+        && installedVersion
+        && latestVersion
+        && compareSemver(latestVersion, installedVersion) > 0,
+      );
       out[provider] = {
         provider,
         label: spec.label,
         hasAuth,
         cliInstalled,
         executable,
+        installedVersion,
+        latestVersion,
+        updateAvailable,
+        updatable: Boolean(spec.npmPackage),
         autoInstallable: spec.autoInstallable,
         status,
         installing: this.#inFlight.has(provider),
-        lastError: cliInstalled ? "" : (prev.lastError || ""),
+        lastError: cliInstalled ? (prev.lastUpgradeError || "") : (prev.lastError || ""),
         lastCheckedAt: prev.lastCheckedAt || 0,
+        lastUpdateCheckAt: prev.lastUpdateCheckAt || 0,
         lastAttemptAt: prev.lastAttemptAt || 0,
         manualHint: spec.manualHint,
       };
@@ -249,5 +293,184 @@ export class CliMaintenanceManager {
       void this.installCli(item.provider);
     }
     return triggered;
+  }
+
+  #resolveNpmBin() {
+    const isWin = normalizePlatform(this.#platform) === "win32";
+    return this.#resolveExecutable({
+      binaryName: "npm",
+      env: this.#env,
+      platform: this.#platform,
+    }) || (isWin ? "npm.cmd" : "npm");
+  }
+
+  async readInstalledVersion(provider) {
+    const executable = resolveRealCliExecutable(provider, {
+      env: this.#env,
+      home: this.#home,
+      platform: this.#platform,
+      resolveImpl: this.#resolveExecutable,
+    });
+    if (!executable) return "";
+    try {
+      const res = await this.#execImpl(executable, ["--version"], {
+        env: this.#env,
+        timeout: 5_000,
+        windowsHide: true,
+        shell: false,
+      });
+      const version = extractSemver(res?.stdout || res?.stderr || "");
+      if (version) {
+        const prev = this.#state.get(provider) || {};
+        this.#state.set(provider, { ...prev, installedVersion: version });
+      }
+      return version;
+    } catch {
+      return "";
+    }
+  }
+
+  async checkUpdates(profiles = [], { force = false, checkIntervalMs = DEFAULT_UPDATE_CHECK_INTERVAL_MS } = {}) {
+    const snapshot = this.inspect(profiles);
+    const npmBin = this.#resolveNpmBin();
+    const now = Date.now();
+    await Promise.all(Object.values(snapshot).map(async (item) => {
+      const spec = CLI_SPECS[item.provider];
+      if (!item.cliInstalled || !spec?.npmPackage) return;
+      const prev = this.#state.get(item.provider) || {};
+      if (!force && prev.lastUpdateCheckAt && (now - prev.lastUpdateCheckAt) < checkIntervalMs) {
+        return;
+      }
+      const [installedVersion, latestRes] = await Promise.all([
+        this.readInstalledVersion(item.provider),
+        this.#execImpl(npmBin, ["view", spec.npmPackage, "version"], {
+          env: this.#env,
+          timeout: 15_000,
+          windowsHide: true,
+          shell: false,
+        }).catch(() => null),
+      ]);
+      const latestVersion = extractSemver(latestRes?.stdout || latestRes || "") || prev.latestVersion || "";
+      const nextPrev = this.#state.get(item.provider) || {};
+      this.#state.set(item.provider, {
+        ...nextPrev,
+        ...(installedVersion ? { installedVersion } : {}),
+        ...(latestVersion ? { latestVersion } : {}),
+        lastUpdateCheckAt: Date.now(),
+      });
+    }));
+    return this.inspect(profiles);
+  }
+
+  async upgradeCli(provider, { force = false } = {}) {
+    const spec = CLI_SPECS[provider];
+    if (!spec) throw new Error(`Unsupported CLI provider: ${provider}`);
+    const existing = resolveRealCliExecutable(provider, {
+      env: this.#env,
+      home: this.#home,
+      platform: this.#platform,
+      resolveImpl: this.#resolveExecutable,
+    });
+    if (!existing) {
+      return this.installCli(provider, { force });
+    }
+    if (!spec.npmPackage) {
+      return { provider, ok: false, manualRequired: true, message: spec.manualHint };
+    }
+    if (this.#inFlight.has(provider)) return this.#inFlight.get(provider);
+
+    const prev = this.#state.get(provider) || {};
+    if (!force && prev.lastAttemptAt && (Date.now() - prev.lastAttemptAt) < this.#cooldownMs) {
+      return { provider, ok: false, skippedCooldown: true, message: prev.lastUpgradeError || "冷却中" };
+    }
+
+    const run = (async () => {
+      const caskName = resolveHomebrewCask(existing);
+      const upgradeCmd = caskName
+        ? (this.#resolveExecutable({ binaryName: "brew", env: this.#env, platform: this.#platform }) || "brew")
+        : this.#resolveNpmBin();
+      const upgradeArgs = caskName
+        ? ["upgrade", "--cask", caskName]
+        : ["install", "-g", `${spec.npmPackage}@latest`, "--no-audit", "--no-fund"];
+      const beforeVersion = await this.readInstalledVersion(provider);
+      try {
+        await this.#execImpl(
+          upgradeCmd,
+          upgradeArgs,
+          {
+            env: this.#env,
+            timeout: 180_000,
+            windowsHide: true,
+            shell: false,
+          },
+        );
+        const afterVersion = await this.readInstalledVersion(provider);
+        const resolvedAfter = resolveRealCliExecutable(provider, {
+          env: this.#env,
+          home: this.#home,
+          platform: this.#platform,
+          resolveImpl: this.#resolveExecutable,
+        });
+        const prevState = this.#state.get(provider) || {};
+        this.#state.set(provider, {
+          ...prevState,
+          installedVersion: afterVersion || prevState.installedVersion || "",
+          latestVersion: afterVersion || prevState.latestVersion || "",
+          lastCheckedAt: Date.now(),
+          lastAttemptAt: Date.now(),
+          lastUpdateCheckAt: Date.now(),
+          lastUpgradeError: "",
+        });
+        if (resolvedAfter && this.#onUpdated) {
+          try {
+            await this.#onUpdated(provider, resolvedAfter, {
+              upgraded: true,
+              beforeVersion,
+              version: afterVersion,
+            });
+          } catch {}
+        }
+        return {
+          provider,
+          ok: true,
+          upgraded: Boolean(afterVersion && afterVersion !== beforeVersion),
+          beforeVersion,
+          version: afterVersion,
+          executable: resolvedAfter,
+          message: afterVersion ? `${spec.label} 已更新到 ${afterVersion}` : `${spec.label} 更新完成`,
+        };
+      } catch (err) {
+        const message = String(err?.stderr || err?.message || err || "升级失败").trim().slice(0, 400);
+        const prevState = this.#state.get(provider) || {};
+        this.#state.set(provider, {
+          ...prevState,
+          lastCheckedAt: Date.now(),
+          lastAttemptAt: Date.now(),
+          lastUpgradeError: message,
+        });
+        return { provider, ok: false, message };
+      } finally {
+        this.#inFlight.delete(provider);
+      }
+    })();
+
+    this.#inFlight.set(provider, run);
+    return run;
+  }
+
+  async ensureUpToDateClis(profiles = [], { isIdle = () => true, autoUpgrade = true, forceCheck = false } = {}) {
+    const snapshot = await this.checkUpdates(profiles, { force: forceCheck });
+    if (!autoUpgrade || !isIdle()) {
+      return { checked: snapshot, upgraded: [] };
+    }
+    const upgraded = [];
+    for (const item of Object.values(snapshot)) {
+      if (!item.cliInstalled || !item.updatable || !item.updateAvailable || item.installing) continue;
+      if (item.lastAttemptAt && (Date.now() - item.lastAttemptAt) < this.#cooldownMs) continue;
+      if (!isIdle()) break;
+      const res = await this.upgradeCli(item.provider);
+      if (res?.ok) upgraded.push(item.provider);
+    }
+    return { checked: this.inspect(profiles), upgraded };
   }
 }

@@ -288,7 +288,7 @@ test("codex-thread-index + ProviderHub detect topic drift in rollout files when 
 
   const listed = await hub.listThreads({ provider: "codex" });
   const target = listed.threads.find((th) => th.id === "codex:default:thr-drift-1");
-  assert.equal(target?.title, "AgentCtrl·优化会话标题生成与更新逻辑");
+  assert.equal(target?.title, "Claude 项目进度查询");
 });
 
 test("Codex image wrappers, Files mentioned headers, question replies, and /api/thread/image render cleanly and securely", async (t) => {
@@ -486,9 +486,9 @@ test("Codex image wrappers, Files mentioned headers, question replies, and /api/
   const th2 = listRes.threads.find((th) => th.id === "codex:default:thr-files-2");
   const th3 = listRes.threads.find((th) => th.id === "codex:default:thr-skill-3");
 
-  assert.equal(th1?.title, "ep01全三幕竖屏分镜");
+  assert.equal(th1?.title, "使用 demo-image-gen 技能，为《星火计划》ep01 顺序生成全三幕竖屏分镜图。");
   assert.doesNotMatch(th1?.preview || "", /<image|<\/image>/);
-  assert.equal(th2?.title, "工单·转接提交返回504");
+  assert.equal(th2?.title, "【工单｜转接】提交返回504");
   assert.equal(th2?.preview, "工单转接报错。");
   assert.equal(th3?.preview, "我们用 codex 做了一个 $video-prompt-compiler");
 

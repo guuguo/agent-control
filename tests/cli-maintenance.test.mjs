@@ -75,3 +75,61 @@ test("CliMaintenanceManager auto-installs missing npm-based CLI when auth exists
   assert.equal(after.codex.status, "ready");
   assert.equal(after.codex.cliInstalled, true);
 });
+
+test("CliMaintenanceManager checks npm updates and upgrades outdated CLIs only when idle", async () => {
+  let codexVersion = "0.162.0";
+  const calls = [];
+  const upgradedEvents = [];
+  const manager = new CliMaintenanceManager({
+    platform: "darwin",
+    resolveExecutableImpl: ({ binaryName }) => {
+      if (binaryName === "npm") return "/usr/local/bin/npm";
+      if (binaryName === "codex") return "/usr/local/bin/codex";
+      return null;
+    },
+    execImpl: async (bin, args) => {
+      calls.push({ bin, args });
+      if (bin === "/usr/local/bin/codex" && args[0] === "--version") {
+        return { stdout: `codex-cli ${codexVersion}\n`, stderr: "" };
+      }
+      if (bin === "/usr/local/bin/npm" && args[0] === "view") {
+        return { stdout: "0.166.0\n", stderr: "" };
+      }
+      if (bin === "/usr/local/bin/npm" && args[0] === "install" && args[2] === "@openai/codex@latest") {
+        codexVersion = "0.166.0";
+        return { stdout: "updated 1 package\n", stderr: "" };
+      }
+      return { stdout: "", stderr: "" };
+    },
+    onUpdated: async (provider, executable, meta) => {
+      upgradedEvents.push({ provider, executable, meta });
+    },
+  });
+
+  const profiles = [{ provider: "codex", account: { signedIn: true } }];
+
+  // Busy turn prevents auto-upgrade, while still reporting updateAvailable.
+  const busyRes = await manager.ensureUpToDateClis(profiles, {
+    isIdle: () => false,
+    autoUpgrade: true,
+    forceCheck: true,
+  });
+  assert.deepEqual(busyRes.upgraded, []);
+  assert.equal(busyRes.checked.codex.installedVersion, "0.162.0");
+  assert.equal(busyRes.checked.codex.latestVersion, "0.166.0");
+  assert.equal(busyRes.checked.codex.updateAvailable, true);
+
+  // Idle state triggers npm install -g @openai/codex@latest.
+  const idleRes = await manager.ensureUpToDateClis(profiles, {
+    isIdle: () => true,
+    autoUpgrade: true,
+    forceCheck: false,
+  });
+  assert.deepEqual(idleRes.upgraded, ["codex"]);
+  assert.equal(idleRes.checked.codex.installedVersion, "0.166.0");
+  assert.equal(idleRes.checked.codex.updateAvailable, false);
+  assert.equal(upgradedEvents.length, 1);
+  assert.equal(upgradedEvents[0].meta.beforeVersion, "0.162.0");
+  assert.equal(upgradedEvents[0].meta.version, "0.166.0");
+  assert.ok(calls.some((c) => c.args[0] === "install" && c.args[2] === "@openai/codex@latest"));
+});

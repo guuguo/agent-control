@@ -1005,10 +1005,91 @@ function unwrapToolArgs(rawArgs) {
   return out;
 }
 
+export function normalizeAntigravityAskQuestions(rawArgs) {
+  let raw = rawArgs;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    raw = raw.questions ?? raw.Questions ?? raw;
+  }
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((q, idx) => {
+      if (!q || typeof q !== "object") return null;
+      const question = String(q.question || q.prompt || "").trim();
+      const rawOpts = Array.isArray(q.options) ? q.options : [];
+      const options = rawOpts
+        .map((opt) => {
+          if (typeof opt === "string") return { label: opt.trim(), description: "" };
+          if (!opt || typeof opt !== "object") return null;
+          const label = String(opt.label || opt.name || opt.value || "").trim();
+          return label ? { label, description: String(opt.description || "").trim() } : null;
+        })
+        .filter(Boolean);
+      if (!question && !options.length) return null;
+      return {
+        id: String(q.id || `q_${idx}`),
+        header: String(q.header || `问题 ${idx + 1}`),
+        question,
+        multiSelect: Boolean(q.is_multi_select ?? q.multiSelect),
+        isOther: q.isOther !== false,
+        options,
+      };
+    })
+    .filter(Boolean);
+}
+
+export function extractPendingAskQuestionFromTurns(turns = []) {
+  if (!Array.isArray(turns) || !turns.length) return null;
+  const lastTurn = turns[turns.length - 1];
+  const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
+  if (!items.length) return null;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i];
+    if (!item || typeof item !== "object") continue;
+    if (item.type === "userMessage") return null;
+    if (item.type === "agentMessage" && item.phase !== "commentary" && String(item.text || "").trim()) {
+      return null;
+    }
+    if (item.type === "mcpToolCall" && item.tool === "ask_question") {
+      if (item.result || item.error) return null;
+      const questions = Array.isArray(item.questions) && item.questions.length
+        ? item.questions
+        : normalizeAntigravityAskQuestions(item.arguments);
+      if (!questions.length) return null;
+      return {
+        turnId: String(lastTurn.id || ""),
+        itemId: String(item.id || ""),
+        questions,
+      };
+    }
+  }
+  return null;
+}
+
 function mapToolCallToItem(toolCall, stepIndex, toolIdx, defaultStatus = "completed") {
   const name = String(toolCall?.name || "tool");
   const args = unwrapToolArgs(toolCall?.args);
   const id = String(toolCall?.id || `agy-${stepIndex}-tool-${toolIdx}`);
+  if (name === "ask_question") {
+    const questions = normalizeAntigravityAskQuestions(args);
+    return {
+      type: "mcpToolCall",
+      id,
+      server: "antigravity",
+      tool: "ask_question",
+      arguments: args,
+      ...(questions.length ? { questions } : {}),
+      status: defaultStatus,
+      result: null,
+      error: null,
+    };
+  }
   if (name === "run_command" || name === "Bash" || name === "exec_command") {
     return {
       type: "commandExecution",

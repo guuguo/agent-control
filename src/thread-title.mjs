@@ -428,6 +428,17 @@ function isDeicticOrPlaceholderPrompt(raw) {
     || /^(?:小助理\s*bug\s*等下发你图|等下发你图|等下给你看)[。，,\s]*$/i.test(clean);
 }
 
+function isCanonicalBracketUpstreamTitle(rawUpstream) {
+  const clean = stripPromptNoise(rawUpstream);
+  if (!clean) return false;
+  const match = clean.match(/^【([^】\n]{1,64})】\s*(\S.*)$/);
+  if (!match) return false;
+  const parts = match[1].split(/[｜|]/).map((part) => part.trim()).filter(Boolean);
+  // 3 段及以上上下文（如【客户｜提出人｜模块｜机型】异常）视为工单/技能规范标题，原样保留不裁剪。
+  if (parts.length < 3) return false;
+  return !isLowQualityTitle(match[2].trim());
+}
+
 function isGoodConciseUpstreamTitle(rawUpstream) {
   const clean = stripPromptNoise(rawUpstream);
   if (!clean || isLowQualityTitle(clean)) return false;
@@ -1348,7 +1359,18 @@ export function resolveAdaptiveThreadTitle({
   const promptSig = latestSubstantivePrompt ? threadTitleSourceSig(latestSubstantivePrompt) : "";
   const cleanUpstream = stripPromptNoise(upstreamTitle);
   const validUpstream = !isLowQualityTitle(cleanUpstream) ? cleanUpstream : "";
-  const hasBracketTicketUpstream = /^【[^】｜|]+[｜|][^】]+】\S/.test(cleanUpstream);
+  const hasBracketTicketUpstream = isCanonicalBracketUpstreamTitle(cleanUpstream);
+  if (hasBracketTicketUpstream) {
+    return buildResult({
+      title: cleanUpstream,
+      autoTitleToSave: null,
+      sourceSig: "",
+      drifted: false,
+      reason: "upstream_canonical_ticket",
+      titleLocked: true,
+      domainKey: titleDomainKey || "",
+    });
+  }
   const goodConciseUpstream = isGoodConciseUpstreamTitle(cleanUpstream);
 
   // Only treat prompt as genuine turn-1 when firstUserText or turns array exists (or single-turn new thread).
@@ -1371,9 +1393,9 @@ export function resolveAdaptiveThreadTitle({
   const validV3Auto = (
     !isLegacySchema
     && cleanAuto
-    && !/^【/.test(cleanAuto)
+    && (isCanonicalBracketUpstreamTitle(cleanAuto) || !/^【/.test(cleanAuto))
     && !isLowQualityTitle(cleanAuto)
-    && cleanAuto.length <= 28
+    && cleanAuto.length <= 48
   )
     ? cleanAuto
     : "";

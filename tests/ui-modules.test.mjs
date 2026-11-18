@@ -1500,6 +1500,33 @@ test("running turns never duplicate previous turn summary at bottom across strea
   assert.equal(mergedWithoutStaleActive.length, 2);
   assert.equal(mergedWithoutStaleActive[1].id, "agy-step-20");
 
+  // 3b. New live turn before execution starts must not echo the previous completed turn's reply.
+  const newTurnWithStaleEcho = mergeActiveTurnIntoHistory(
+    [turnsWithRunningTail[0]],
+    {
+      turnId: "agy-turn-new-21",
+      userText: "继续优化自动命名规则",
+      lastText: prevSummary,
+      startedAt: 1200,
+    },
+  );
+  assert.equal(newTurnWithStaleEcho.length, 2);
+  assert.equal(newTurnWithStaleEcho[1].items.some((it) => it.type === "agentMessage"), false);
+
+  const dedupedEchoLiveTurn = dedupeAdjacentTurns([
+    turnsWithRunningTail[0],
+    {
+      id: "agy-turn-new-21",
+      status: "inProgress",
+      items: [
+        { type: "userMessage", content: [{ type: "text", text: "继续优化自动命名规则" }] },
+        { type: "agentMessage", text: prevSummary, phase: "final_answer" },
+      ],
+    },
+  ]);
+  assert.equal(dedupedEchoLiveTurn.length, 2);
+  assert.equal(dedupedEchoLiveTurn[1].items.some((it) => it.type === "agentMessage"), false);
+
   // 4. mergeUpstreamLiveThreadState refuses to append stale lastUpstream turn below [Turn N, Turn N+1].
   const upstreamMerged = mergeUpstreamLiveThreadState(
     {
@@ -5309,4 +5336,48 @@ test("light theme mode defaults to system preference and toggles manually on top
   assert.match(moonSvg, /<svg/);
   assert.match(monitorSvg, /<svg/);
   assert.equal(/\p{Extended_Pictographic}/u.test(sunSvg + moonSvg + monitorSvg), false);
+});
+
+test("pasted file URIs and absolute paths format as markdown file links and render clickable", async () => {
+  const {
+    formatPastedFileMarkdownLink,
+    formatClipboardFilesAsMarkdownLinks,
+    renderMarkdown,
+  } = await import("../public/markdown.js");
+
+  assert.equal(
+    formatPastedFileMarkdownLink("/Users/demo/project/README.md"),
+    "[README.md](file:///Users/demo/project/README.md)",
+  );
+  assert.equal(
+    formatPastedFileMarkdownLink('"/Volumes/External SSD/dev/project/case.md"'),
+    "[case.md](<file:///Volumes/External SSD/dev/project/case.md>)",
+  );
+  assert.equal(
+    formatPastedFileMarkdownLink("file:///Users/demo/My%20Docs/plan.md#L12"),
+    "[plan.md](<file:///Users/demo/My Docs/plan.md#L12>)",
+  );
+  assert.equal(
+    formatClipboardFilesAsMarkdownLinks({
+      uriList: "# comment\nfile:///Users/demo/a.txt\nfile:///Users/demo/shot.png",
+      plainText: "a.txt",
+    }),
+    "[a.txt](file:///Users/demo/a.txt)",
+  );
+  assert.equal(
+    formatClipboardFilesAsMarkdownLinks({
+      plainText: "请看这段普通文本 /Users/demo/a.txt 说明",
+    }),
+    "",
+  );
+  assert.equal(
+    formatClipboardFilesAsMarkdownLinks({
+      plainText: "[a.txt](file:///Users/demo/a.txt)",
+    }),
+    "",
+  );
+
+  const rendered = renderMarkdown("[case.md](<file:///Volumes/External SSD/dev/project/case.md>)");
+  assert.match(rendered, /class="md-file-link"/);
+  assert.match(rendered, /data-local-file-path="\/Volumes\/External SSD\/dev\/project\/case\.md"/);
 });

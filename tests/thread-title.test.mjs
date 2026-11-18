@@ -401,3 +401,30 @@ test("Codex <image>, skill prefixes, truncated markdown links, and question repl
   ]);
   assert.deepEqual(prompts, ["第一句", "第二句"]);
 });
+
+test("resolveAdaptiveThreadTitle preserves Codex customer-issue-maintainer bracket titles even when autoTitle was locked", () => {
+  const multiSegmentTicket = resolveAdaptiveThreadTitle({
+    cwd: "/workspace/byai/客户问题解决",
+    autoTitle: "客户问题排查",
+    autoTitleSourceSig: "帮我看下这个客户问题",
+    titleLocked: true,
+    titleSchemaVersion: TITLE_SCHEMA_VERSION,
+    upstreamTitle: "【剧狐｜道静｜微信消息｜OPPO X6】CRM 后台缺失",
+    firstUserText: "帮我看下剧狐这个客户微信消息怎么缺失了",
+    hasFollowUpTurns: true,
+  });
+  assert.equal(multiSegmentTicket.title, "【剧狐｜道静｜微信消息｜OPPO X6】CRM 后台缺失");
+  assert.equal(multiSegmentTicket.autoTitleToSave, null);
+  assert.equal(multiSegmentTicket.titleLocked, true);
+
+  const singleSegmentTicket = resolveAdaptiveThreadTitle({
+    cwd: "/workspace/byai/客户问题解决",
+    autoTitle: "微信接口排查",
+    titleLocked: true,
+    titleSchemaVersion: TITLE_SCHEMA_VERSION,
+    upstreamTitle: "【微信OpenAPI】增量查询返回历史发送消息",
+    upstreamCustomTitle: "【微信OpenAPI】增量查询返回历史发送消息",
+  });
+  assert.equal(singleSegmentTicket.title, "【微信OpenAPI】增量查询返回历史发送消息");
+  assert.equal(singleSegmentTicket.autoTitleToSave, null);
+});

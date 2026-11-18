@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sendJson } from "./http-response.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
+import { MissionOverviewService } from "./mission-overview-service.mjs";
 import { ProviderHub } from "./provider-hub.mjs";
 import { visibleControlThreads } from "./thread-access.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
@@ -259,6 +260,12 @@ export async function createHotExtensionServer({
     ...voiceServiceOptions,
   });
 
+  const overviewService = new MissionOverviewService({
+    hub: upstreamHub,
+    env,
+    dataDir,
+  });
+
   let actualPort = port;
   const server = http.createServer(async (request, response) => {
     try {
@@ -484,6 +491,82 @@ export async function createHotExtensionServer({
           source: body.source || "notice",
           priority: body.priority || "normal",
           preferOffline: Boolean(body.preferOffline),
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview" && request.method === "GET") {
+        const trigger = url.searchParams.get("trigger") || "view";
+        const force = url.searchParams.get("force") === "1" || url.searchParams.get("force") === "true";
+        const result = await overviewService.getOverview({ trigger, force });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/refresh" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        await overviewService.triggerRefresh({
+          force: true,
+          preferredModel: body.preferredModel || "",
+          cooldownMinutes: Number(body.cooldownMinutes) || 0,
+        });
+        const result = await overviewService.getOverview({ trigger: "view", force: false });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/assign" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.assignThreadTopic(
+          body.threadId || "",
+          body.topicId || "",
+          body.stageTag || "",
+        );
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/topic" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.upsertTopic(body);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/spark" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.handleSparkAction(body);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/focus" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.toggleBossFocus(body.topicId || "");
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/metrics" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.upsertTopicMetrics(body);
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/overview/dispatch" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.dispatchTask({
+          text: body.text || "",
+          topicId: body.topicId || "",
+          mode: body.mode || "auto",
+          preferredProvider: body.preferredProvider || "auto",
+          agentKey: body.agentKey || "auto",
+          model: body.model || "",
+          remember: body.remember !== false,
+          confirmOnly: Boolean(body.confirmOnly),
+          sparkId: body.sparkId || "",
         });
         sendJson(response, 200, result);
         return;
