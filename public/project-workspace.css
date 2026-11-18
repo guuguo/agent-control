@@ -183,6 +183,12 @@
   min-width: 0;
 }
 
+.thread-pin-marker {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
 .thread-item-menu-btn { display: none; }
 
 @media (pointer: coarse), (max-width: 960px) {

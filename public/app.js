@@ -266,6 +266,7 @@ function saveCachedThreads(threads, projectsMeta) {
       goalState: t.goalState || null,
       pendingCount: t.pendingCount || 0,
       queuedCount: t.queuedCount || 0,
+      pinned: Boolean(t.pinned),
     }));
     sessionStorage.setItem(THREADS_CACHE_KEY, JSON.stringify({
       threads: compactThreads,
@@ -2163,6 +2164,7 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
     <button type="button" class="thread-context-menu-item" data-menu-action="fork">${iconSvg("fork", { size: 14 })}<span>分叉会话</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="continue-agent">${iconSvg("refresh", { size: 14 })}<span>换 Agent 继续</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="rename">${iconSvg("edit", { size: 14 })}<span>重命名</span></button>
+    <button type="button" class="thread-context-menu-item" data-menu-action="pin">${iconSvg("pin", { size: 14 })}<span>${thread.pinned ? "取消项目内置顶" : "在当前项目置顶"}</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="archive">${iconSvg("archive", { size: 14 })}<span>${thread.archived ? "取消归档" : "归档会话"}</span></button>
   `;
   document.body.appendChild(menu);
@@ -2207,6 +2209,13 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
         if (state.activeThreadId === threadId) await selectThread(threadId, { focusScroll: false });
       } catch (error) {
         showToastBanner("重命名失败", { detail: formatActionError(error), error: true });
+      }
+    } else if (action === "pin") {
+      try {
+        await apiPost("api/thread/pin", { threadId, pinned: !thread.pinned });
+        await refreshThreads();
+      } catch (error) {
+        showToastBanner("置顶设置失败", { detail: formatActionError(error), error: true });
       }
     } else if (action === "archive") {
       const nextArchived = !thread.archived;
@@ -5188,13 +5197,20 @@ function connectEvents() {
       if (prefs.model) target.model = prefs.model;
       if (prefs.reasoningEffort) target.reasoningEffort = prefs.reasoningEffort;
       if (prefs.permissionMode) target.permissionMode = prefs.permissionMode;
+      if (Object.hasOwn(prefs, "pinned")) target.pinned = Boolean(prefs.pinned);
     }
     if (threadId === state.activeThreadId && state.activeThread) {
       if (prefs.model) state.activeThread.model = prefs.model;
       if (prefs.reasoningEffort) state.activeThread.reasoningEffort = prefs.reasoningEffort;
       if (prefs.permissionMode) state.activeThread.permissionMode = prefs.permissionMode;
+      if (Object.hasOwn(prefs, "pinned")) state.activeThread.pinned = Boolean(prefs.pinned);
       syncModelAndEffortSelectors();
       syncPermissionSelectors();
+    }
+    if (Object.hasOwn(prefs, "pinned")) {
+      renderThreadList();
+      renderProjectBoard();
+      renderProjectTaskStrip();
     }
   });
 

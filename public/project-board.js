@@ -330,6 +330,7 @@ export function buildProjectGroups(threads = [], {
   const result = [...grouped.values()];
   for (const group of result) {
     group.threads.sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
       const timeDiff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
       if (timeDiff !== 0) return timeDiff;
       return String(a.id || "").localeCompare(String(b.id || ""));
@@ -528,6 +529,7 @@ function renderSidebarProjectGroupHtml(group, {
 
   const mustKeep = (t) => (
     t.id === activeThreadId
+    || Boolean(t.pinned)
     || Boolean(t.live)
     || (t.pendingCount || 0) > 0
     || (t.queuedCount || 0) > 0
@@ -636,6 +638,7 @@ function renderSidebarProjectGroupHtml(group, {
               ${selectionMode ? renderBatchCheckHtml({ checked: isBatchChecked }) : ""}
               ${markerHtml}
               <span class="thread-item-title">${escapeHtml(title)}</span>
+              ${t.pinned ? `<span class="thread-pin-marker" title="已在当前项目置顶" aria-label="已在当前项目置顶">${iconSvg("pin", { size: 11 })}</span>` : ""}
               ${!subText && (tagsHtml || timeHtml) ? `<span class="thread-item-right">${tagsHtml}${timeHtml}</span>` : timeHtml}
             </span>
             ${subText ? `

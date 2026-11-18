@@ -2954,6 +2954,14 @@ export class ProviderHub {
     return { ok: true, threadId: compositeId, name: meta.customName };
   }
 
+  async pinThread(compositeId, pinned = true) {
+    parseCompositeThreadId(compositeId);
+    const meta = await this.#metaStore.setPinned(compositeId, pinned);
+    const prefs = { pinned: Boolean(meta.pinned) };
+    this.#broadcast("thread_prefs_updated", { threadId: compositeId, prefs });
+    return { ok: true, threadId: compositeId, ...prefs };
+  }
+
   async archiveThreads(compositeIds = [], archived = true) {
     const rawList = Array.isArray(compositeIds) ? compositeIds : [compositeIds];
     const seen = new Set();

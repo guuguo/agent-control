@@ -46,6 +46,7 @@ jobs:
           tests/service-restart.test.mjs tests/update-service.test.mjs
           tests/hub-server.test.mjs tests/codex-provider.test.mjs
           tests/thread-fork.test.mjs tests/fork-history-pagination.test.mjs
+          tests/thread-pin.test.mjs tests/mobile-thread-menu.test.mjs
           tests/claude-provider.test.mjs tests/antigravity-provider.test.mjs
           tests/grok-provider.test.mjs tests/qoder-provider.test.mjs
       - name: Install native desktop test dependencies

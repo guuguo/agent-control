@@ -851,6 +851,14 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/thread/pin" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        context.threadId = body.threadId || "";
+        const result = await hub.pinThread(body.threadId, body.pinned !== false);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread/archive" && request.method === "POST") {
         const body = await readJsonBody(request);
         context.threadId = body.threadId || "";

@@ -209,6 +209,13 @@ export function createThreadMetaStore({
       await persist();
       return { ...state.threads[compositeId] };
     },
+    async setPinned(compositeId, pinned = true) {
+      await ensureLoaded();
+      const prev = state.threads[compositeId] || {};
+      state.threads[compositeId] = { ...prev, pinned: Boolean(pinned) };
+      await persist();
+      return { ...state.threads[compositeId] };
+    },
     async setArchived(compositeId, archived = true) {
       await ensureLoaded();
       const prev = state.threads[compositeId] || {};
@@ -333,6 +340,7 @@ export function createThreadMetaStore({
         titleDomainKey: meta.titleDomainKey || "",
         titleSchemaVersion: Number(meta.titleSchemaVersion) || 0,
         archived: Boolean(meta.archived ?? thread.archived),
+        pinned: Boolean(meta.pinned),
         ...(meta.model ? { model: meta.model } : {}),
         ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
         ...(meta.permissionMode ? { permissionMode: meta.permissionMode } : {}),
