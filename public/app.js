@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiUrl } from "./api-client.js?v=20261117qoder";
+import { autoPreviewThreadImages } from "./image-preview-policy.js?v=20261118images";
 import {
   computeDefaultHiddenProviderTabs,
   hasSavedProviderTabsPref,
@@ -25,6 +26,7 @@ import {
   compressImageFileForUpload,
   estimateDataUrlBytes,
   formatByteSize,
+  stripAttachedImagePaths,
   validateImageBatchBudget,
 } from "./image-attachment.js?v=20261117qoder";
 import {
@@ -2608,7 +2610,7 @@ let renderedThreadCacheId = "";
 let deferredObserveRafId = 0;
 const REVEALED_IMAGE_CACHE_LIMIT = 600;
 const revealedDeferredImageSrcs = new Set();
-const unlockedImageThreadIds = new Set();
+const threadImageVisibility = new Map();
 
 function rememberRevealedImageSrc(src = "") {
   const clean = String(src || "").trim();
@@ -2624,7 +2626,10 @@ function rememberRevealedImageSrc(src = "") {
 
 function isThreadImagesUnlocked(threadId = state.activeThread?.id || state.activeThreadId || "") {
   const clean = String(threadId || "").trim();
-  return Boolean(clean && unlockedImageThreadIds.has(clean));
+  return Boolean(clean && (threadImageVisibility.get(clean) ?? autoPreviewThreadImages({
+    hostname: location.hostname,
+    finePointer: matchMedia("(pointer: fine)").matches,
+  })));
 }
 
 function syncThreadImagesUnlockedClass() {
@@ -2637,13 +2642,13 @@ function setThreadImagesUnlocked(threadId, unlocked) {
   const cleanTid = String(threadId || "").trim();
   if (!cleanTid) return;
   if (unlocked) {
-    unlockedImageThreadIds.add(cleanTid);
+    threadImageVisibility.set(cleanTid, true);
     syncThreadImagesUnlockedClass();
     renderTopbarAndControls();
     scheduleDeferredImagesObservation($("messagesViewport"));
     return;
   }
-  unlockedImageThreadIds.delete(cleanTid);
+  threadImageVisibility.set(cleanTid, false);
   const encodedTid = encodeURIComponent(cleanTid);
   for (const src of [...revealedDeferredImageSrcs]) {
     if (src.includes(`threadId=${encodedTid}`) || src.includes(cleanTid)) {
@@ -2736,7 +2741,7 @@ function activateDeferredImage(img) {
   const lazySrc = img.dataset.lazySrc || "";
   if (!lazySrc) return;
   delete img.dataset.lazySrc;
-  deferredImageObserver?.unobserve(img);
+  deferredImageObserver?.unobserve(deferredImageObservationTarget(img));
   if (isThreadImageFailed(lazySrc)) {
     revealedDeferredImageSrcs.delete(lazySrc);
     markCardImageBroken(img);
@@ -2790,6 +2795,10 @@ function isImageWithinViewport(img, vp) {
   return rect.bottom > vpRect.top && rect.top < vpRect.bottom && rect.right > vpRect.left && rect.left < vpRect.right;
 }
 
+function deferredImageObservationTarget(img) {
+  return img.closest(".msg-image-card, .md-inline-img-wrap") || img;
+}
+
 function ensureDeferredImageObserver() {
   const vp = $("messagesViewport");
   if (!vp || typeof IntersectionObserver !== "function") return null;
@@ -2798,7 +2807,7 @@ function ensureDeferredImageObserver() {
       (entries) => {
         for (const entry of entries) {
           if (!entry.isIntersecting && entry.intersectionRatio <= 0) continue;
-          activateDeferredImage(entry.target);
+          activateDeferredImage(entry.target.querySelector("img[data-lazy-src]") || entry.target);
         }
       },
       {
@@ -2828,7 +2837,7 @@ function scheduleDeferredImagesObservation(rootEl = $("messagesViewport")) {
     const observer = ensureDeferredImageObserver();
     if (!observer) {
       for (const img of imgs) {
-        if (isImageWithinViewport(img, vp)) {
+        if (isImageWithinViewport(deferredImageObservationTarget(img), vp)) {
           activateDeferredImage(img);
         }
       }
@@ -2841,7 +2850,7 @@ function scheduleDeferredImagesObservation(rootEl = $("messagesViewport")) {
       }
       if (img.dataset.lazyObserved === "1") continue;
       img.dataset.lazyObserved = "1";
-      observer.observe(img);
+      observer.observe(deferredImageObservationTarget(img));
     }
   });
 }
@@ -3428,11 +3437,12 @@ function renderComposerImages() {
   wrap.hidden = false;
   wrap.innerHTML = state.images.map((img, idx) => {
     const caption = img?.name || `图片 ${idx + 1}`;
+    const info = [img.width && img.height ? `${img.width} × ${img.height}` : "", formatByteSize(img.byteLength || estimateDataUrlBytes(img.dataUrl))].filter(Boolean).join(" · ");
     return `
       <div class="composer-img-chip" title="${escapeHtml(caption)}">
         <button type="button" class="composer-img-thumb" data-preview-src="${escapeHtml(img.dataUrl)}" data-preview-caption="${escapeHtml(caption)}" aria-label="预览图片 ${escapeHtml(caption)}">
           <img src="${escapeHtml(img.dataUrl)}" alt="${escapeHtml(caption)}" />
-          <span class="composer-img-name">${escapeHtml(caption)}</span>
+          <span class="composer-img-details"><span class="composer-img-name">图片 ${idx + 1}</span><span class="composer-img-info">${escapeHtml(info)}</span></span>
         </button>
         <button type="button" class="composer-img-remove" data-remove-img="${idx}" aria-label="移除图片">${iconSvg("close", { size: 11 })}</button>
       </div>
@@ -10983,6 +10993,15 @@ function addComposerImageFile(file) {
       throw new Error(budget.message || "图片数量或总大小超出限制");
     }
     state.images.push(compressedItem);
+    const input = $("promptInput");
+    const cleanedText = stripAttachedImagePaths(input.value, [file]);
+    if (cleanedText !== input.value) {
+      const start = stripAttachedImagePaths(input.value.slice(0, input.selectionStart), [file]).length;
+      const end = stripAttachedImagePaths(input.value.slice(0, input.selectionEnd), [file]).length;
+      input.value = cleanedText;
+      input.setSelectionRange(start, end);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     renderComposerImages();
     renderComposerControls();
     const origBytes = Number(file.size) || 0;

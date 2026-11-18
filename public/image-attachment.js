@@ -16,6 +16,20 @@ const COMPRESSION_STEPS = [
   { scale: 0.72, quality: 0.58 },
 ];
 
+// 仅移除已经成功附加的同名本地图片路径；正文、网址和其他文件引用保持原样。
+export function stripAttachedImagePaths(text, files = []) {
+  let cleaned = String(text || "");
+  for (const file of files) {
+    const name = String(file?.name || "");
+    if (!name) continue;
+    const names = [...new Set([name, encodeURIComponent(name)])].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+    const root = "(?:file:\\/\\/\\/|\\/|[A-Za-z]:[\\\\/])";
+    const path = new RegExp(`(^|[\\s(])(?:"${root}[^"\\r\\n]*?(?:${names})"|'${root}[^'\\r\\n]*?(?:${names})'|${root}[^\\s"'<>]*?(?:${names})(?=$|[\\s<>\\u4e00-\\u9fff]))[ \\t]*`, "gm");
+    cleaned = cleaned.replace(path, (_match, prefix) => prefix);
+  }
+  return cleaned;
+}
+
 export function estimateDataUrlBytes(dataUrl) {
   const str = String(dataUrl || "");
   if (!str) return 0;

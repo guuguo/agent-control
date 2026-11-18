@@ -52,6 +52,7 @@ import { goalStatePath } from "./goal-controller.mjs";
 import { AntigravityProvider } from "./providers/antigravity-provider.mjs";
 import { ClaudeProvider } from "./providers/claude-provider.mjs";
 import { CodexProvider } from "./providers/codex-provider.mjs";
+import { recoverCodexImagePreview } from "./providers/codex-image-preview.mjs";
 import { GrokProvider } from "./providers/grok-provider.mjs";
 import { QuotaService } from "./quota-service.mjs";
 import { AgentTelemetryService } from "./telemetry-service.mjs";
@@ -588,6 +589,7 @@ export class ProviderHub {
   #drainTimers = new Set();
   #enableQueueDrain = true;
   #env;
+  #dataDir;
   #callLightweightProfileAi = null;
   #autoAliasInFlight = new Set();
   #cliMaintenance;
@@ -609,6 +611,7 @@ export class ProviderHub {
     callLightweightProfileAi = null,
   } = {}) {
     this.#env = env;
+    this.#dataDir = dataDir;
     this.#callLightweightProfileAi = typeof callLightweightProfileAi === "function" ? callLightweightProfileAi : null;
     this.#enableQueueDrain = Boolean(enableQueueDrain);
     this.#startupRecoveryReady = !this.#enableQueueDrain;
@@ -2039,6 +2042,16 @@ export class ProviderHub {
 
     const info = await stat(targetPath).catch(() => null);
     if (!info?.isFile()) {
+      if (imagesOnly && parsed.provider === "codex") {
+        const recovered = await recoverCodexImagePreview({
+          rolloutPath: cachedCtx?.rolloutPath,
+          targetPath,
+          cwd: threadCwd,
+          cacheDir: resolve(this.#dataDir, "image-previews"),
+          maxBytes,
+        }).catch(() => null);
+        if (recovered) return recovered;
+      }
       throw Object.assign(new Error(imagesOnly ? "图片文件不存在" : "文件不存在"), { status: 404 });
     }
     if ((!allowEmpty && info.size <= 0) || info.size > maxBytes) {

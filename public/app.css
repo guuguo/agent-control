@@ -3192,15 +3192,15 @@ body.is-resizing-sidebar * {
 .composer-img-chip {
   position: relative;
   display: inline-block;
-  max-width: 112px;
+  max-width: 224px;
 }
 
 .composer-img-thumb {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
-  gap: 3px;
-  padding: 3px;
+  gap: 10px;
+  padding: 6px 28px 6px 6px;
   border-radius: 9px;
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.04);
@@ -3214,33 +3214,47 @@ body.is-resizing-sidebar * {
 }
 
 .composer-img-thumb img {
-  width: 60px;
-  height: 54px;
-  object-fit: cover;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
   border-radius: 6px;
   display: block;
 }
 
 .composer-img-name {
   max-width: 96px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.2;
-  color: var(--text-muted);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.composer-img-details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.composer-img-info {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .composer-img-remove {
   position: absolute;
-  top: -6px;
-  right: -6px;
-  width: 18px;
-  height: 18px;
+  top: 5px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   border: 0;
-  background: var(--red);
-  color: #fff;
+  background: transparent;
+  color: var(--text-muted);
   font-size: 11px;
   cursor: pointer;
 }
