@@ -1,6 +1,31 @@
 # Linux 安装与运行
 
-Linux 使用浏览器控制台，支持本机 Agent CLI、历史会话、任务队列、审批和手机远程控制。macOS 的原生 `.app`、Finder 入口与 `say` 播报不适用于 Linux。各 Agent 本身是否支持当前发行版及架构，以该 CLI 为准。
+Linux 支持 GTK + WebKitGTK 原生桌面窗口，也可使用浏览器控制台；支持本机 Agent CLI、历史会话、任务队列、审批和手机远程控制。各 Agent 本身是否支持当前发行版及架构，以该 CLI 为准。
+
+## 原生桌面窗口
+
+先安装发行版提供的桌面依赖（无需 Electron 或编译工具链）：
+
+```bash
+# Ubuntu / Debian
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+
+# Fedora
+sudo dnf install python3-gobject gtk3 webkit2gtk4.1
+```
+
+再执行下文的一键安装；已有 Agent Control 的用户更新源码后运行：
+
+```bash
+agent-control desktop
+agent-control open
+```
+
+应用菜单中可搜索 **Agent Control**。独立窗口支持返回（Alt+←）、首页、刷新（Ctrl+R）、浏览器打开与下载保存；站外链接交给系统浏览器。关闭窗口或 Ctrl+Q 只退出桌面壳，后台任务继续运行。本机服务未启动时，壳会尝试启动已安装的 systemd 用户服务，不会重启运行中的服务。
+
+桌面入口安装在 `${XDG_DATA_HOME:-~/.local/share}/applications/com.guuguo.AgentControl.desktop`，启动器在 `~/.local/bin/agent-control-desktop`。默认连接 `http://127.0.0.1:43310`；可通过 `PORT` 或 `AGENT_CONTROL_URL` 指定地址。网页存储和缓存位于控制台数据目录的 `desktop/` 下。
+
+缺少桌面依赖时，安装器会保留浏览器模式并提示补装方法；服务器可使用 `--no-app` 跳过桌面安装。没有显示会话时不会自动弹出窗口。
 
 ## 桌面或带 systemd 的服务器
 
@@ -49,4 +74,4 @@ ssh -L 43310:127.0.0.1:43310 user@linux-host
 
 ## 验证范围
 
-仓库的 Linux Compatibility 工作流在 Ubuntu 24.04 的 x64 / ARM64、Node.js 22 / 24 上检查服务配置、路径、更新流程和各 Agent 协议。对话测试全部使用 Mock CLI，不消耗真实模型 Token。
+仓库的 Linux Compatibility 工作流在 Ubuntu 24.04 的 x64 / ARM64、Node.js 22 / 24 上检查服务配置、路径、更新流程和各 Agent 协议，并用 Xvfb 实际启动原生窗口验证导航、下载和桌面安装。对话测试全部使用 Mock CLI，不消耗真实模型 Token。

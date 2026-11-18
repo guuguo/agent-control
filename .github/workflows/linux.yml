@@ -6,6 +6,7 @@ on:
     paths:
       - "src/**"
       - "scripts/**"
+      - "desktop/linux/**"
       - "tests/**"
       - "install.sh"
       - "uninstall.sh"
@@ -36,7 +37,8 @@ jobs:
       - name: Check syntax and Linux installers
         run: |
           npm run check
-          bash -n install.sh uninstall.sh scripts/local-control.sh
+          bash -n install.sh uninstall.sh scripts/local-control.sh desktop/linux/install-app.sh
+          python3 -c "import ast, pathlib; [ast.parse(p.read_text()) for p in [pathlib.Path('desktop/linux/agent-control.py'), pathlib.Path('tests/linux-desktop-smoke.py')]]"
       - name: Linux paths, service, updates and zero-token CLI protocols
         run: >-
           node --test --test-concurrency=1
@@ -45,3 +47,18 @@ jobs:
           tests/hub-server.test.mjs tests/codex-provider.test.mjs
           tests/claude-provider.test.mjs tests/antigravity-provider.test.mjs
           tests/grok-provider.test.mjs tests/qoder-provider.test.mjs
+      - name: Install native desktop test dependencies
+        if: matrix.node == 24
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+          xvfb dbus-x11 desktop-file-utils
+      - name: Native GTK/WebKit window, navigation, download and desktop entry
+        if: matrix.node == 24
+        run: xvfb-run -a dbus-run-session -- /usr/bin/python3 tests/linux-desktop-smoke.py
+      - uses: actions/upload-artifact@v4
+        if: matrix.node == 24 && always()
+        with:
+          name: linux-desktop-${{ matrix.runner }}
+          path: /tmp/agent-control-linux-desktop.png
+          if-no-files-found: ignore

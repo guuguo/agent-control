@@ -32,7 +32,7 @@ Agent Control 一键安装脚本 (macOS / Linux)
   --dir <路径>      指定安装目录（默认: ~/.local/share/agent-control/app）
   --port <端口>     指定本地控制台端口（默认: 43310）
   --no-service      仅拉取依赖，不注册开机后台服务
-  --no-app          macOS 不构建安装 /Applications/Agent Control.app
+  --no-app          不安装原生桌面窗口与应用菜单入口
   --no-open         安装完成后不自动打开界面
   -h, --help        显示帮助信息
 EOF
@@ -282,7 +282,7 @@ Agent Control 命令行工具
   status               查看运行状态与监听端口
   logs                 查看最近服务日志
   run                  前台运行服务（调试用）
-  desktop              macOS 重新编译并安装 /Applications/Agent Control.app
+  desktop              安装/更新当前系统的原生桌面应用
   remote <子命令>      切换或查看远程隧道方案:
                          status              查看当前隧道与中继状态
                          cloudflare [--start] 准备 Cloudflare 免费隧道（可选立即启动）
@@ -408,6 +408,8 @@ case "\$cmd" in
       open -a "/Applications/Agent Control.app"
     elif [[ "\$(uname -s)" == "Darwin" ]]; then
       open "http://127.0.0.1:\${PORT}"
+    elif [[ -x "\$HOME/.local/bin/agent-control-desktop" ]]; then
+      PORT="\$PORT" "\$HOME/.local/bin/agent-control-desktop" >/dev/null 2>&1 &
     elif command -v xdg-open >/dev/null 2>&1; then
       xdg-open "http://127.0.0.1:\${PORT}" >/dev/null 2>&1 &
     else
@@ -427,7 +429,11 @@ case "\$cmd" in
     PORT="\$PORT" "\$NODE_BIN" "\$APP_DIR/scripts/service.mjs" "\$cmd"
     ;;
   desktop)
-    PORT="\$PORT" bash "\$APP_DIR/desktop/macos/build-app.sh" --install
+    if [[ "\$(uname -s)" == "Linux" ]]; then
+      PORT="\$PORT" bash "\$APP_DIR/desktop/linux/install-app.sh"
+    else
+      PORT="\$PORT" bash "\$APP_DIR/desktop/macos/build-app.sh" --install
+    fi
     ;;
   remote)
     handle_remote "\$@"
@@ -440,6 +446,8 @@ case "\$cmd" in
     PORT="\$PORT" "\$NODE_BIN" "\$APP_DIR/scripts/service.mjs" install
     if [[ "\$(uname -s)" == "Darwin" && -d "/Applications/Agent Control.app" ]] && command -v swiftc >/dev/null 2>&1; then
       PORT="\$PORT" bash "\$APP_DIR/desktop/macos/build-app.sh" --install
+    elif [[ "\$(uname -s)" == "Linux" && -x "\$HOME/.local/bin/agent-control-desktop" ]]; then
+      PORT="\$PORT" bash "\$APP_DIR/desktop/linux/install-app.sh"
     fi
     echo "Agent Control 已更新完成。"
     ;;
@@ -480,6 +488,13 @@ if [[ "$OS_NAME" == "Darwin" && "$INSTALL_APP" == "true" ]]; then
     INSTALLED_APP_PATH="/Applications/Agent Control.app"
   else
     echo "[5/5] 未检测到 swiftc，已跳过原生 .app 构建（可随时安装 Xcode CLI Tools 后执行: agent-control desktop）"
+  fi
+elif [[ "$OS_NAME" == "Linux" && "$INSTALL_APP" == "true" ]]; then
+  echo "[5/5] 正在安装 Linux 原生桌面入口..."
+  if PORT="$PORT" bash "$APP_DIR/desktop/linux/install-app.sh"; then
+    INSTALLED_APP_PATH="${XDG_DATA_HOME:-$HOME/.local/share}/applications/com.guuguo.AgentControl.desktop"
+  else
+    echo "已保留浏览器控制台。安装上述桌面依赖后执行 agent-control desktop 即可补装。"
   fi
 else
   echo "[5/5] 已完成 CLI 与服务部署。"
@@ -552,5 +567,7 @@ if [[ "$OPEN_AFTER" == "true" && "$INSTALL_SERVICE" == "true" ]]; then
     open -a "$INSTALLED_APP_PATH" >/dev/null 2>&1 || true
   elif [[ "$OS_NAME" == "Darwin" ]]; then
     open "http://127.0.0.1:${PORT}" >/dev/null 2>&1 || true
+  elif [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    "$CLI_PATH" open
   fi
 fi

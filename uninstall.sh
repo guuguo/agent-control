@@ -65,6 +65,12 @@ if [[ "$OS_NAME" == "Darwin" && -d "/Applications/Agent Control.app" ]]; then
   rm -rf "/Applications/Agent Control.app"
   echo "已移除 /Applications/Agent Control.app"
 fi
+if [[ "$OS_NAME" == "Linux" ]]; then
+  DESKTOP_DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
+  rm -f "$LOCAL_BIN/agent-control-desktop" \
+    "$DESKTOP_DATA/applications/com.guuguo.AgentControl.desktop" \
+    "$DESKTOP_DATA/icons/hicolor/scalable/apps/agent-control.svg"
+fi
 
 if [[ -f "$CLI_PATH" ]]; then
   rm -f "$CLI_PATH"
