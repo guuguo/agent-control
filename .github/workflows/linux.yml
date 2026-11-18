@@ -51,7 +51,7 @@ jobs:
         if: matrix.node == 24
         run: |
           # x64 runner 的 EC2 镜像源下载 WebKit 极慢，改用 Ubuntu 官方 HTTPS 源。
-          sudo find /etc/apt/sources.list.d -type f \( -name '*.sources' -o -name '*.list' \) -exec \
+          sudo find /etc/apt -type f \( -name '*.sources' -o -name '*.list' \) -exec \
             sed -i -E 's|http://[^ /]*ec2\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' {} +
           sudo apt-get update
           sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 xvfb dbus-x11 desktop-file-utils
