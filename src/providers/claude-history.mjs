@@ -188,6 +188,7 @@ export async function readClaudeExternalSessionActivity(configDir, rawId, {
     readThreadLive,
     sessionBusy,
     recentlyActive: Boolean(mainRecentlyActive || subagentsRecentlyActive),
+    latestUpdatedAt: updatedAt,
     updatedAt: updatedAt || Math.floor(nowMs / 1000),
     cursor,
     located: sessionLocated,
@@ -713,11 +714,16 @@ export async function readClaudeThreadHistory(configDir, rawId, {
       nextCursor: null,
     };
   }
-  const raw = await readFile(located.filePath, "utf8");
+  const [raw, fileInfo] = await Promise.all([
+    readFile(located.filePath, "utf8"),
+    stat(located.filePath).catch(() => null),
+  ]);
   const parsed = parseClaudeJsonlTranscript(raw.split("\n"), {
     rawId,
     fallbackCwd: decodeSlugFallback(located.slug),
   });
+  const mtimeSec = fileInfo?.mtimeMs ? Math.floor(fileInfo.mtimeMs / 1000) : 0;
+  const updatedAt = Math.max(Number(parsed.updatedAt) || 0, mtimeSec);
   const totalTurns = parsed.turns.length;
   const maxTurns = Math.max(1, Number(limit) || 40);
   let end = totalTurns;
@@ -730,6 +736,7 @@ export async function readClaudeThreadHistory(configDir, rawId, {
   return {
     thread: {
       ...parsed,
+      updatedAt,
       turns: slicedTurns,
       largeHistory: start > 0,
     },

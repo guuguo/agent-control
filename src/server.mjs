@@ -499,6 +499,39 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/profile/create" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await hub.createProfile({
+          provider: body.provider || "",
+          name: body.name || "",
+          customHome: body.customHome || "",
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/profile/delete" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await hub.deleteProfile({
+          provider: body.provider || "",
+          profileId: body.profileId || "",
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/profile/login" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await hub.startProfileLogin({
+          provider: body.provider || "",
+          profileId: body.profileId || "",
+          mode: body.mode || "",
+          openOnHost: body.openOnHost !== false,
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/thread" && request.method === "GET") {
         const threadId = url.searchParams.get("id") || "";
         context.threadId = threadId;
@@ -926,6 +959,8 @@ export async function createAgentControlServer({
           autoExecute: body.autoExecute !== false,
           asyncDispatch: Boolean(body.asyncDispatch),
           tts: body.tts !== false,
+          overlapDurationMs: Number(body.overlapDurationMs) || 0,
+          overlapBotText: body.overlapBotText || "",
         });
         sendJson(response, 200, result, { requestId });
         return;

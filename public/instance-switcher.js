@@ -1299,6 +1299,7 @@ export function renderAgentTelemetryBarHtml(profiles = [], telemetry = null, {
         <span class="telemetry-summary-stat ${totalTps > 0 ? "is-tps" : ""}">${escapeAttrHtml(totalTpsText)}</span>
       </div>
       <div class="telemetry-summary-actions">
+        <button type="button" class="telemetry-action-btn" data-open-instance-modal="" title="多开独立实例并登录接管">${iconSvg("plus", { size: 12 })} <span>多开实例</span></button>
         ${items.length ? `<button type="button" class="telemetry-action-btn ${pickerOpen ? "is-open" : ""}" data-telemetry-picker-toggle aria-expanded="${pickerOpen ? "true" : "false"}" title="选择要显示的 Agent 实例">${iconSvg("settings", { size: 12 })} <span>显示 (${visibleItems.length}/${items.length})</span></button>` : ""}
         <button type="button" class="telemetry-action-btn" data-telemetry-refresh ${refreshing ? "disabled" : ""} title="手动刷新 Agent 额度与状态">${refreshing ? "刷新中…" : `${iconSvg("refresh", { size: 12 })} <span>刷新</span>`}</button>
         <button type="button" class="telemetry-action-btn ${expanded ? "is-open" : ""}" data-telemetry-toggle aria-expanded="${expanded ? "true" : "false"}">${expanded ? `<span>收起</span>${iconSvg("chevron-up", { size: 11 })}` : `<span>详情</span>${iconSvg("chevron-down", { size: 11 })}`}</button>
@@ -1332,6 +1333,17 @@ export function profileHealthVisualMeta(profile) {
       dotClass: "is-unavailable",
       icon: "",
       badgeText: "未安装",
+      labelPrefix: "",
+    };
+  }
+  if (profile?.needsLogin) {
+    return {
+      status: "needs_login",
+      rank: 3,
+      available: false,
+      dotClass: "is-cooldown",
+      icon: "",
+      badgeText: "待登录",
       labelPrefix: "",
     };
   }
@@ -1684,13 +1696,17 @@ export function renderProfilePillsHtml(profiles = [], {
   selectedId = "",
   probingKeys = new Set(),
   activeLocked = false,
+  allowManageButton = false,
+  provider = "",
 } = {}) {
   const sorted = sortProfilesByAvailability(profiles);
+  const resolvedProvider = String(provider || sorted[0]?.provider || "").trim().toLowerCase();
+  const canManageProvider = resolvedProvider === "codex" || resolvedProvider === "claude";
   if (!sorted.length) {
-    return `<div class="profile-pills-empty">未检测到可用实例</div>`;
+    return `<div class="profile-pills-empty">未检测到可用实例${allowManageButton && canManageProvider ? ` <button type="button" class="profile-pill-add-btn" data-open-instance-modal="${escapeAttrHtml(resolvedProvider)}" title="新建或管理多开独立实例">${iconSvg("plus", { size: 11 })}<span>多开</span></button>` : ""}</div>`;
   }
   const showDisableToggle = sorted.length >= 2;
-  return sorted.map((p) => {
+  const cardsHtml = sorted.map((p) => {
     const meta = profileHealthVisualMeta(p);
     const key = p.key || `${p.provider}:${p.id}`;
     const isSelected = p.id === selectedId;
@@ -1702,8 +1718,10 @@ export function renderProfilePillsHtml(profiles = [], {
     const quotaPlan = String(quota?.planLabel || "").trim();
     const quotaPct = quota?.primary?.remainingPercent;
     const hasQuotaPct = typeof quotaPct === "number" && Number.isFinite(quotaPct);
+    const showQuickLogin = Boolean(p.needsLogin && (p.provider === "codex" || p.provider === "claude"));
     const authCmdMatch = (
       p.provider === "claude"
+      && !showQuickLogin
       && (meta.badgeText === "CLI未登录" || p.health?.reasonCode === "auth")
     )
       ? String(p.health?.detail || "").match(/((?:CLAUDE_CONFIG_DIR=\S+\s+)?claude auth login(?:\s+--email\s+\S+)?)/i)
@@ -1738,6 +1756,16 @@ export function renderProfilePillsHtml(profiles = [], {
           </span>
         </button>
         <div class="profile-pill-actions">
+          ${showQuickLogin ? `
+            <button
+              type="button"
+              class="profile-pill-action-btn is-copy-login"
+              data-login-profile="${escapeAttrHtml(p.id)}"
+              data-login-provider="${escapeAttrHtml(p.provider || "")}"
+              data-login-mode="${p.provider === "codex" ? "oauth" : "terminal"}"
+              title="登录此独立实例并交给 Agent Control 后台控制"
+            >去登录</button>
+          ` : ""}
           ${copyLoginCmd ? `
             <button
               type="button"
@@ -1763,6 +1791,121 @@ export function renderProfilePillsHtml(profiles = [], {
               data-next-disabled="${meta.status === "disabled" ? "0" : "1"}"
               title="${meta.status === "disabled" ? "重新启用该实例" : "停用该实例（不再作为默认首选项）"}"
             >${meta.status === "disabled" ? "启用" : "停用"}</button>
+          ` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  if (allowManageButton && canManageProvider) {
+    return `${cardsHtml}<button type="button" class="profile-pill-add-btn" data-open-instance-modal="${escapeAttrHtml(resolvedProvider)}" title="新建或管理多开独立实例">${iconSvg("plus", { size: 11 })}<span>多开</span></button>`;
+  }
+  return cardsHtml;
+}
+
+export function renderInstanceManagerListHtml(profiles = [], {
+  provider = "codex",
+  probingKeys = new Set(),
+} = {}) {
+  const cleanProvider = String(provider || "codex").trim().toLowerCase();
+  const list = sortProfilesByAvailability(filterProfilesByProvider(profiles, cleanProvider));
+  if (!list.length) {
+    return `<div class="empty-state">暂未发现 ${escapeAttrHtml(providerDisplayName(cleanProvider))} 实例，可在上方创建新的独立多开实例。</div>`;
+  }
+  const showDisableToggle = list.length >= 2;
+  return list.map((p) => {
+    const meta = profileHealthVisualMeta(p);
+    const key = p.key || `${p.provider}:${p.id}`;
+    const isProbing = probingKeys?.has?.(key) || probingKeys?.has?.(`${p.provider}:*`);
+    const displayName = compactProfileDisplayLabel(p.label || p.id || "默认", p.provider);
+    const hint = formatProfileIdentityHint(p);
+    const quotaSummary = String(p.quota?.summaryText || "").trim();
+    const subParts = [hint, meta.badgeText];
+    if (quotaSummary && quotaSummary !== meta.badgeText) subParts.push(quotaSummary);
+    const subText = subParts.filter(Boolean).join(" · ");
+    const sourceBadge = p.managed ? "托管多开" : "本机发现";
+    const dirText = String(p.cliConfigDir || p.home || "");
+
+    const codexActions = cleanProvider === "codex"
+      ? `
+        <button
+          type="button"
+          class="btn-secondary btn-xs is-primary-outline"
+          data-login-profile="${escapeAttrHtml(p.id)}"
+          data-login-provider="codex"
+          data-login-mode="oauth"
+          title="拉起独立浏览器 OAuth 登录，完成后自动由 Agent Control 接管"
+        >${p.needsLogin ? "浏览器登录" : "换绑账号"}</button>
+        <button
+          type="button"
+          class="btn-secondary btn-xs"
+          data-login-profile="${escapeAttrHtml(p.id)}"
+          data-login-provider="codex"
+          data-login-mode="app"
+          title="使用该独立实例目录打开 Codex 桌面端，登录或查看后可随时关闭"
+        >开客户端</button>
+      `
+      : "";
+
+    const claudeActions = cleanProvider === "claude"
+      ? `
+        <button
+          type="button"
+          class="btn-secondary btn-xs is-primary-outline"
+          data-login-profile="${escapeAttrHtml(p.id)}"
+          data-login-provider="claude"
+          data-login-mode="terminal"
+          title="打开终端以独立目录执行 claude auth login"
+        >终端登录</button>
+        ${p.loginCommand ? `
+          <button
+            type="button"
+            class="btn-secondary btn-xs"
+            data-copy-login-cmd="${escapeAttrHtml(p.loginCommand)}"
+            title="复制独立终端登录命令"
+          >复制命令</button>
+        ` : ""}
+      `
+      : "";
+
+    return `
+      <div class="instance-mgr-card ${meta.dotClass}${isProbing ? " is-probing" : ""}" data-profile-key="${escapeAttrHtml(key)}">
+        <div class="instance-mgr-main">
+          <div class="instance-mgr-head">
+            <span class="profile-status-dot ${meta.dotClass}" aria-hidden="true"></span>
+            <strong class="instance-mgr-name">${escapeAttrHtml(displayName)}</strong>
+            <span class="instance-mgr-badge${p.managed ? " is-managed" : ""}">${sourceBadge}</span>
+          </div>
+          <div class="instance-mgr-meta">${escapeAttrHtml(subText || "已就绪")}</div>
+          ${dirText ? `<div class="instance-mgr-path" title="${escapeAttrHtml(dirText)}">${escapeAttrHtml(dirText)}</div>` : ""}
+        </div>
+        <div class="instance-mgr-actions">
+          ${codexActions}
+          ${claudeActions}
+          <button
+            type="button"
+            class="btn-secondary btn-xs"
+            data-probe-profile="${escapeAttrHtml(p.id)}"
+            data-probe-provider="${escapeAttrHtml(p.provider || "")}"
+            ${isProbing ? "disabled" : ""}
+          >${isProbing ? "测通中…" : "测通"}</button>
+          ${(showDisableToggle || meta.status === "disabled") ? `
+            <button
+              type="button"
+              class="btn-secondary btn-xs"
+              data-toggle-disable-profile="${escapeAttrHtml(p.id)}"
+              data-profile-provider="${escapeAttrHtml(p.provider || "")}"
+              data-next-disabled="${meta.status === "disabled" ? "0" : "1"}"
+            >${meta.status === "disabled" ? "启用" : "停用"}</button>
+          ` : ""}
+          ${p.managed ? `
+            <button
+              type="button"
+              class="btn-secondary btn-xs is-danger-outline"
+              data-delete-profile="${escapeAttrHtml(p.id)}"
+              data-profile-provider="${escapeAttrHtml(p.provider || "")}"
+              title="从托管多开列表移除（保留本地目录文件）"
+            >移除</button>
           ` : ""}
         </div>
       </div>

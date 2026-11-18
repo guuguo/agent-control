@@ -5,6 +5,7 @@ import os from "node:os";
 import { basename, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
+import { readManagedProfiles } from "../managed-profiles.mjs";
 import {
   normalizePlatform,
   providerCandidatePaths,
@@ -431,7 +432,7 @@ async function readCockpitClaudeAccounts(cockpitDir) {
   return { resolveAccount };
 }
 
-export async function discoverCodexProfiles({ env = process.env, home = "" } = {}) {
+export async function discoverCodexProfiles({ env = process.env, home = "", dataDir = "" } = {}) {
   const resolvedHome = home || resolveUserHome(env, process.platform, os.homedir());
   const override = await parseProfileOverride(env.AGENT_CONTROL_CODEX_HOMES, "codex");
   if (override) {
@@ -454,8 +455,21 @@ export async function discoverCodexProfiles({ env = process.env, home = "" } = {
   }
 
   const seenPaths = new Set();
+  const usedIds = new Set();
   const profiles = [];
-  const addProfile = async (id, label, dirPath, requireExists = false) => {
+  const nextUniqueId = (baseId) => {
+    const clean = slugProfileId(baseId, "default");
+    if (!usedIds.has(clean)) {
+      usedIds.add(clean);
+      return clean;
+    }
+    let idx = 2;
+    while (usedIds.has(`${clean}-${idx}`)) idx += 1;
+    const unique = `${clean}-${idx}`;
+    usedIds.add(unique);
+    return unique;
+  };
+  const addProfile = async (id, label, dirPath, requireExists = false, extra = {}) => {
     const resolved = resolve(dirPath);
     const exists = await pathExists(resolved);
     if (requireExists && !exists) return;
@@ -463,13 +477,14 @@ export async function discoverCodexProfiles({ env = process.env, home = "" } = {
     if (seenPaths.has(canonical)) return;
     seenPaths.add(canonical);
     const cockpitName = cockpitNameByPath.get(resolved) || cockpitNameByPath.get(canonical) || "";
-    const resolvedLabel = cockpitName ? `Codex · ${cockpitName}` : label;
+    const resolvedLabel = (!extra?.managed && cockpitName) ? `Codex · ${cockpitName}` : label;
     profiles.push({
-      id: slugProfileId(id, "default"),
+      id: nextUniqueId(id),
       provider: "codex",
       label: resolvedLabel,
       home: resolved,
       exists,
+      ...extra,
     });
   };
 
@@ -495,13 +510,35 @@ export async function discoverCodexProfiles({ env = process.env, home = "" } = {
     await addProfile(suffix, `Codex · ${suffix}`, candidate, true);
   }
 
+  for (const inst of codexRegistry.instances) {
+    if (!inst?.userDataDir) continue;
+    const instId = inst.name || inst.id?.slice(0, 8) || basename(inst.userDataDir);
+    const instLabel = inst.name ? `Codex · ${inst.name}` : `Codex · ${basename(inst.userDataDir)}`;
+    await addProfile(instId, instLabel, inst.userDataDir, true);
+  }
+
+  if (dataDir) {
+    const managedList = (await readManagedProfiles(dataDir)).filter((item) => item.provider === "codex");
+    for (const item of managedList) {
+      await addProfile(item.id, `Codex · ${item.name}`, item.home, false, {
+        managed: true,
+        managedName: item.name,
+      });
+    }
+  }
+
   return profiles;
 }
 
-export async function readClaudePublicAccount(configDir, home = os.homedir(), cockpitAccount = null) {
+export async function readClaudePublicAccount(
+  configDir,
+  home = os.homedir(),
+  cockpitAccount = null,
+  { allowHomeFallback = true } = {},
+) {
   const candidates = [
     resolve(configDir, ".claude.json"),
-    resolve(home, ".claude.json"),
+    ...(allowHomeFallback ? [resolve(home, ".claude.json")] : []),
   ];
   let oauthAcct = null;
   for (const filePath of candidates) {
@@ -608,7 +645,7 @@ export async function readClaudeDesktopSessionsMeta(profile, { accountUuid = "",
   return { claimedIds, errorEntries };
 }
 
-export async function discoverClaudeProfiles({ env = process.env, home = "" } = {}) {
+export async function discoverClaudeProfiles({ env = process.env, home = "", dataDir = "" } = {}) {
   const resolvedHome = home || resolveUserHome(env, process.platform, os.homedir());
   const override = await parseProfileOverride(env.AGENT_CONTROL_CLAUDE_CONFIG_DIRS, "claude");
   if (override) {
@@ -656,7 +693,7 @@ export async function discoverClaudeProfiles({ env = process.env, home = "" } = 
     label,
     dirPath,
     requireExists = false,
-    { desktopUserDataDir = "", cockpitAccount = null, isDesktopInstance = false } = {},
+    { desktopUserDataDir = "", cockpitAccount = null, isDesktopInstance = false, managed = false, managedName = "" } = {},
   ) => {
     const resolved = resolve(dirPath);
     const exists = await pathExists(resolved);
@@ -680,6 +717,7 @@ export async function discoverClaudeProfiles({ env = process.env, home = "" } = 
       cliConfigDir: resolved,
       desktopUserDataDir: desktopUserDataDir ? resolve(desktopUserDataDir) : "",
       exists,
+      ...(managed ? { managed: true, managedName: managedName || label } : {}),
       ...(cockpitAccount ? { cockpitAccount } : {}),
       ...(isDesktopInstance
         ? {
@@ -749,6 +787,16 @@ export async function discoverClaudeProfiles({ env = process.env, home = "" } = 
         desktopUserDataDir: resolvedDir,
         cockpitAccount,
         isDesktopInstance: true,
+      });
+    }
+  }
+
+  if (dataDir) {
+    const managedList = (await readManagedProfiles(dataDir)).filter((item) => item.provider === "claude");
+    for (const item of managedList) {
+      await addProfile(item.id, `Claude · ${item.name}`, item.home, false, {
+        managed: true,
+        managedName: item.name,
       });
     }
   }
@@ -850,7 +898,7 @@ export async function readGrokPublicAccount(grokHome, cockpitAccount = null, env
   };
 }
 
-export async function discoverGrokProfiles({ env = process.env, home = os.homedir() } = {}) {
+export async function discoverGrokProfiles({ env = process.env, home = os.homedir(), dataDir = "" } = {}) {
   const overrideRaw = env.AGENT_CONTROL_GROK_HOMES ?? env.AGENT_CONTROL_GROK_CONFIG_DIRS;
   const override = await parseProfileOverride(overrideRaw, "grok");
   if (override) {
@@ -877,8 +925,21 @@ export async function discoverGrokProfiles({ env = process.env, home = os.homedi
   }
 
   const seenPaths = new Set();
+  const usedIds = new Set();
   const profiles = [];
-  const addProfile = async (id, label, dirPath, { requireExists = false, cockpitAccount = null } = {}) => {
+  const nextUniqueId = (baseId) => {
+    const clean = slugProfileId(baseId, "default");
+    if (!usedIds.has(clean)) {
+      usedIds.add(clean);
+      return clean;
+    }
+    let idx = 2;
+    while (usedIds.has(`${clean}-${idx}`)) idx += 1;
+    const unique = `${clean}-${idx}`;
+    usedIds.add(unique);
+    return unique;
+  };
+  const addProfile = async (id, label, dirPath, { requireExists = false, cockpitAccount = null, managed = false, managedName = "" } = {}) => {
     const resolved = resolve(dirPath);
     const exists = await pathExists(resolved);
     if (requireExists && !exists) return;
@@ -887,13 +948,14 @@ export async function discoverGrokProfiles({ env = process.env, home = os.homedi
     seenPaths.add(canonical);
     const authenticated = await hasGrokAuth(resolved, env);
     profiles.push({
-      id: slugProfileId(id, "default"),
+      id: nextUniqueId(id),
       provider: "grok",
       label,
       home: resolved,
       exists,
       authenticated,
       cockpitAccount,
+      ...(managed ? { managed: true, managedName: managedName || label } : {}),
     });
   };
 
@@ -919,16 +981,27 @@ export async function discoverGrokProfiles({ env = process.env, home = os.homedi
   }
   await addProfile("default", "Grok 默认", resolve(home, ".grok"), { requireExists: false });
 
+  if (dataDir) {
+    const managedList = (await readManagedProfiles(dataDir)).filter((item) => item.provider === "grok");
+    for (const item of managedList) {
+      await addProfile(item.id, `Grok · ${item.name}`, item.home, {
+        requireExists: false,
+        managed: true,
+        managedName: item.name,
+      });
+    }
+  }
+
   profiles.sort((a, b) => Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated)));
   return profiles;
 }
 
-export async function discoverAllProfiles({ env = process.env, home = os.homedir() } = {}) {
+export async function discoverAllProfiles({ env = process.env, home = os.homedir(), dataDir = "" } = {}) {
   const [codex, claude, antigravity, grok] = await Promise.all([
-    discoverCodexProfiles({ env, home }),
-    discoverClaudeProfiles({ env, home }),
+    discoverCodexProfiles({ env, home, dataDir }),
+    discoverClaudeProfiles({ env, home, dataDir }),
     discoverAntigravityProfiles({ env, home }),
-    discoverGrokProfiles({ env, home }),
+    discoverGrokProfiles({ env, home, dataDir }),
   ]);
   return { codex, claude, antigravity, grok };
 }

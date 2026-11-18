@@ -924,3 +924,50 @@ test("claude-history attaches per-turn primary model while ignoring sidechain ov
   assert.equal(parsed.turns.length, 1);
   assert.equal(parsed.turns[0].model, "claude-opus-5-5");
 });
+
+test("claude-provider readThread preserves file mtime updatedAt consistent with listThreads", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-claude-mtime-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const projDir = resolve(dir, "projects", "-tmp-mtime-demo");
+  await mkdir(projDir, { recursive: true });
+  const sessionId = "22222222-2222-4222-8222-222222222222";
+  const filePath = resolve(projDir, `${sessionId}.jsonl`);
+  await writeFile(
+    filePath,
+    [
+      JSON.stringify({
+        type: "user",
+        uuid: "u-1",
+        cwd: "/tmp/mtime-demo",
+        timestamp: "2026-11-16T08:00:00Z",
+        message: { role: "user", content: "检查未读状态同步" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        uuid: "a-1",
+        timestamp: "2026-11-16T08:00:05Z",
+        message: { id: "m-1", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "已完成" }] },
+      }),
+      JSON.stringify({ type: "last-prompt", lastPrompt: "检查未读状态同步" }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  const laterSec = Math.floor(Date.parse("2026-11-16T08:05:00Z") / 1000);
+  await utimes(filePath, laterSec, laterSec);
+
+  const provider = new ClaudeProvider({
+    env: {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: dir,
+      AGENT_CONTROL_CLAUDE_BIN: MOCK_CLAUDE_BIN,
+    },
+  });
+  const listed = await provider.listThreads("default", { limit: 20 });
+  const listedItem = listed.find((item) => item.rawId === sessionId);
+  assert.ok(listedItem);
+  assert.equal(listedItem.updatedAt, laterSec);
+
+  const detail = await provider.readThread("default", sessionId, { limit: 20 });
+  assert.equal(detail.thread.updatedAt, laterSec);
+});

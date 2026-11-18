@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import os from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { formatCompositeThreadId } from "../composite-id.mjs";
 import { resolveUserHome } from "../platform.mjs";
 import { cleanPreviewText, displayThreadTitle, mergeActiveTurnIntoHistory } from "../thread-display.mjs";
@@ -12,6 +14,7 @@ import {
   readClaudeThreadHistory,
 } from "./claude-history.mjs";
 import {
+  claudeExecutable,
   ClaudeTurnManager,
   DEFAULT_CLAUDE_MODELS,
   probeClaudeProfile,
@@ -25,10 +28,23 @@ import {
   readClaudePublicEndpoint,
 } from "./profile-discovery.mjs";
 
+const execFileAsync = promisify(execFile);
+
+function shellQuote(value) {
+  const str = String(value || "");
+  if (/^[A-Za-z0-9_./:-]+$/.test(str)) return str;
+  return `'${str.replace(/'/g, `'\\''`)}'`;
+}
+
+function applescriptQuote(value) {
+  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 export class ClaudeProvider {
   id = "claude";
   label = "Claude Code";
   #env;
+  #dataDir;
   #index = new ClaudeSessionHistoryIndex();
   #runner;
   #profiles = [];
@@ -39,10 +55,12 @@ export class ClaudeProvider {
 
   constructor({
     env = process.env,
+    dataDir = "",
     onEvent = () => {},
     onServerRequest = () => {},
   } = {}) {
     this.#env = env;
+    this.#dataDir = dataDir;
     this.#onEvent = onEvent;
     this.#onServerRequest = onServerRequest;
     this.#runner = new ClaudeTurnManager({ env });
@@ -171,7 +189,8 @@ export class ClaudeProvider {
   async refreshProfiles() {
     const homeDir = resolveUserHome(this.#env, process.platform, os.homedir());
     const defaultCliHome = resolve(String(this.#env.CLAUDE_CONFIG_DIR || "").trim() || resolve(homeDir, ".claude"));
-    const discovered = await discoverClaudeProfiles({ env: this.#env, home: homeDir });
+    const discovered = await discoverClaudeProfiles({ env: this.#env, home: homeDir, dataDir: this.#dataDir });
+    const hasCliBinary = Boolean(claudeExecutable(this.#env));
     const needsDefaultAuthCheck = discovered.some((p) => p.isDesktopInstance || p.cockpitAccount);
     const defaultCliAuth = needsDefaultAuthCheck
       ? await readClaudeCliAuthStatus({ configDir: defaultCliHome, env: this.#env }).catch(() => ({
@@ -240,7 +259,11 @@ export class ClaudeProvider {
           }
         }
       }
-      const account = await readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null);
+      const account = await readClaudePublicAccount(cliDir, homeDir, profile.cockpitAccount || null, {
+        allowHomeFallback: !profile.managed,
+      });
+      const loginCommand = `CLAUDE_CONFIG_DIR=${shellQuote(cliDir)} claude auth login`;
+      const needsLogin = Boolean(profile.managed && !account.signedIn && !endpoint.endpointHost);
       return {
         ...profile,
         historyDir,
@@ -248,7 +271,9 @@ export class ClaudeProvider {
         account,
         endpointHost: endpoint.endpointHost || "",
         endpointLabel: endpoint.endpointLabel || "",
-        installed: Boolean(profile.exists || account.signedIn),
+        needsLogin,
+        loginCommand,
+        installed: Boolean(profile.managed ? (hasCliBinary || profile.exists) : (profile.exists || account.signedIn)),
       };
     }));
     return this.#profiles;
@@ -432,6 +457,11 @@ export class ClaudeProvider {
       firstUserText: thread.firstUserText || known?.firstUserText || "",
       lastUserText: thread.lastUserText || known?.lastUserText || "",
       hasFollowUpTurns: Boolean(thread.hasFollowUpTurns || known?.hasFollowUpTurns),
+      updatedAt: Math.max(
+        Number(thread.updatedAt) || 0,
+        Number(external.latestUpdatedAt) || 0,
+        Number(known?.updatedAt) || 0,
+      ),
       live: Boolean(external.readThreadLive),
       turns: mergeActiveTurnIntoHistory(Array.isArray(thread.turns) ? thread.turns : [], activeTurn, {
         liveItemSuffix: "live",
@@ -602,6 +632,33 @@ export class ClaudeProvider {
 
   async interrupt({ rawId } = {}) {
     return this.#runner.interrupt(rawId);
+  }
+
+  async startProfileLogin(profileId = "default", { mode = "terminal", openOnHost = true } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const cliDir = this.#configDirFor(profile);
+    await mkdir(cliDir, { recursive: true, mode: 0o700 });
+    const loginCommand = `CLAUDE_CONFIG_DIR=${shellQuote(cliDir)} claude auth login`;
+    let openedTerminal = false;
+    if (process.platform === "darwin" && openOnHost && this.#env.AGENT_CONTROL_NO_HOST_OPEN !== "1") {
+      try {
+        await execFileAsync("osascript", [
+          "-e",
+          `tell application "Terminal" to do script ${applescriptQuote(loginCommand)}`,
+          "-e",
+          `tell application "Terminal" to activate`,
+        ]);
+        openedTerminal = true;
+      } catch {}
+    }
+    return {
+      ok: true,
+      provider: "claude",
+      profileId,
+      mode: mode || "terminal",
+      openedTerminal,
+      loginCommand,
+    };
   }
 
   async close() {

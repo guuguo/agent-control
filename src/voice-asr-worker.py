@@ -123,12 +123,15 @@ def is_whisper_hallucination(text):
     return bool(HALLUCINATION_RE.search(clean) or REPEAT_TOKEN_RE.search(clean))
 
 
-def extract_valid_whisper_text(res):
+def extract_valid_whisper_text(res, overlap_sec=0.0):
     if not isinstance(res, dict):
-        return ""
+        return "", "", ""
     segments = res.get("segments")
     if isinstance(segments, list) and segments:
         kept = []
+        during_kept = []
+        after_kept = []
+        has_overlap = float(overlap_sec or 0.0) > 0.05
         for seg in segments:
             if not isinstance(seg, dict):
                 continue
@@ -149,20 +152,37 @@ def extract_valid_whisper_text(res):
             if is_whisper_hallucination(seg_text):
                 continue
             kept.append(seg_text)
+            if has_overlap:
+                seg_start = float(seg.get("start") or 0.0)
+                seg_end = float(seg.get("end") or seg_start)
+                seg_mid = (seg_start + seg_end) * 0.5
+                if seg_mid <= float(overlap_sec):
+                    during_kept.append(seg_text)
+                else:
+                    after_kept.append(seg_text)
         full_text = "".join(kept).strip()
-        return "" if is_whisper_hallucination(full_text) else full_text
+        if is_whisper_hallucination(full_text):
+            return "", "", ""
+        during_text = "".join(during_kept).strip() if has_overlap else ""
+        after_text = "".join(after_kept).strip() if has_overlap else full_text
+        return full_text, during_text, after_text
     raw_text = str(res.get("text") or "").strip()
-    return "" if is_whisper_hallucination(raw_text) else raw_text
+    if is_whisper_hallucination(raw_text):
+        return "", "", ""
+    if float(overlap_sec or 0.0) > 0.05:
+        return raw_text, raw_text, ""
+    return raw_text, "", raw_text
 
 
-def filter_speech_with_silero(audio_arr, vad_model, get_speech_timestamps):
+def filter_speech_with_silero(audio_arr, vad_model, get_speech_timestamps, overlap_samples=0):
+    overlap_samples = max(0, min(int(overlap_samples or 0), int(audio_arr.size)))
     if vad_model is None or get_speech_timestamps is None:
-        return True, audio_arr
+        return True, audio_arr, round(overlap_samples / 16000.0, 3)
     import numpy as np
     import torch
 
     if audio_arr.size < 1600:
-        return False, audio_arr[:0]
+        return False, audio_arr[:0], 0.0
 
     try:
         tensor = torch.from_numpy(np.ascontiguousarray(audio_arr, dtype=np.float32))
@@ -182,12 +202,21 @@ def filter_speech_with_silero(audio_arr, vad_model, get_speech_timestamps):
             pass
 
     if not segments:
-        return False, audio_arr[:0]
+        return False, audio_arr[:0], 0.0
 
-    chunks = [audio_arr[int(seg["start"]):int(seg["end"])] for seg in segments if int(seg["end"]) > int(seg["start"])]
+    chunks = []
+    mapped_overlap_samples = 0
+    for seg in segments:
+        s = int(seg["start"])
+        e = int(seg["end"])
+        if e <= s:
+            continue
+        chunks.append(audio_arr[s:e])
+        if overlap_samples > s:
+            mapped_overlap_samples += min(e, overlap_samples) - s
     if not chunks:
-        return False, audio_arr[:0]
-    return True, np.concatenate(chunks)
+        return False, audio_arr[:0], 0.0
+    return True, np.concatenate(chunks), round(mapped_overlap_samples / 16000.0, 3)
 
 
 def main():
@@ -244,6 +273,7 @@ def main():
             audio_path = str(req.get("audioPath") or "")
             language = str(req.get("language") or "zh").strip() or None
             prompt = str(req.get("prompt") or "").strip() or default_prompt
+            overlap_ms = max(0, int(req.get("overlapMs") or 0))
             if not audio_path or not Path(audio_path).is_file():
                 raise ValueError("audio file missing")
 
@@ -251,12 +281,19 @@ def main():
             audio_arr = load_pcm16_float32(audio_path)
             has_speech, peak, rms, max_frame_rms = assess_audio_activity(audio_arr)
             silence_reason = ""
+            during_text = ""
+            after_text = ""
             if not has_speech:
                 text = ""
                 no_speech = True
                 silence_reason = "acoustic_gate"
             else:
-                has_voice, speech_arr = filter_speech_with_silero(audio_arr, vad_model, vad_get_timestamps)
+                has_voice, speech_arr, mapped_overlap_sec = filter_speech_with_silero(
+                    audio_arr,
+                    vad_model,
+                    vad_get_timestamps,
+                    overlap_samples=int(round(overlap_ms * 16.0)),
+                )
                 if not has_voice or speech_arr.size < 1600:
                     text = ""
                     no_speech = True
@@ -283,7 +320,7 @@ def main():
                             condition_on_previous_text=False,
                             initial_prompt=prompt,
                         )
-                    text = extract_valid_whisper_text(res)
+                    text, during_text, after_text = extract_valid_whisper_text(res, overlap_sec=mapped_overlap_sec)
                     no_speech = not bool(text)
                     if no_speech:
                         silence_reason = "whisper_filtered"
@@ -292,6 +329,8 @@ def main():
                 "id": req_id,
                 "ok": True,
                 "text": text,
+                "duringPlaybackText": during_text,
+                "afterPlaybackText": after_text,
                 "noSpeech": no_speech,
                 "peak": round(peak, 5),
                 "rms": round(rms, 5),

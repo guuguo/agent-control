@@ -366,15 +366,15 @@ export function createVadTurnDetector({
 
   const currentOnsetThreshold = () => {
     if (!adaptive) return rmsThreshold;
-    const minAdaptiveFloor = requireSustainedOnset ? Math.max(0.010, rmsThreshold * 0.65) : Math.max(0.0085, rmsThreshold * 0.55);
-    const snrMult = requireSustainedOnset ? 2.2 : 2.6;
-    const cap = requireSustainedOnset ? 0.030 : 0.05;
+    const minAdaptiveFloor = requireSustainedOnset ? Math.max(0.008, rmsThreshold * 0.72) : Math.max(0.007, rmsThreshold * 0.6);
+    const snrMult = requireSustainedOnset ? 1.8 : 2.4;
+    const cap = requireSustainedOnset ? 0.018 : 0.04;
     return Math.max(minAdaptiveFloor, Math.min(cap, Math.max(minAdaptiveFloor, noiseFloorRms * snrMult)));
   };
 
   const currentHoldThreshold = () => {
     if (!adaptive) return rmsThreshold;
-    const baseHold = Math.max(requireSustainedOnset ? 0.008 : 0.006, currentOnsetThreshold() * 0.72);
+    const baseHold = Math.max(requireSustainedOnset ? 0.0065 : 0.0055, currentOnsetThreshold() * 0.68);
     if (inSpeech && peakVoicedRms > 0.12) {
       return Math.max(baseHold, Math.min(0.045, peakVoicedRms * 0.12));
     }
@@ -418,7 +418,6 @@ export function createVadTurnDetector({
       && avgVoicedRms < noiseFloorRms * minSnrRatio;
     const failsTransient = requireSustainedOnset && (
       maxContiguousVoicedSamples < Math.min(minSamplesRequired, Math.round(sampleRate * 0.16))
-      || (speechSamples > sampleRate * 2.5 && (voicedSamples / Math.max(1, speechSamples)) < 0.12)
     );
     reset();
     if (!merged.length || !hadEnoughSpeech) {
@@ -483,7 +482,7 @@ export function createVadTurnDetector({
             voicedChunkCount = 1;
             preRollChunks = [];
             preRollSamples = 0;
-            return { type: "speech_start", rms };
+            return { type: "speech_start", rms, bufferedSamples: speechSamples };
           }
         } else {
           candidateOnsetSamples = 0;
@@ -528,6 +527,28 @@ export function createVadTurnDetector({
       return { type: "recording", rms, bufferedSamples: speechSamples };
     },
   };
+}
+
+export function mergePcm16ChunksWithGap(chunks = [], gapSamples = 2560) {
+  const valid = (Array.isArray(chunks) ? chunks : []).filter((c) => c && c.length > 0);
+  if (!valid.length) return new Int16Array(0);
+  if (valid.length === 1) return valid[0];
+  const gap = Math.max(0, Math.floor(Number(gapSamples) || 0));
+  let total = 0;
+  for (let i = 0; i < valid.length; i += 1) {
+    total += valid[i].length;
+    if (i < valid.length - 1) total += gap;
+  }
+  const out = new Int16Array(total);
+  let offset = 0;
+  for (let i = 0; i < valid.length; i += 1) {
+    out.set(valid[i], offset);
+    offset += valid[i].length;
+    if (i < valid.length - 1 && gap > 0) {
+      offset += gap;
+    }
+  }
+  return out;
 }
 
 export function formatCallDuration(totalSeconds = 0) {

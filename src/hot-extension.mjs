@@ -358,6 +358,39 @@ export async function createHotExtensionServer({
         return;
       }
 
+      if (pathname === "/api/profile/create" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await probeHub.createProfile({
+          provider: body.provider || "",
+          name: body.name || "",
+          customHome: body.customHome || "",
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/profile/delete" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await probeHub.deleteProfile({
+          provider: body.provider || "",
+          profileId: body.profileId || "",
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (pathname === "/api/profile/login" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await probeHub.startProfileLogin({
+          provider: body.provider || "",
+          profileId: body.profileId || "",
+          mode: body.mode || "",
+          openOnHost: body.openOnHost !== false,
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
       if (pathname === "/api/voice/call/models" && request.method === "GET") {
         const result = await voiceService.listVoiceModelOptions();
         sendJson(response, 200, result);
@@ -386,6 +419,7 @@ export async function createHotExtensionServer({
         }
         const result = await voiceService.handleTurn({
           callId: body.callId || "",
+          callScope: body.callScope || "",
           audioBase64: body.audioBase64 || "",
           audioMimeType: body.audioMimeType || "audio/wav",
           transcriptText: body.transcriptText || "",
@@ -397,6 +431,8 @@ export async function createHotExtensionServer({
           autoExecute: body.autoExecute !== false,
           asyncDispatch: Boolean(body.asyncDispatch),
           tts: body.tts !== false,
+          overlapDurationMs: Number(body.overlapDurationMs) || 0,
+          overlapBotText: body.overlapBotText || "",
         });
         sendJson(response, 200, result);
         return;

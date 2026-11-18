@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -323,6 +323,29 @@ rl.on("line", (line) => {
     const t = threads.get(params.threadId);
     if (t) t.archived = false;
     send({ id, result: { ok: true } });
+    return;
+  }
+
+  if (method === "account/login/start") {
+    const loginId = "mock-login-1";
+    const authUrl = "https://auth.openai.com/authorize?mock=1";
+    send({ id, result: { type: "chatgpt", authUrl, loginId } });
+    const home = process.env.CODEX_HOME || "";
+    const emailHintFile = home ? resolve(home, ".mock-auto-login-email") : "";
+    if (emailHintFile && existsSync(emailHintFile)) {
+      const email = readFileSync(emailHintFile, "utf8").trim() || "alt@example.com";
+      const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+      const payload = Buffer.from(JSON.stringify({ name: "Alt User", email })).toString("base64url");
+      writeFileSync(
+        resolve(home, "auth.json"),
+        `${JSON.stringify({ tokens: { id_token: `${header}.${payload}.mock` } }, null, 2)}\n`,
+        "utf8",
+      );
+      setImmediate(() => {
+        send({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } });
+        send({ method: "account/login/completed", params: { loginId, success: true, error: null } });
+      });
+    }
     return;
   }
 

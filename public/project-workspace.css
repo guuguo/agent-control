@@ -2071,3 +2071,147 @@
   align-items: center;
   gap: 4px;
 }
+
+/* ===== 日间模式项目面板与语音面板适配 ===== */
+:root[data-theme="light"] .project-group-head,
+:root[data-theme="light"] .project-group.is-collapsed:not(.has-live):not(.has-pending):not(.is-pinned) > .project-group-head,
+:root[data-theme="light"] .sidebar-stale-projects-btn {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.09);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .project-group-head:hover,
+:root[data-theme="light"] .project-group.is-collapsed:not(.has-live):not(.has-pending):not(.is-pinned) > .project-group-head:hover,
+:root[data-theme="light"] .sidebar-stale-projects-btn:hover {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .board-project-card,
+:root[data-theme="light"] .board-thread-card,
+:root[data-theme="light"] .project-task-strip-card,
+:root[data-theme="light"] .voice-call-dock,
+:root[data-theme="light"] .voice-transcript-card,
+:root[data-theme="light"] .batch-check {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .voice-call-dock {
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .batch-action-bar {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .thread-item-title {
+  color: #1e293b;
+}
+
+:root[data-theme="light"] .thread-item.is-recent-done .thread-item-title {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .thread-item.is-selected {
+  background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.05));
+  border-color: rgba(37, 99, 235, 0.34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+:root[data-theme="light"] .thread-item.is-selected .thread-item-title {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .thread-item-sub.is-live-sub {
+  color: #047857;
+}
+
+:root[data-theme="light"] .group-stat-pill.is-live {
+  background: rgba(5, 150, 105, 0.1);
+  border-color: rgba(5, 150, 105, 0.25);
+  color: #047857;
+}
+
+:root[data-theme="light"] .group-stat-pill.is-pending,
+:root[data-theme="light"] .thread-pending-pill,
+:root[data-theme="light"] .board-status-pill.is-pending,
+:root[data-theme="light"] .voice-turn-delivery-chip.is-interrupted,
+:root[data-theme="light"] .voice-turn-delivery-chip.is-unheard {
+  color: #b45309;
+}
+
+:root[data-theme="light"] .thread-status-dot.is-agent-marker.is-claude,
+:root[data-theme="light"] .thread-status-dot.is-live.is-agent-live.is-claude,
+:root[data-theme="light"] .thread-micro-tag.is-claude .micro-glyph {
+  color: #d97706;
+}
+
+:root[data-theme="light"] .thread-status-dot.is-live.is-agent-live.is-antigravity {
+  color: #7c3aed;
+}
+
+:root[data-theme="light"] .sidebar-stale-projects-btn:hover {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .voice-turn-delivery-chip.is-pending {
+  color: #475569;
+}
+
+:root[data-theme="light"] .project-group-icon.is-pinned,
+:root[data-theme="light"] .strip-pin-btn.is-pinned,
+:root[data-theme="light"] .board-pin-btn.is-pinned,
+:root[data-theme="light"] .board-attention-text strong,
+:root[data-theme="light"] .voice-launch-btn.has-unheard,
+:root[data-theme="light"] .voice-unheard-banner-inner,
+:root[data-theme="light"] .voice-unheard-icon,
+:root[data-theme="light"] .voice-turn-replay-btn.is-urgent,
+:root[data-theme="light"] .voice-dock-btn.is-muted,
+:root[data-theme="light"] .strip-provider-tag.is-claude {
+  color: #b45309;
+}
+
+:root[data-theme="light"] .project-group-add:hover,
+:root[data-theme="light"] .thread-queued-pill,
+:root[data-theme="light"] .sidebar-more-btn:hover,
+:root[data-theme="light"] .strip-new-task-btn,
+:root[data-theme="light"] .strip-provider-tag,
+:root[data-theme="light"] .board-status-pill.is-goal,
+:root[data-theme="light"] .board-status-pill.is-queued,
+:root[data-theme="light"] .voice-turn-tag.is-ai,
+:root[data-theme="light"] .voice-turn-delivery-chip.is-playing,
+:root[data-theme="light"] .voice-turn-replay-btn:hover,
+:root[data-theme="light"] .voice-live-summary-badge,
+:root[data-theme="light"] .voice-progress-goal,
+:root[data-theme="light"] .batch-check.is-partial,
+:root[data-theme="light"] .board-batch-ratio,
+:root[data-theme="light"] .board-toolbar-actions .is-active {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .board-status-pill.is-live,
+:root[data-theme="light"] .voice-call-timer,
+:root[data-theme="light"] #voiceAutoAnnounceBtn.is-on,
+:root[data-theme="light"] .voice-turn-action-chip,
+:root[data-theme="light"] .voice-turn-delivery-chip.is-played {
+  color: #047857;
+}
+
+:root[data-theme="light"] .thread-status-dot.is-agent-marker.is-antigravity,
+:root[data-theme="light"] .strip-provider-tag.is-antigravity {
+  color: #6d28d9;
+}
+
+:root[data-theme="light"] .voice-dock-btn.is-hangup {
+  color: #b91c1c;
+}
+
+:root[data-theme="light"] .batch-bar-count strong {
+  color: #0f172a;
+}

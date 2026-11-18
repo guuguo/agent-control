@@ -20,6 +20,7 @@ export class GrokProvider {
   id = "grok";
   label = "Grok";
   #env;
+  #dataDir;
   #platform;
   #onEvent;
   #profiles = [];
@@ -31,6 +32,7 @@ export class GrokProvider {
 
   constructor({
     env = process.env,
+    dataDir = "",
     platform = process.platform,
     onEvent = () => {},
     historyIndex = null,
@@ -38,6 +40,7 @@ export class GrokProvider {
     desktopIndexPath = null,
   } = {}) {
     this.#env = env;
+    this.#dataDir = dataDir;
     this.#platform = normalizePlatform(platform);
     this.#onEvent = onEvent;
     this.#historyIndex = historyIndex || new GrokHistoryIndex({
@@ -71,7 +74,7 @@ export class GrokProvider {
   }
 
   async refreshProfiles() {
-    const discovered = await discoverGrokProfiles({ env: this.#env, platform: this.#platform });
+    const discovered = await discoverGrokProfiles({ env: this.#env, platform: this.#platform, dataDir: this.#dataDir });
     const hasBinary = Boolean(grokExecutable(this.#env));
     this.#profiles = await Promise.all(
       discovered.map(async (profile) => {

@@ -517,7 +517,25 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     if parts.count >= 2 && parts[0] == "apps" {
       return "/apps/\(parts[1])"
     }
+    if let projectCwd = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .queryItems?.first(where: { $0.name == "project" })?.value,
+      !projectCwd.isEmpty {
+      return "project:\(projectCwd)"
+    }
     return url.path.isEmpty ? url.absoluteString : url.path
+  }
+
+  private func defaultChildWindowTitle(for url: URL) -> String {
+    if isLocalPluginAppURL(url) {
+      return "Agent Control 插件"
+    }
+    if let projectCwd = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .queryItems?.first(where: { $0.name == "project" })?.value,
+      !projectCwd.isEmpty {
+      let leaf = URL(fileURLWithPath: projectCwd).lastPathComponent
+      return leaf.isEmpty ? "Agent Control" : "\(leaf) · Agent Control"
+    }
+    return "Agent Control"
   }
 
   private func activeWebView() -> WKWebView {
@@ -551,7 +569,8 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
       backing: .buffered,
       defer: false
     )
-    childWindow.title = "Agent Control 插件"
+    let defaultTitle = defaultChildWindowTitle(for: url)
+    childWindow.title = defaultTitle
     childWindow.minSize = NSSize(width: 720, height: 500)
     childWindow.backgroundColor = windowBgColor
     childWindow.titlebarAppearsTransparent = true
@@ -613,7 +632,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     }
     session.titleObservation = childWebView.observe(\.title, options: [.initial, .new]) { view, _ in
       let pageTitle = view.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      childWindow.title = pageTitle.isEmpty ? "Agent Control 插件" : pageTitle
+      childWindow.title = pageTitle.isEmpty ? defaultTitle : pageTitle
     }
     pluginSessions.append(session)
 

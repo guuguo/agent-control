@@ -160,6 +160,16 @@ export function normalizeProjectCwd(cwd) {
   return raw.replace(/\/+$/, "") || "/";
 }
 
+export function isSameProjectCwd(a, b) {
+  const normA = normalizeProjectCwd(a);
+  const normB = normalizeProjectCwd(b);
+  if (!normA || !normB) return normA === normB;
+  if (/^[A-Za-z]:\\/.test(normA) || /^[A-Za-z]:\\/.test(normB)) {
+    return normA.toLowerCase() === normB.toLowerCase();
+  }
+  return normA === normB;
+}
+
 export function isUserHomeCwd(cwd) {
   const clean = normalizeProjectCwd(cwd).replace(/\\/g, "/");
   return /^(?:\/Users\/[^/]+|\/home\/[^/]+|\/root|[A-Za-z]:\/Users\/[^/]+)$/i.test(clean);
@@ -509,6 +519,7 @@ function renderSidebarProjectGroupHtml(group, {
   minVisibleThreadsWhenOpen = 2,
   selectionMode = false,
   selectedThreadIds = null,
+  allowOpenProjectWindow = true,
 } = {}) {
   const cwd = group.cwd;
   const allItems = Array.isArray(group.threads) ? group.threads : [];
@@ -692,6 +703,7 @@ function renderSidebarProjectGroupHtml(group, {
         <span class="project-group-right">
           ${group.pendingCount > 0 ? `<span class="group-stat-pill is-pending" title="待确认 ${group.pendingCount}">${group.pendingCount}</span>` : ""}
           ${group.liveCount > 0 ? `<span class="group-stat-pill is-live" title="${group.liveCount} 个运行中"><span class="group-live-dot" aria-hidden="true"></span>${group.liveCount}</span>` : ""}
+          ${!selectionMode && allowOpenProjectWindow ? `<button type="button" class="project-group-open" data-open-project-window="${escapeHtml(cwd)}" title="在独立新窗口打开此项目" aria-label="在独立新窗口打开此项目">${iconSvg("external-link", { size: 11 })}</button>` : ""}
           ${!selectionMode ? `<button type="button" class="project-group-add" data-new-in-cwd="${escapeHtml(cwd)}" title="在此项目新建会话（可选 Codex 等智能体）" aria-label="在此项目新建会话（可选 Codex 等智能体）">${iconSvg("plus", { size: 12 })}</button>` : ""}
           <span class="project-group-count">${selectionMode && groupSel?.selectedCount ? `${groupSel.selectedCount}/${allItems.length}` : allItems.length}</span>
         </span>
@@ -725,6 +737,7 @@ export function renderSidebarThreadListHtml(groups = [], {
   maxVisiblePerGroup = 8,
   selectionMode = false,
   selectedThreadIds = null,
+  allowOpenProjectWindow = true,
 } = {}) {
   if (!Array.isArray(groups) || !groups.length) {
     return `<div class="thread-empty">暂无匹配的会话</div>`;
@@ -764,6 +777,7 @@ export function renderSidebarThreadListHtml(groups = [], {
     minVisibleThreadsWhenOpen,
     selectionMode,
     selectedThreadIds,
+    allowOpenProjectWindow,
   });
 
   const html = primaryGroups.map(renderGroup);
@@ -808,6 +822,7 @@ function renderProjectCardHtml(group, {
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
+  allowOpenProjectWindow = true,
 } = {}) {
   const baseLimit = 4;
   const visibleCount = expanded === true
@@ -857,6 +872,14 @@ function renderProjectCardHtml(group, {
           ${selectionMode ? `
             <span class="board-batch-ratio">${groupSel.selectedCount > 0 ? `已选 ${groupSel.selectedCount}/${groupSel.total}` : "点击全选项目"}</span>
           ` : `
+            ${allowOpenProjectWindow ? `
+            <button
+              type="button"
+              class="btn-secondary btn-xs"
+              data-open-project-window="${escapeHtml(group.cwd)}"
+              title="在独立新窗口打开此项目"
+              aria-label="在独立新窗口打开此项目"
+            >${iconSvg("external-link", { size: 11 })} 新窗口</button>` : ""}
             <button
               type="button"
               class="btn-secondary btn-xs"
@@ -912,6 +935,7 @@ export function renderProjectBoardHtml({
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
+  allowOpenProjectWindow = true,
 } = {}) {
   const pinnedGroups = groups.filter((g) => g.pinned);
   const unpinnedGroups = groups.filter((g) => !g.pinned);
@@ -998,6 +1022,7 @@ export function renderProjectBoardHtml({
             selectionMode,
             selectedThreadIds,
             profiles,
+            allowOpenProjectWindow,
           })).join("")}
         </div>
       </section>
@@ -1020,6 +1045,7 @@ export function renderProjectBoardHtml({
             selectionMode,
             selectedThreadIds,
             profiles,
+            allowOpenProjectWindow,
           })).join("")}
         </div>
         ${hiddenOtherCount > 0 ? `

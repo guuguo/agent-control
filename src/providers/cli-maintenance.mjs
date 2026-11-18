@@ -1,13 +1,11 @@
-import { execFile } from "node:child_process";
 import os from "node:os";
-import { promisify } from "node:util";
 import {
+  execFileCrossPlatform,
   normalizePlatform,
   providerCandidatePaths,
   resolveExecutableCrossPlatform,
 } from "../platform.mjs";
 
-const execFileAsync = promisify(execFile);
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000;
 
 export const CLI_SPECS = Object.freeze({
@@ -94,7 +92,7 @@ export class CliMaintenanceManager {
     home = os.homedir(),
     platform = process.platform,
     resolveExecutableImpl = resolveExecutableCrossPlatform,
-    execImpl = execFileAsync,
+    execImpl = null,
     cooldownMs = DEFAULT_COOLDOWN_MS,
     onUpdated = null,
   } = {}) {
@@ -102,7 +100,9 @@ export class CliMaintenanceManager {
     this.#home = home;
     this.#platform = platform;
     this.#resolveExecutable = resolveExecutableImpl;
-    this.#execImpl = execImpl;
+    this.#execImpl = typeof execImpl === "function"
+      ? execImpl
+      : (cmd, args, opts) => execFileCrossPlatform(cmd, args, opts, { platform: this.#platform });
     this.#cooldownMs = cooldownMs;
     this.#onUpdated = typeof onUpdated === "function" ? onUpdated : null;
   }
@@ -179,7 +179,6 @@ export class CliMaintenanceManager {
       const isWin = normalizePlatform(this.#platform) === "win32";
       let installCmd = "";
       let installArgs = [];
-      let useShell = false;
       if (spec.npmPackage) {
         installCmd = this.#resolveExecutable({
           binaryName: "npm",
@@ -187,7 +186,6 @@ export class CliMaintenanceManager {
           platform: this.#platform,
         }) || (isWin ? "npm.cmd" : "npm");
         installArgs = ["install", "-g", spec.npmPackage, "--no-audit", "--no-fund"];
-        useShell = isWin;
       } else if (spec.scriptInstaller) {
         const entry = isWin ? spec.scriptInstaller.win32 : spec.scriptInstaller.unix;
         installCmd = entry.cmd;
@@ -201,7 +199,7 @@ export class CliMaintenanceManager {
             env: this.#env,
             timeout: 180_000,
             windowsHide: true,
-            shell: useShell,
+            shell: false,
           },
         );
         const resolvedAfter = resolveRealCliExecutable(provider, {

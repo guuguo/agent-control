@@ -68,6 +68,7 @@ import {
   providerDisplayName,
   providerVisualMeta,
   renderAgentTelemetryBarHtml,
+  renderInstanceManagerListHtml,
   renderProfilePillsHtml,
   renderProviderPillsHtml,
   renderQuotaOverviewHtml,
@@ -101,6 +102,7 @@ import {
   buildProjectGroups,
   computeProjectGroupSelectionState,
   dedupeThreadPreview,
+  isSameProjectCwd,
   isUserHomeCwd,
   normalizeProjectCwd,
   partitionSidebarProjectGroups,
@@ -2969,6 +2971,27 @@ test("sidebar and project board expand older threads progressively in steps of 1
   assert.equal(countBoardTasks(board0), 4);
   assert.match(board0, /展开 10 个任务（剩余 24 个）/);
   assert.doesNotMatch(board0, /data-collapse-project-cwd=/);
+  assert.match(board0, /data-open-project-window="\/tmp\/customer-issues"/);
+
+  const boardScoped = renderProjectBoardHtml({
+    groups: boardGroups,
+    allGroups: boardGroups,
+    profiles,
+    allowOpenProjectWindow: false,
+  });
+  assert.doesNotMatch(boardScoped, /data-open-project-window=/);
+
+  const sidebarWithWindowBtn = renderSidebarThreadListHtml(boardGroups, { profiles, nowMs });
+  assert.match(sidebarWithWindowBtn, /data-open-project-window="\/tmp\/customer-issues"/);
+  const sidebarScoped = renderSidebarThreadListHtml(boardGroups, {
+    profiles,
+    nowMs,
+    allowOpenProjectWindow: false,
+  });
+  assert.doesNotMatch(sidebarScoped, /data-open-project-window=/);
+  assert.equal(isSameProjectCwd("/tmp/demo/", "/tmp/demo"), true);
+  assert.equal(isSameProjectCwd("C:\\Users\\Alice\\Proj\\", "c:/users/alice/proj"), true);
+  assert.equal(isSameProjectCwd("/tmp/a", "/tmp/b"), false);
 
   const board1 = renderProjectBoardHtml({
     groups: boardGroups,
@@ -5120,4 +5143,170 @@ test("queued turns support fetching full images via /entry and updating in place
   assert.equal(missingRes.status, 404);
   const missingJson = await missingRes.json();
   assert.equal(missingJson.error?.code, "queued_turn_not_found");
+});
+
+test("markThreadRead prevents reconcileThreadStatusTrackers and syncThreadSummaryIntoList from re-marking opened thread unread", async () => {
+  const appSource = await readFile(resolve(process.cwd(), "public/app.js"), "utf8");
+  const syncFnSource = appSource.match(/function syncThreadSummaryIntoList\(thread\) \{[\s\S]*?\n\}/)?.[0];
+  const markReadFnSource = appSource.match(/function markThreadRead\(threadId, updatedAtSec = 0\) \{[\s\S]*?\n\}/)?.[0];
+  const reconcileFnSource = appSource.match(/function reconcileThreadStatusTrackers\(prevThreads = \[\], nextThreads = \[\]\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(syncFnSource, "syncThreadSummaryIntoList should exist");
+  assert.ok(markReadFnSource, "markThreadRead should exist");
+  assert.ok(reconcileFnSource, "reconcileThreadStatusTrackers should exist");
+
+  const threadId = "claude:default:22222222-2222-4222-8222-222222222222";
+  const laterSec = Math.floor(Date.now() / 1000) - 30;
+  const earlierSec = laterSec - 120;
+  const ctx = {
+    state: {
+      activeThreadId: threadId,
+      boardOpen: false,
+      threads: [{ id: threadId, provider: "claude", updatedAt: laterSec, live: false, preview: "已完成" }],
+      recentCompletedByThread: new Map([[threadId, { status: "completed", summary: "已完成", at: Date.now(), updatedAt: laterSec }]]),
+      liveActivityByThread: new Map(),
+    },
+    threadReadState: { initialized: true, seenById: {}, unreadById: { [threadId]: { status: "completed", at: Date.now(), updatedAt: laterSec } } },
+    persistThreadReadState: () => {},
+    stripMarkdownForSpeech: (text) => String(text || ""),
+    mergeLiveActivity: (prev, patch) => ({ ...prev, ...patch }),
+    providerDisplayName: () => "Claude Code",
+    document: { visibilityState: "visible" },
+  };
+  const fn = new Function(
+    "state",
+    "threadReadState",
+    "persistThreadReadState",
+    "stripMarkdownForSpeech",
+    "mergeLiveActivity",
+    "providerDisplayName",
+    "document",
+    `${syncFnSource}\n${markReadFnSource}\n${reconcileFnSource}\nreturn { syncThreadSummaryIntoList, markThreadRead, reconcileThreadStatusTrackers };`,
+  );
+  const helpers = fn(
+    ctx.state,
+    ctx.threadReadState,
+    ctx.persistThreadReadState,
+    ctx.stripMarkdownForSpeech,
+    ctx.mergeLiveActivity,
+    ctx.providerDisplayName,
+    ctx.document,
+  );
+
+  // 点击打开会话后，即使详情接口返回更早的 updatedAt，也不应把列表时间倒退
+  const cleared = helpers.markThreadRead(threadId, laterSec);
+  assert.equal(cleared, true);
+  assert.equal(ctx.state.recentCompletedByThread.has(threadId), false);
+  helpers.syncThreadSummaryIntoList({ id: threadId, updatedAt: earlierSec, live: false });
+  assert.equal(ctx.state.threads[0].updatedAt, laterSec);
+
+  // 即使 prev.updatedAt 曾偏小，切走后列表刷新返回已读过的 laterSec，也不应再次标回未读
+  ctx.state.activeThreadId = "codex:codex:other-thread";
+  const prevThreads = [{ id: threadId, provider: "claude", updatedAt: earlierSec, live: false, preview: "已完成" }];
+  const nextThreads = [{ id: threadId, provider: "claude", updatedAt: laterSec, live: false, preview: "已完成" }];
+  helpers.reconcileThreadStatusTrackers(prevThreads, nextThreads);
+  assert.equal(ctx.state.recentCompletedByThread.has(threadId), false);
+  assert.equal(Boolean(ctx.threadReadState.unreadById[threadId]), false);
+});
+
+test("instance manager UI renders pending login, Codex client launch, Claude terminal login, and managed removal cleanly without emojis", () => {
+  const needsLoginMeta = profileHealthVisualMeta({
+    id: "work-alt",
+    provider: "codex",
+    installed: true,
+    needsLogin: true,
+  });
+  assert.equal(needsLoginMeta.status, "needs_login");
+  assert.equal(needsLoginMeta.badgeText, "待登录");
+  assert.equal(needsLoginMeta.available, false);
+
+  const profiles = [
+    {
+      id: "default",
+      key: "codex:default",
+      provider: "codex",
+      label: "Codex 默认",
+      home: "/Users/demo/.codex",
+      installed: true,
+      account: { signedIn: true, email: "main@example.com" },
+      health: { status: "healthy", latencyMs: 120 },
+    },
+    {
+      id: "work-alt",
+      key: "codex:work-alt",
+      provider: "codex",
+      label: "Codex · 备用工作号",
+      home: "/data/instances/codex/work-alt",
+      managed: true,
+      installed: true,
+      needsLogin: true,
+      account: { signedIn: false },
+      health: { status: "unknown" },
+    },
+    {
+      id: "claude-alt",
+      key: "claude:claude-alt",
+      provider: "claude",
+      label: "Claude · 团队号",
+      home: "/data/instances/claude/claude-alt",
+      cliConfigDir: "/data/instances/claude/claude-alt",
+      managed: true,
+      installed: true,
+      needsLogin: true,
+      loginCommand: "CLAUDE_CONFIG_DIR=/data/instances/claude/claude-alt claude auth login",
+      health: { status: "unknown" },
+    },
+  ];
+
+  const codexMgrHtml = renderInstanceManagerListHtml(profiles, { provider: "codex" });
+  assert.equal(/\p{Extended_Pictographic}/u.test(codexMgrHtml), false);
+  assert.match(codexMgrHtml, /data-login-profile="work-alt"[^>]*data-login-mode="oauth"[^>]*>浏览器登录<\/button>/);
+  assert.match(codexMgrHtml, /data-login-profile="work-alt"[^>]*data-login-mode="app"[^>]*>开客户端<\/button>/);
+  assert.match(codexMgrHtml, /data-delete-profile="work-alt"/);
+  assert.doesNotMatch(codexMgrHtml, /data-delete-profile="default"/);
+  assert.match(codexMgrHtml, /托管多开/);
+  assert.match(codexMgrHtml, /本机发现/);
+
+  const claudeMgrHtml = renderInstanceManagerListHtml(profiles, { provider: "claude" });
+  assert.equal(/\p{Extended_Pictographic}/u.test(claudeMgrHtml), false);
+  assert.match(claudeMgrHtml, /data-login-profile="claude-alt"[^>]*data-login-mode="terminal"[^>]*>终端登录<\/button>/);
+  assert.match(claudeMgrHtml, /data-copy-login-cmd="CLAUDE_CONFIG_DIR=\/data\/instances\/claude\/claude-alt claude auth login"/);
+  assert.match(claudeMgrHtml, /data-delete-profile="claude-alt"/);
+
+  const pillsHtml = renderProfilePillsHtml(profiles.filter((p) => p.provider === "codex"), {
+    selectedId: "default",
+    allowManageButton: true,
+    provider: "codex",
+  });
+  assert.match(pillsHtml, /data-login-profile="work-alt"[^>]*>去登录<\/button>/);
+  assert.match(pillsHtml, /data-open-instance-modal="codex"/);
+});
+
+test("light theme mode defaults to system preference and toggles manually on top logo without pictographic emojis", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/app.css", import.meta.url), "utf8");
+  const wsCss = await readFile(new URL("../public/project-workspace.css", import.meta.url), "utf8");
+  const appSource = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+
+  assert.match(html, /id="themeToggleBtn"/);
+  assert.match(html, /id="sseStatusDot"/);
+  assert.match(html, /id="themeToggleIcon"/);
+  assert.match(html, /prefers-color-scheme:\s*light/);
+  assert.match(html, /ac-theme-mode/);
+
+  assert.match(css, /:root\[data-theme="light"\]/);
+  assert.match(css, /color-scheme:\s*light;/);
+  assert.match(wsCss, /:root\[data-theme="light"\]/);
+
+  assert.match(appSource, /const THEME_STORAGE_KEY\s*=\s*"ac-theme-mode"/);
+  assert.match(appSource, /function toggleThemeMode\(/);
+  assert.match(appSource, /matchMedia\("\(prefers-color-scheme: light\)"\)/);
+
+  const { iconSvg } = await import("../public/icons.js");
+  const sunSvg = iconSvg("sun", { size: 12 });
+  const moonSvg = iconSvg("moon", { size: 12 });
+  const monitorSvg = iconSvg("monitor", { size: 12 });
+  assert.match(sunSvg, /<svg/);
+  assert.match(moonSvg, /<svg/);
+  assert.match(monitorSvg, /<svg/);
+  assert.equal(/\p{Extended_Pictographic}/u.test(sunSvg + moonSvg + monitorSvg), false);
 });

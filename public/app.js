@@ -21,7 +21,7 @@ import {
   initComposerCustomSelects,
   syncAllCustomSelects,
 } from "./custom-select.js?v=20261117qoder";
-import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261117qoder";
+import { hydrateDeclarativeIcons, iconSvg, providerIconSvg } from "./icons.js?v=20261118theme";
 import {
   compressImageFileForUpload,
   estimateDataUrlBytes,
@@ -50,6 +50,7 @@ import {
   providerShortBadge,
   providerVisualMeta,
   renderAgentTelemetryBarHtml,
+  renderInstanceManagerListHtml,
   renderProfilePillsHtml,
   renderProviderPillsHtml,
   renderQuotaOverviewHtml,
@@ -59,7 +60,7 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261117qoder";
+} from "./instance-switcher.js?v=20261118multi";
 import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117qoder";
 import {
   cleanStreamingAgentText,
@@ -81,6 +82,7 @@ import {
   THREAD_EXPAND_STEP,
   buildProjectGroups,
   computeProjectGroupSelectionState,
+  isSameProjectCwd,
   isSidebarManualPrefActive,
   normalizeProjectCwd,
   projectBaseName,
@@ -110,6 +112,7 @@ import {
   formatCallDuration,
   humanizeVoiceDeliveryReason,
   loadVoiceConfig,
+  mergePcm16ChunksWithGap,
   normalizeVoiceTtsPayload,
   parseVoiceModelSelectionKey,
   renderVoiceCallTranscriptHtml,
@@ -119,7 +122,7 @@ import {
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261117qoder";
+} from "./voice-copilot.js?v=20261118turntake";
 
 const $ = (id) => document.getElementById(id);
 
@@ -399,6 +402,7 @@ function loadSidebarFoldState(nowMs = Date.now()) {
 }
 
 function saveSidebarFoldState() {
+  if (state.scopedProjectCwd) return;
   try {
     const trimEntries = (obj, tsSelector, limit = 120) => {
       const entries = Object.entries(obj || {});
@@ -542,6 +546,7 @@ const state = {
   toastTimer: null,
   toastActive: false,
   probingProfileKeys: new Set(),
+  instanceManagerProvider: "codex",
   lastFailoverContext: null,
   liveActivityByThread: new Map(),
   recentCompletedByThread: buildInitialRecentCompletedMap(),
@@ -557,6 +562,9 @@ const state = {
   updateApplying: false,
   desktopUpdating: false,
   localApps: [],
+  scopedProjectCwd: typeof location !== "undefined"
+    ? normalizeProjectCwd(new URL(location.href).searchParams.get("project") || "")
+    : "",
   batchSelect: {
     active: false,
     selectedIds: new Set(),
@@ -576,6 +584,14 @@ const state = {
     isRecording: false,
     isSpeaking: false,
     speakingStartedAt: 0,
+    currentBotText: "",
+    overlapActiveSamples: 0,
+    overlapBuffer: {
+      chunks: [],
+      sampleCount: 0,
+      botText: "",
+      flushTimer: null,
+    },
     isProcessing: false,
     audioCtx: null,
     micStream: null,
@@ -720,8 +736,35 @@ function formatRelativeTime(epochSeconds) {
   return `${Math.floor(diff / 86400)}天前`;
 }
 
+function buildProjectWindowUrl(cwd) {
+  const url = new URL(location.href);
+  url.searchParams.delete("thread");
+  const cleanCwd = normalizeProjectCwd(cwd);
+  if (cleanCwd) url.searchParams.set("project", cleanCwd);
+  else url.searchParams.delete("project");
+  return url.toString();
+}
+
+function openProjectWindow(cwd) {
+  const cleanCwd = normalizeProjectCwd(cwd);
+  if (!cleanCwd) return;
+  const urlStr = buildProjectWindowUrl(cleanCwd);
+  const win = window.open(urlStr, "_blank", "popup,width=1280,height=840");
+  if (!win) {
+    window.open(urlStr, "_blank");
+  }
+}
+
+function syncScopedDocumentTitle() {
+  if (!state.scopedProjectCwd || typeof document === "undefined") return;
+  const meta = state.projectsMeta?.[state.scopedProjectCwd]
+    || Object.entries(state.projectsMeta || {}).find(([k]) => isSameProjectCwd(k, state.scopedProjectCwd))?.[1];
+  const projName = meta?.alias || projectBaseName(state.scopedProjectCwd) || "项目";
+  document.title = `${projName} · Agent Control`;
+}
+
 function getProjectGroups({ ignoreFilters = false, includeSearch = true } = {}) {
-  return buildProjectGroups(state.threads, {
+  const groups = buildProjectGroups(state.threads, {
     pendingRequests: state.pendingRequests,
     pendingRequestsSynced: state.pendingRequestsSynced,
     projectsMeta: state.projectsMeta,
@@ -729,6 +772,10 @@ function getProjectGroups({ ignoreFilters = false, includeSearch = true } = {}) 
     providerFilter: ignoreFilters ? "all" : state.providerFilter,
     profileFilter: "all",
   });
+  if (state.scopedProjectCwd) {
+    return groups.filter((g) => isSameProjectCwd(g.cwd, state.scopedProjectCwd));
+  }
+  return groups;
 }
 
 function syncThreadsPendingCounts() {
@@ -1472,6 +1519,8 @@ function syncComposerProfileSelect() {
       selectedId: select.value,
       probingKeys: state.probingProfileKeys,
       activeLocked: hasActiveThread,
+      allowManageButton: true,
+      provider,
     });
   }
 
@@ -1519,7 +1568,13 @@ function syncNewProfileSelect() {
       selectedId: select.value,
       probingKeys: state.probingProfileKeys,
       activeLocked: false,
+      allowManageButton: true,
+      provider,
     });
+  }
+  const addBtn = $("newModalAddProfileBtn");
+  if (addBtn) {
+    addBtn.hidden = provider !== "codex" && provider !== "claude";
   }
   const probeBtn = $("newModalProbeProfilesBtn");
   if (probeBtn) {
@@ -2311,7 +2366,8 @@ function renderThreadList() {
     collapsedGroups: state.collapsedGroups,
     expandedSidebarGroups: state.expandedSidebarGroups,
     sidebarFoldPrefs: state.sidebarFoldPrefs,
-    showStaleProjects: state.showStaleProjects,
+    autoFoldProjects: !state.scopedProjectCwd,
+    showStaleProjects: state.showStaleProjects || Boolean(state.scopedProjectCwd),
     nowMs,
     providerFilter: state.providerFilter,
     profileFilter: "all",
@@ -2321,7 +2377,9 @@ function renderThreadList() {
     searchText: "",
     selectionMode: state.batchSelect.active,
     selectedThreadIds: state.batchSelect.selectedIds,
+    allowOpenProjectWindow: !state.scopedProjectCwd,
   });
+  syncScopedDocumentTitle();
   if (listEl._acLastHtml !== sidebarHtml) {
     listEl._acLastHtml = sidebarHtml;
     listEl.innerHTML = sidebarHtml;
@@ -2368,6 +2426,7 @@ function renderProjectBoard() {
     selectionMode: state.batchSelect.active,
     selectedThreadIds: state.batchSelect.selectedIds,
     profiles: state.profiles,
+    allowOpenProjectWindow: !state.scopedProjectCwd,
   });
 
   if (activeInput) {
@@ -4774,6 +4833,7 @@ function applyProfileSnapshotPayload(payload = {}) {
   syncProfileSelectors();
   renderTopbarAndControls();
   renderThreadList();
+  renderInstanceManagerModal();
 }
 
 async function relayThreadWithProfile(altProfile, context = {}) {
@@ -4926,6 +4986,192 @@ async function toggleProfileDisabled({ provider, profileId, disabled } = {}) {
     setComposerStatus("success", disabled ? "已停用该实例" : "已重新启用该实例", { autoClearMs: 2200 });
   } catch (error) {
     setComposerStatus("error", `更新实例状态失败：${formatActionError(error)}`);
+  }
+}
+
+function renderInstanceLoginGuide(guide = null) {
+  const box = $("instLoginGuide");
+  if (!box) return;
+  if (!guide) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  const authUrl = String(guide.authUrl || "").trim();
+  const cmd = String(guide.loginCommand || "").trim();
+  const title = guide.title || "登录引导";
+  const detail = guide.detail || "";
+  box.hidden = false;
+  box.innerHTML = `
+    <div><strong>${escapeHtml(title)}</strong>${detail ? ` — ${escapeHtml(detail)}` : ""}</div>
+    ${cmd ? `<code class="inst-login-guide-cmd">${escapeHtml(cmd)}</code>` : ""}
+    <div class="inst-login-guide-actions">
+      ${authUrl ? `<a class="btn-primary btn-xs" href="${escapeHtml(authUrl)}" target="_blank" rel="noopener noreferrer">打开登录页</a>` : ""}
+      ${authUrl ? `<button type="button" class="btn-secondary btn-xs" data-copy-login-cmd="${escapeHtml(authUrl)}">复制登录链接</button>` : ""}
+      ${cmd ? `<button type="button" class="btn-secondary btn-xs" data-copy-login-cmd="${escapeHtml(cmd)}">复制终端命令</button>` : ""}
+      ${guide.provider && guide.profileId ? `<button type="button" class="btn-secondary btn-xs" data-probe-profile="${escapeHtml(guide.profileId)}" data-probe-provider="${escapeHtml(guide.provider)}">我已登录，立即测通</button>` : ""}
+    </div>
+  `;
+}
+
+function renderInstanceManagerModal() {
+  const modal = $("instanceManagerModal");
+  if (!modal?.open) return;
+  const cleanProvider = state.instanceManagerProvider === "claude" ? "claude" : "codex";
+  for (const tab of document.querySelectorAll("#instProviderTabs [data-inst-provider]")) {
+    const active = tab.dataset.instProvider === cleanProvider;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  const nameInput = $("instNameInput");
+  if (nameInput) {
+    nameInput.placeholder = cleanProvider === "claude"
+      ? "例如：Claude 备用号 / 团队号"
+      : "例如：Codex 备用号 / 工作号";
+  }
+  const listEl = $("instanceManagerList");
+  if (listEl) {
+    listEl.innerHTML = renderInstanceManagerListHtml(state.profiles, {
+      provider: cleanProvider,
+      probingKeys: state.probingProfileKeys,
+    });
+  }
+}
+
+function openInstanceManagerModal(provider = "") {
+  const fallback = currentComposerProvider();
+  const resolved = (provider === "claude" || provider === "codex")
+    ? provider
+    : (fallback === "claude" ? "claude" : "codex");
+  state.instanceManagerProvider = resolved;
+  renderInstanceLoginGuide(null);
+  const modal = $("instanceManagerModal");
+  if (modal && !modal.open) {
+    modal.showModal();
+  }
+  renderInstanceManagerModal();
+  $("instNameInput")?.focus();
+}
+
+async function triggerProfileLogin({ provider = "", profileId = "", mode = "" } = {}) {
+  const cleanProvider = String(provider || "").trim().toLowerCase();
+  const cleanProfileId = String(profileId || "").trim();
+  if (!cleanProvider || !cleanProfileId) return;
+  const resolvedMode = mode || (cleanProvider === "codex" ? "oauth" : "terminal");
+  try {
+    setComposerStatus("pending", `正在为 ${cleanProfileId} 发起登录…`);
+    const res = await apiPostWithHotFallback("api/profile/login", {
+      provider: cleanProvider,
+      profileId: cleanProfileId,
+      mode: resolvedMode,
+      openOnHost: true,
+    });
+    if (res?.mode === "oauth" && res?.authUrl) {
+      renderInstanceLoginGuide({
+        provider: cleanProvider,
+        profileId: cleanProfileId,
+        authUrl: res.authUrl,
+        loginCommand: res.loginCommand || "",
+        title: res.openedBrowser ? "已在浏览器打开独立实例 OAuth 登录页" : "已生成独立实例 OAuth 登录链接",
+        detail: "在浏览器完成授权后，Agent Control 会自动接管并在后台保持在线；授权后即可关闭浏览器窗口。",
+      });
+      showToastBanner(
+        res.openedBrowser ? "已打开独立登录页" : "已生成独立登录链接",
+        { detail: "完成账号登录后将自动同步接管状态，之后无需保留浏览器或桌面客户端" },
+      );
+      setComposerStatus("success", "已发起独立实例登录，请在浏览器完成授权", { autoClearMs: 4200 });
+    } else if (res?.mode === "app") {
+      renderInstanceLoginGuide({
+        provider: cleanProvider,
+        profileId: cleanProfileId,
+        loginCommand: res.loginCommand || "",
+        title: "已以独立隔离目录启动 Codex 桌面端",
+        detail: "完成登录或配置后可直接关闭桌面端窗口，Agent Control 会在后台持续控制该实例。",
+      });
+      showToastBanner("已拉起独立 Codex 客户端", {
+        detail: "登录或操作完成后可随时关闭客户端窗口",
+      });
+      setComposerStatus("success", "已启动独立 Codex 桌面端", { autoClearMs: 3200 });
+    } else {
+      renderInstanceLoginGuide({
+        provider: cleanProvider,
+        profileId: cleanProfileId,
+        loginCommand: res?.loginCommand || "",
+        title: res?.openedTerminal ? "已在终端启动独立登录命令" : "请在 Mac 终端执行独立登录命令",
+        detail: "完成终端登录授权后即可关闭终端窗口，点右侧「立即测通」即可启用。",
+      });
+      if (!res?.openedTerminal && res?.loginCommand) {
+        await copyTextToClipboard(res.loginCommand);
+      }
+      showToastBanner(
+        res?.openedTerminal ? "已在终端开启独立登录" : "已复制独立登录命令",
+        { detail: "授权完成后可关闭终端，由 Agent Control 直接调度" },
+      );
+      setComposerStatus("success", "已准备好独立终端登录引导", { autoClearMs: 3500 });
+    }
+  } catch (error) {
+    const errMsg = formatActionError(error, "发起登录失败");
+    setComposerStatus("error", `发起登录失败：${errMsg}`);
+    showToastBanner("发起登录失败", { detail: errMsg, error: true });
+  }
+}
+
+async function handleCreateManagedProfile({ loginImmediately = true } = {}) {
+  const provider = state.instanceManagerProvider === "claude" ? "claude" : "codex";
+  const nameInput = $("instNameInput");
+  const homeInput = $("instCustomHomeInput");
+  const name = String(nameInput?.value || "").trim();
+  const customHome = String(homeInput?.value || "").trim();
+  if (!name) {
+    nameInput?.focus();
+    showToastBanner("请填写实例名称", { error: true });
+    return;
+  }
+  const createBtn = $("instCreateAndLoginBtn");
+  const createOnlyBtn = $("instCreateOnlyBtn");
+  if (createBtn) createBtn.disabled = true;
+  if (createOnlyBtn) createOnlyBtn.disabled = true;
+  try {
+    const res = await apiPostWithHotFallback("api/profile/create", {
+      provider,
+      name,
+      customHome,
+    });
+    applyProfileSnapshotPayload(res);
+    if (nameInput) nameInput.value = "";
+    if (homeInput) homeInput.value = "";
+    if (res?.created?.id && $("newThreadModal")?.open && $("newProviderSelect")?.value === provider) {
+      $("newProfileSelect").value = res.created.id;
+      syncNewProfileSelect();
+    }
+    showToastBanner(`已创建多开实例「${res?.created?.name || name}」`, {
+      detail: loginImmediately ? "正在启动独立登录流程…" : "可随时点击「去登录」绑定账号",
+    });
+    if (loginImmediately && res?.created?.id) {
+      await triggerProfileLogin({
+        provider,
+        profileId: res.created.id,
+        mode: provider === "codex" ? "oauth" : "terminal",
+      });
+    }
+  } catch (error) {
+    const errMsg = formatActionError(error, "创建实例失败");
+    showToastBanner("创建多开实例失败", { detail: errMsg, error: true });
+  } finally {
+    if (createBtn) createBtn.disabled = false;
+    if (createOnlyBtn) createOnlyBtn.disabled = false;
+  }
+}
+
+async function handleDeleteManagedProfile({ provider = "", profileId = "" } = {}) {
+  if (!provider || !profileId) return;
+  try {
+    const res = await apiPostWithHotFallback("api/profile/delete", { provider, profileId });
+    applyProfileSnapshotPayload(res);
+    showToastBanner("已移除托管多开实例", { detail: "本地目录中的历史会话文件已保留" });
+  } catch (error) {
+    const errMsg = formatActionError(error, "移除实例失败");
+    showToastBanner("移除实例失败", { detail: errMsg, error: true });
   }
 }
 
@@ -5355,6 +5601,21 @@ function connectEvents() {
     try {
       const data = JSON.parse(ev.data || "{}");
       applyProfileSnapshotPayload(data);
+    } catch {}
+  });
+
+  es.addEventListener("profile_auth_updated", (ev) => {
+    try {
+      const data = JSON.parse(ev.data || "{}");
+      if (data?.success) {
+        renderInstanceLoginGuide(null);
+        renderInstanceManagerModal();
+        showToastBanner("实例已完成登录并由后台接管", {
+          detail: `${providerDisplayName(data.provider)} · ${data.profileId} 现可关闭外部窗口直接使用`,
+        });
+      } else if (data?.error) {
+        showToastBanner("实例登录未完成", { detail: String(data.error), error: true });
+      }
     } catch {}
   });
 
@@ -6632,6 +6893,65 @@ function resumeVoiceAudioContextIfNeeded() {
   } catch {}
 }
 
+function clearVoiceOverlapFlushTimer() {
+  if (state.voice.overlapBuffer?.flushTimer) {
+    clearTimeout(state.voice.overlapBuffer.flushTimer);
+    state.voice.overlapBuffer.flushTimer = null;
+  }
+}
+
+function resetVoiceOverlapBuffer() {
+  clearVoiceOverlapFlushTimer();
+  state.voice.overlapActiveSamples = 0;
+  state.voice.overlapBuffer = {
+    chunks: [],
+    sampleCount: 0,
+    botText: "",
+    flushTimer: null,
+  };
+}
+
+function submitMergedOverlapBuffer(tailSamples = null) {
+  clearVoiceOverlapFlushTimer();
+  const buf = state.voice.overlapBuffer || { chunks: [], sampleCount: 0, botText: "" };
+  const bufferedChunks = Array.isArray(buf.chunks) ? buf.chunks : [];
+  const gapSamples = 2560; // 160ms @ 16kHz
+  const bufferedGaps = bufferedChunks.length > 1 ? (bufferedChunks.length - 1) * gapSamples : 0;
+  const overlapTotalSamples = (buf.sampleCount || 0) + bufferedGaps + (state.voice.overlapActiveSamples || 0);
+  const overlapDurationMs = overlapTotalSamples > 0 ? Math.round((overlapTotalSamples / 16000) * 1000) : 0;
+  const overlapBotText = String(buf.botText || (overlapDurationMs > 0 ? state.voice.currentBotText : "") || "").trim();
+
+  const allChunks = [...bufferedChunks];
+  if (tailSamples?.length) {
+    allChunks.push(tailSamples);
+  }
+  resetVoiceOverlapBuffer();
+  if (!allChunks.length) return;
+
+  const mergedSamples = mergePcm16ChunksWithGap(allChunks, gapSamples);
+  if (!mergedSamples.length) return;
+  const wavBytes = encodePcm16SamplesToWav(mergedSamples, 16000);
+  void sendVoiceTurnToMac({
+    wavUint8Array: wavBytes,
+    overlapDurationMs,
+    overlapBotText,
+  });
+}
+
+function scheduleVoiceOverlapFlush(delayMs = 1100) {
+  clearVoiceOverlapFlushTimer();
+  if (!state.voice.overlapBuffer?.chunks?.length) return;
+  state.voice.overlapBuffer.flushTimer = setTimeout(() => {
+    if (state.voice.overlapBuffer) {
+      state.voice.overlapBuffer.flushTimer = null;
+    }
+    if (!state.voice.callActive || state.voice.isSpeaking || state.voice.isRecording) return;
+    if (state.voice.overlapBuffer?.chunks?.length) {
+      submitMergedOverlapBuffer(null);
+    }
+  }, delayMs);
+}
+
 function scheduleVoiceListenResume() {
   clearVoiceResumeTimer();
   resumeVoiceAudioContextIfNeeded();
@@ -6639,11 +6959,15 @@ function scheduleVoiceListenResume() {
     state.voice.resumeListenTimer = null;
     if (!state.voice.callActive) return;
     resumeVoiceAudioContextIfNeeded();
-    if (!state.voice.isProcessing && !state.voice.isSpeaking && !state.voice.isRecording && state.voice.pendingVoiceTurns.length) {
-      void sendVoiceTurnToMac();
-      return;
+    if (!state.voice.isProcessing && !state.voice.isSpeaking && !state.voice.isRecording) {
+      if (state.voice.pendingVoiceTurns.length) {
+        void sendVoiceTurnToMac();
+        return;
+      }
+      if (state.voice.overlapBuffer?.chunks?.length) {
+        scheduleVoiceOverlapFlush(1100);
+      }
     }
-    if (!state.voice.isRecording) state.voice.vadDetector?.reset?.();
     renderVoiceCallUi();
   }, 240);
 }
@@ -7179,15 +7503,15 @@ async function startVoiceCallMicPipeline() {
 
     const detector = createVadTurnDetector({
       sampleRate: 16000,
-      preRollMs: 320,
-      silenceMs: 760,
+      preRollMs: 600,
+      silenceMs: 1150,
       minSpeechMs: 260,
-      maxSpeechMs: 14000,
-      rmsThreshold: 0.013,
+      maxSpeechMs: 16000,
+      rmsThreshold: 0.009,
       adaptive: true,
       requireSustainedOnset: true,
-      minPeakRms: 0.015,
-      minSnrRatio: 1.8,
+      minPeakRms: 0.010,
+      minSnrRatio: 1.35,
     });
 
     processor.onaudioprocess = (ev) => {
@@ -7222,53 +7546,49 @@ async function startVoiceCallMicPipeline() {
         }
         const rawRms = computeRmsLevel(input);
         const speakingNow = Boolean(state.voice.isSpeaking);
-        if (speakingNow && state.voice.speakingStartedAt > 0 && (nowMs - state.voice.speakingStartedAt) < 350) {
-          state.voice.currentRms = 0;
-          return;
-        }
-        // Full-duplex echo guard: while bot is speaking, attenuate residual speaker leakage below 0.035 unless already recording user speech.
-        const effectiveRms = (speakingNow && !state.voice.isRecording && rawRms < 0.035) ? 0 : rawRms;
-        state.voice.currentRms = effectiveRms;
+        state.voice.currentRms = rawRms;
         const int16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
-        const evt = detector.pushSamples(int16, effectiveRms);
+        const evt = detector.pushSamples(int16, rawRms);
         if (evt.type === "speech_start") {
           state.voice.isRecording = true;
-          state.voice.bargeInActiveSamples = speakingNow ? int16.length : 0;
-          if (speakingNow && state.voice.audioEl) {
-            try { state.voice.audioEl.volume = 0.25; } catch {}
+          clearVoiceOverlapFlushTimer();
+          if (speakingNow) {
+            state.voice.overlapActiveSamples = (state.voice.overlapActiveSamples || 0) + (evt.bufferedSamples || int16.length);
+            if (!state.voice.overlapBuffer.botText && state.voice.currentBotText) {
+              state.voice.overlapBuffer.botText = state.voice.currentBotText;
+            }
           }
           renderVoiceCallUi();
         } else if (evt.type === "utterance") {
           state.voice.isRecording = false;
-          state.voice.bargeInActiveSamples = 0;
           state.voice.currentRms = 0;
-          if (state.voice.isSpeaking && typeof stopVoicePlayback === "function") {
-            stopVoicePlayback({ scheduleResume: false, abortReason: "user_barge_in" });
+          if (speakingNow) {
+            // Turn-taking mode: never interrupt playback; buffer overlap speech until playback finishes.
+            state.voice.overlapBuffer.chunks.push(evt.samples);
+            state.voice.overlapBuffer.sampleCount += evt.samples.length;
+            if (!state.voice.overlapBuffer.botText && state.voice.currentBotText) {
+              state.voice.overlapBuffer.botText = state.voice.currentBotText;
+            }
+            state.voice.overlapActiveSamples = 0;
+            renderVoiceCallUi();
+          } else {
+            submitMergedOverlapBuffer(evt.samples);
           }
-          const wavBytes = encodePcm16SamplesToWav(evt.samples, 16000);
-          void sendVoiceTurnToMac({ wavUint8Array: wavBytes });
         } else if (evt.type === "discarded_short" || evt.type === "discarded_noise") {
           state.voice.isRecording = false;
-          state.voice.bargeInActiveSamples = 0;
           state.voice.currentRms = 0;
-          if (state.voice.audioEl) {
-            try { state.voice.audioEl.volume = 1; } catch {}
+          state.voice.overlapActiveSamples = 0;
+          if (!speakingNow && state.voice.overlapBuffer?.chunks?.length) {
+            scheduleVoiceOverlapFlush(1100);
           }
           renderVoiceCallUi();
         } else if (speakingNow && state.voice.isRecording) {
-          const sustainThreshold = Math.max(0.02, Number(detector?.threshold) || 0);
-          if (effectiveRms >= sustainThreshold) {
-            state.voice.bargeInActiveSamples = (state.voice.bargeInActiveSamples || 0) + int16.length;
-          }
-          // After ~200ms of sustained user speech following speech_start (3200 samples @ 16kHz, ~340ms total onset), interrupt bot playback immediately while keeping VAD recording active so pre-barge-in speech is preserved.
-          if ((state.voice.bargeInActiveSamples || 0) >= 3200 && typeof stopVoicePlayback === "function") {
-            state.voice.bargeInActiveSamples = 0;
-            stopVoicePlayback({ scheduleResume: false, abortReason: "user_barge_in" });
-          }
+          state.voice.overlapActiveSamples = (state.voice.overlapActiveSamples || 0) + int16.length;
         }
       } catch {
         state.voice.currentRms = 0;
         state.voice.isRecording = false;
+        state.voice.overlapActiveSamples = 0;
         detector.reset();
       }
     };
@@ -7802,10 +8122,10 @@ async function playVoiceTtsResult({
   updateVoiceTranscriptEntry(effUtteranceId, { deliveryStatus: "playing", deliveryReason: "" });
   state.voice.isSpeaking = true;
   state.voice.speakingStartedAt = Date.now();
+  state.voice.currentBotText = clean;
   if (state.voice.audioEl) {
     try { state.voice.audioEl.volume = 1; } catch {}
   }
-  state.voice.vadDetector?.reset?.();
   renderVoiceCallUi();
 
   let primaryEval = null;
@@ -8198,16 +8518,28 @@ async function applyVoiceExecutionEffect(executed = {}) {
   renderVoiceLiveProgressIfOpen();
 }
 
-async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", mode = "turn" } = {}) {
+async function sendVoiceTurnToMac({
+  wavUint8Array = null,
+  transcriptText = "",
+  mode = "turn",
+  overlapDurationMs = 0,
+  overlapBotText = "",
+} = {}) {
   if (!state.voice.callActive) return;
   if (wavUint8Array?.length || String(transcriptText || "").trim() || mode === "briefing") {
-    state.voice.pendingVoiceTurns.push({ wavUint8Array, transcriptText, mode });
+    state.voice.pendingVoiceTurns.push({
+      wavUint8Array,
+      transcriptText,
+      mode,
+      overlapDurationMs: Number(overlapDurationMs) || 0,
+      overlapBotText: String(overlapBotText || ""),
+    });
     while (state.voice.pendingVoiceTurns.length > 2) {
       state.voice.pendingVoiceTurns.shift();
     }
   }
   if (state.voice.isProcessing || state.voice.isSpeaking || !state.voice.pendingVoiceTurns.length) return;
-  ({ wavUint8Array, transcriptText, mode } = state.voice.pendingVoiceTurns.shift());
+  ({ wavUint8Array, transcriptText, mode, overlapDurationMs = 0, overlapBotText = "" } = state.voice.pendingVoiceTurns.shift());
   if (mode === "briefing" || String(transcriptText || "").trim()) {
     state.voice.lastUserActivityAt = Date.now();
     clearApprovalVoiceReminder();
@@ -8217,7 +8549,6 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
   }
 
   state.voice.isProcessing = true;
-  state.voice.isRecording = false;
   clearVoiceProcessingStageTimer();
   state.voice.processingStageTimer = setTimeout(() => {
     state.voice.processingStageTimer = null;
@@ -8226,7 +8557,6 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
       renderVoiceCallUi();
     }
   }, 1500);
-  state.voice.vadDetector?.reset?.();
   renderVoiceCallUi();
 
   try {
@@ -8245,6 +8575,8 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
       autoExecute: true,
       asyncDispatch: true,
       tts: true,
+      ...(Number(overlapDurationMs) > 0 ? { overlapDurationMs: Math.round(Number(overlapDurationMs)) } : {}),
+      ...(String(overlapBotText || "").trim() ? { overlapBotText: String(overlapBotText).trim() } : {}),
     });
     state.voice.backendMissing = false;
     clearVoiceProcessingStageTimer();
@@ -8275,7 +8607,7 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
     const actionTag = res?.executed?.summaryTag || "";
     const normTurnTts = normalizeVoiceTtsPayload(res);
 
-    if (spokenReply && state.voice.callActive && !state.voice.isRecording) {
+    if (spokenReply && state.voice.callActive) {
       state.voice.isSpeaking = true;
     }
     state.voice.isProcessing = false;
@@ -8325,27 +8657,8 @@ async function sendVoiceTurnToMac({ wavUint8Array = null, transcriptText = "", m
         if (state.voice.callActive && !state.voice.isRecording && !state.voice.isProcessing && state.voice.broadcastQueue.length > 0) {
           void drainVoiceBroadcastQueue();
         }
-      } else if (state.voice.callActive) {
+      } else {
         state.voice.isSpeaking = false;
-        markUtteranceUnheard({
-          id: utteranceId,
-          text: spokenReply,
-          actionTag,
-          reason: "user_barge_in",
-          status: "interrupted",
-          expectedMs: res?.expectedMs || estimateVoiceDurationMs(spokenReply),
-          ttsCache: ttsPayload,
-        });
-        void reportVoicePlaybackAck({
-          utteranceId,
-          status: "interrupted",
-          heard: false,
-          playedMs: 0,
-          expectedMs: res?.expectedMs || estimateVoiceDurationMs(spokenReply),
-          reason: "user_barge_in",
-          provider: ttsPayload?.provider || "none",
-          text: spokenReply,
-        });
         scheduleVoiceListenResume();
       }
     } else {
@@ -8604,6 +8917,8 @@ async function openVoiceModal() {
   state.voice.pendingVoiceTurns = [];
   state.voice.broadcastQueue = [];
   state.voice.unheardQueue = [];
+  state.voice.currentBotText = "";
+  resetVoiceOverlapBuffer();
   state.voice.remindedRequestIds.clear();
   clearApprovalVoiceReminder();
 
@@ -8668,6 +8983,8 @@ function hangupVoiceCall({ closeModal = true } = {}) {
   state.voice.pendingVoiceTurns = [];
   state.voice.broadcastQueue = [];
   state.voice.unheardQueue = [];
+  state.voice.currentBotText = "";
+  resetVoiceOverlapBuffer();
   state.voice.remindedRequestIds.clear();
   clearApprovalVoiceReminder();
   clearVoiceBatchAndHeartbeatTimers();
@@ -8816,8 +9133,103 @@ function bindSidebarResizer() {
   });
 }
 
+const THEME_STORAGE_KEY = "ac-theme-mode";
+const themeColorQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+  ? window.matchMedia("(prefers-color-scheme: light)")
+  : null;
+
+function loadThemeMode() {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system") return saved;
+  } catch {}
+  return "system";
+}
+
+function getSystemTheme() {
+  return themeColorQuery?.matches ? "light" : "dark";
+}
+
+function resolveEffectiveTheme(mode = loadThemeMode()) {
+  if (mode === "light" || mode === "dark") return mode;
+  return getSystemTheme();
+}
+
+function applyThemeMode(mode = loadThemeMode(), { persist = false } = {}) {
+  const safeMode = mode === "light" || mode === "dark" || mode === "system" ? mode : "system";
+  const resolved = resolveEffectiveTheme(safeMode);
+  if (persist) {
+    try {
+      if (safeMode === "system") localStorage.removeItem(THEME_STORAGE_KEY);
+      else localStorage.setItem(THEME_STORAGE_KEY, safeMode);
+    } catch {}
+  }
+  const root = document.documentElement;
+  if (root) {
+    root.dataset.theme = resolved;
+    root.dataset.themeMode = safeMode;
+    root.style.colorScheme = resolved;
+  }
+  const btn = $("themeToggleBtn");
+  const iconEl = $("themeToggleIcon");
+  if (iconEl) {
+    const iconName = safeMode === "light" ? "sun" : safeMode === "dark" ? "moon" : "monitor";
+    iconEl.innerHTML = iconSvg(iconName, { size: 12 });
+  }
+  if (btn) {
+    const modeLabel = safeMode === "system"
+      ? `跟随系统（当前${resolved === "light" ? "日间" : "深色"}）`
+      : safeMode === "light"
+        ? "日间模式"
+        : "深色模式";
+    const nextAction = safeMode === "system"
+      ? `点击切换为${resolved === "light" ? "深色" : "日间"}模式`
+      : safeMode !== getSystemTheme()
+        ? `点击切换为${resolved === "light" ? "深色" : "日间"}模式`
+        : "点击恢复跟随系统";
+    btn.title = `主题：${modeLabel} · ${nextAction}（右键恢复跟随系统）`;
+    btn.setAttribute("aria-label", `Agent Control · ${modeLabel}，${nextAction}`);
+    btn.dataset.themeMode = safeMode;
+    btn.dataset.theme = resolved;
+  }
+  return { mode: safeMode, resolved };
+}
+
+function toggleThemeMode() {
+  const current = loadThemeMode();
+  const sysTheme = getSystemTheme();
+  const opposite = sysTheme === "light" ? "dark" : "light";
+  let next = "system";
+  if (current === "system") {
+    next = opposite;
+  } else if (current === opposite) {
+    next = sysTheme;
+  } else {
+    next = "system";
+  }
+  applyThemeMode(next, { persist: true });
+}
+
 function bindEvents() {
   bindSidebarResizer();
+  const themeBtn = $("themeToggleBtn");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => toggleThemeMode());
+    themeBtn.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      applyThemeMode("system", { persist: true });
+    });
+  }
+  if (themeColorQuery) {
+    const onSystemThemeChange = () => {
+      if (loadThemeMode() === "system") applyThemeMode("system");
+    };
+    if (typeof themeColorQuery.addEventListener === "function") {
+      themeColorQuery.addEventListener("change", onSystemThemeChange);
+    } else if (typeof themeColorQuery.addListener === "function") {
+      themeColorQuery.addListener(onSystemThemeChange);
+    }
+  }
   initComposerCustomSelects([
     "composerProviderSelect",
     "composerProfileSelect",
@@ -8970,6 +9382,13 @@ function bindEvents() {
       state.telemetryExpanded = false;
       state.telemetryPickerOpen = false;
       renderAgentTelemetryBar();
+      return;
+    }
+    const openInstBtn = e.target.closest("[data-open-instance-modal]");
+    if (openInstBtn) {
+      e.stopPropagation();
+      closeTelemetryPopover();
+      openInstanceManagerModal(openInstBtn.dataset.openInstanceModal || "");
       return;
     }
     if (e.target.closest("[data-telemetry-picker-toggle]")) {
@@ -9165,6 +9584,12 @@ function bindEvents() {
       void toggleProjectPin(pinBtn.dataset.togglePinCwd);
       return;
     }
+    const openWindowBtn = e.target.closest("[data-open-project-window]");
+    if (openWindowBtn) {
+      e.stopPropagation();
+      openProjectWindow(openWindowBtn.dataset.openProjectWindow);
+      return;
+    }
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
       void openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
@@ -9193,7 +9618,10 @@ function bindEvents() {
         if (state.batchSelect.active) exitBatchSelectMode();
         else enterBatchSelectMode();
       } else if (act === "voice") void openVoiceModal();
-      else if (act === "new") openNewThreadModal({ provider: defaultNewThreadProvider() });
+      else if (act === "new") openNewThreadModal({
+        cwd: state.scopedProjectCwd || "",
+        provider: defaultNewThreadProvider(),
+      });
       else if (act === "resume" && state.activeThread) {
         state.boardOpen = false;
         renderTopbarAndControls();
@@ -9253,6 +9681,12 @@ function bindEvents() {
       return;
     }
 
+    const openWindowBtn = e.target.closest("[data-open-project-window]");
+    if (openWindowBtn) {
+      e.stopPropagation();
+      openProjectWindow(openWindowBtn.dataset.openProjectWindow);
+      return;
+    }
     const newBtn = e.target.closest("[data-new-in-cwd]");
     if (newBtn) {
       void openNewThreadModal({ cwd: newBtn.dataset.newInCwd, provider: defaultNewThreadProvider() });
@@ -9279,6 +9713,12 @@ function bindEvents() {
     if (foldBtn) {
       e.stopPropagation();
       toggleSidebarGroupCollapse(foldBtn.dataset.batchFoldCwd);
+      return;
+    }
+    const openWindowBtn = e.target.closest("[data-open-project-window]");
+    if (openWindowBtn) {
+      e.stopPropagation();
+      openProjectWindow(openWindowBtn.dataset.openProjectWindow);
       return;
     }
     const newBtn = e.target.closest("[data-new-in-cwd]");
@@ -9392,7 +9832,54 @@ function bindEvents() {
     void triggerProfileProbe({ provider: $("newProviderSelect").value || defaultProviderValue() });
   });
 
+  $("newModalAddProfileBtn")?.addEventListener("click", () => {
+    openInstanceManagerModal($("newProviderSelect")?.value || defaultProviderValue());
+  });
+
+  $("instProviderTabs")?.addEventListener("click", (e) => {
+    const tab = e.target.closest("[data-inst-provider]");
+    if (!tab) return;
+    state.instanceManagerProvider = tab.dataset.instProvider === "claude" ? "claude" : "codex";
+    renderInstanceLoginGuide(null);
+    renderInstanceManagerModal();
+  });
+
+  $("instanceCreateForm")?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    void handleCreateManagedProfile({ loginImmediately: true });
+  });
+
+  $("instCreateOnlyBtn")?.addEventListener("click", () => {
+    void handleCreateManagedProfile({ loginImmediately: false });
+  });
+
   const handleProfilePillClick = (e, { isNewModal = false } = {}) => {
+    const openMgrBtn = e.target.closest("[data-open-instance-modal]");
+    if (openMgrBtn) {
+      e.stopPropagation();
+      if (!isNewModal) setComposerConfigOpen(false);
+      openInstanceManagerModal(openMgrBtn.dataset.openInstanceModal || "");
+      return;
+    }
+    const loginBtn = e.target.closest("[data-login-profile]");
+    if (loginBtn) {
+      e.stopPropagation();
+      void triggerProfileLogin({
+        provider: loginBtn.dataset.loginProvider,
+        profileId: loginBtn.dataset.loginProfile,
+        mode: loginBtn.dataset.loginMode || "",
+      });
+      return;
+    }
+    const deleteBtn = e.target.closest("[data-delete-profile]");
+    if (deleteBtn) {
+      e.stopPropagation();
+      void handleDeleteManagedProfile({
+        provider: deleteBtn.dataset.profileProvider,
+        profileId: deleteBtn.dataset.deleteProfile,
+      });
+      return;
+    }
     const copyLoginBtn = e.target.closest("[data-copy-login-cmd]");
     if (copyLoginBtn) {
       e.stopPropagation();
@@ -9467,6 +9954,7 @@ function bindEvents() {
 
   $("composerProfilePills")?.addEventListener("click", (e) => handleProfilePillClick(e, { isNewModal: false }));
   $("newProfilePills")?.addEventListener("click", (e) => handleProfilePillClick(e, { isNewModal: true }));
+  $("instanceManagerModal")?.addEventListener("click", (e) => handleProfilePillClick(e, { isNewModal: false }));
   $("newProfileSelect")?.addEventListener("change", () => {
     syncNewProfileSelect();
     void refreshModelsForProfile($("newProviderSelect").value || defaultProviderValue(), $("newProfileSelect").value);
@@ -10376,7 +10864,7 @@ function bindEvents() {
 
   $("newThreadBtn").addEventListener("click", () => {
     openNewThreadModal({
-      cwd: state.activeThread?.cwd || state.newThreadCwd || "",
+      cwd: state.activeThread?.cwd || state.newThreadCwd || state.scopedProjectCwd || "",
       provider: defaultNewThreadProvider(),
     });
   });
@@ -11209,6 +11697,7 @@ async function init() {
     }
   });
   hydrateDeclarativeIcons(document);
+  applyThemeMode(loadThemeMode());
   bindVisualViewport();
   syncProfileSelectors();
   syncModelAndEffortSelectors();
@@ -11278,8 +11767,17 @@ async function init() {
       ]);
       void modelsPromise;
       void telemetryPromise;
-      renderTopbarAndControls();
-      renderActiveMessages();
+      if (state.scopedProjectCwd) {
+        const scopedGroup = getProjectGroups({ ignoreFilters: true })[0];
+        if (scopedGroup?.threads?.length) {
+          await selectThread(scopedGroup.threads[0].id);
+        } else {
+          await selectThread("", { newThreadCwd: state.scopedProjectCwd });
+        }
+      } else {
+        renderTopbarAndControls();
+        renderActiveMessages();
+      }
     }
   } catch (error) {
     state.initialThreadLoading = false;

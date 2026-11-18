@@ -21,6 +21,28 @@
   --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6fa;
+  --bg-elevated: #ffffff;
+  --bg-surface: #eef2f7;
+  --bg-hover: rgba(15, 23, 42, 0.05);
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(37, 99, 235, 0.28);
+  --border-subtle: rgba(15, 23, 42, 0.1);
+  --surface-2: rgba(15, 23, 42, 0.045);
+  --text: #0f172a;
+  --text-primary: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #64748b;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --green: #059669;
+  --amber: #d97706;
+  --violet: #7c3aed;
+  --red: #dc2626;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -173,6 +195,47 @@ body.is-resizing-sidebar * {
   align-items: center;
   gap: 8px;
   font-size: 15px;
+}
+
+.brand-theme-toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 4px 7px 4px 5px;
+  margin: -4px 0 -4px -5px;
+  cursor: pointer;
+  color: var(--text);
+  transition: background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.brand-theme-toggle:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.brand-theme-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.brand-theme-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  margin-left: 2px;
+  transition: color 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+}
+
+.brand-theme-toggle:hover .brand-theme-icon {
+  color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .brand-dot {
@@ -3742,6 +3805,228 @@ body.is-resizing-sidebar * {
   background: rgba(59, 130, 246, 0.2);
 }
 
+.field-label-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.profile-pill-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 10px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.profile-pill-add-btn:hover {
+  color: var(--text);
+  border-color: var(--accent-strong);
+  background: rgba(76, 141, 255, 0.1);
+}
+
+.instance-manager-modal-card {
+  width: min(640px, calc(100vw - 24px));
+}
+
+.instance-manager-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.instance-mgr-intro {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.inst-provider-tabs {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.inst-provider-tab {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.inst-provider-tab.is-active {
+  border-color: var(--accent-strong);
+  background: rgba(76, 141, 255, 0.16);
+  color: #dbeafe;
+}
+
+.instance-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.instance-create-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 600px) {
+  .instance-create-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.instance-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inst-login-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.1);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.inst-login-guide[hidden] {
+  display: none;
+}
+
+.inst-login-guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.inst-login-guide-cmd {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.instance-mgr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.instance-mgr-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.instance-mgr-card.is-cooldown {
+  border-color: rgba(245, 166, 35, 0.4);
+}
+
+.instance-mgr-card.is-disabled,
+.instance-mgr-card.is-unavailable {
+  opacity: 0.7;
+}
+
+.instance-mgr-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.instance-mgr-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.instance-mgr-name {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.instance-mgr-badge {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.instance-mgr-badge.is-managed {
+  background: rgba(76, 141, 255, 0.18);
+  color: #9dc2ff;
+}
+
+.instance-mgr-meta {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.instance-mgr-path {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.instance-mgr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.btn-xs.is-primary-outline {
+  color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.btn-xs.is-danger-outline {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
 .field-profile-picker select {
   display: none;
 }
@@ -7258,4 +7543,691 @@ details.task-notif-card[open] .task-notif-chevron {
   padding: 3px 6px;
   font-size: 12px;
   cursor: pointer;
+}
+
+/* ===== 日间模式全局表面、边框与对比度适配 ===== */
+:root[data-theme="light"] body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .sidebar {
+  box-shadow: 1px 0 0 var(--border);
+}
+
+:root[data-theme="light"] .topbar {
+  background: rgba(255, 255, 255, 0.88);
+  border-bottom-color: var(--border);
+  backdrop-filter: blur(12px);
+}
+
+:root[data-theme="light"] .topbar-more-menu,
+:root[data-theme="light"] .provider-tabs-settings-menu,
+:root[data-theme="light"] .slash-command-menu,
+:root[data-theme="light"] .thread-context-menu,
+:root[data-theme="light"] .custom-select-menu {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .sidebar-footer-bar {
+  background: rgba(248, 250, 252, 0.92);
+  border-top-color: var(--border);
+}
+
+:root[data-theme="light"] .btn-secondary,
+:root[data-theme="light"] .provider-tab,
+:root[data-theme="light"] .batch-mode-toggle-btn,
+:root[data-theme="light"] .composer-icon-btn,
+:root[data-theme="light"] .composer-config-chip,
+:root[data-theme="light"] .composer-pill-btn {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .btn-secondary:hover,
+:root[data-theme="light"] .provider-tab:hover,
+:root[data-theme="light"] .batch-mode-toggle-btn:hover,
+:root[data-theme="light"] .composer-icon-btn:hover,
+:root[data-theme="light"] .composer-config-chip:hover {
+  background: rgba(15, 23, 42, 0.08);
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme="light"] .provider-tab.is-active {
+  background: rgba(37, 99, 235, 0.12);
+  border-color: rgba(37, 99, 235, 0.35);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="light"] .btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+:root[data-theme="light"] .btn-primary:hover {
+  background: var(--accent-strong);
+}
+
+:root[data-theme="light"] .thread-item:hover {
+  background: rgba(15, 23, 42, 0.045);
+}
+
+:root[data-theme="light"] .thread-item.is-active {
+  background: rgba(37, 99, 235, 0.1);
+  border-color: rgba(37, 99, 235, 0.25);
+}
+
+:root[data-theme="light"] .turn-card,
+:root[data-theme="light"] .turn-user,
+:root[data-theme="light"] .turn-assistant,
+:root[data-theme="light"] .agent-bubble {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+}
+
+:root[data-theme="light"] .turn-user,
+:root[data-theme="light"] .user-bubble {
+  background: linear-gradient(160deg, #eff6ff, #e6f0ff);
+  border-color: rgba(37, 99, 235, 0.24);
+  color: #0f172a;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.07);
+}
+
+:root[data-theme="light"] .goal-done-tag {
+  background: rgba(5, 150, 105, 0.12);
+  border-color: rgba(5, 150, 105, 0.32);
+  color: #047857;
+}
+
+:root[data-theme="light"] .queued-panel {
+  background: #ffffff;
+  border-color: rgba(37, 99, 235, 0.25);
+}
+
+:root[data-theme="light"] .queued-panel-head {
+  background: rgba(15, 23, 42, 0.03);
+}
+
+:root[data-theme="light"] .queued-panel-count {
+  background: rgba(37, 99, 235, 0.14);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .md-body .md-table-wrap,
+:root[data-theme="light"] .md-body .md-code-block,
+:root[data-theme="light"] .md-body pre.md-pre,
+:root[data-theme="light"] .tool-output,
+:root[data-theme="light"] .sr-code,
+:root[data-theme="light"] .live-cmd-snippet {
+  background: #f1f5f9;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .md-body .md-code-head {
+  background: #e2e8f0;
+  border-bottom-color: rgba(15, 23, 42, 0.1);
+  color: #334155;
+}
+
+:root[data-theme="light"] .md-body code:not(pre code) {
+  background: rgba(15, 23, 42, 0.06);
+  color: #1e293b;
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .process-card,
+:root[data-theme="light"] .process-card.is-live,
+:root[data-theme="light"] .process-summary-body,
+:root[data-theme="light"] .live-progress-feed,
+:root[data-theme="light"] .process-card > .live-progress-feed,
+:root[data-theme="light"] .live-thought-preview.is-standalone {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .pending-requests-dock {
+  background: #ffffff;
+  border-color: rgba(217, 119, 6, 0.35);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+:root[data-theme="light"] .composer-area {
+  background: linear-gradient(180deg, rgba(244, 246, 250, 0) 0%, rgba(244, 246, 250, 0.94) 24%);
+}
+
+:root[data-theme="light"] .composer-box {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.14);
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="light"] .composer-box:focus-within {
+  border-color: rgba(37, 99, 235, 0.45);
+  box-shadow: 0 6px 22px rgba(37, 99, 235, 0.1);
+}
+
+:root[data-theme="light"] .composer-controls,
+:root[data-theme="light"] .composer-config-popover,
+:root[data-theme="light"] .modal-card,
+:root[data-theme="light"] .fixed-tunnel-block,
+:root[data-theme="light"] .goal-context-card,
+:root[data-theme="light"] .task-notif-card {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .modal-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.36);
+}
+
+:root[data-theme="light"] .agent-telemetry-bar {
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  border-bottom-color: var(--border);
+}
+
+:root[data-theme="light"] .agent-telemetry-bar.is-mobile-open {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .telemetry-compact-pill,
+:root[data-theme="light"] .telemetry-agent-card,
+:root[data-theme="light"] .telemetry-drawer-card {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.1);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .telemetry-compact-pill.is-current:not(.is-running) {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.25);
+}
+
+:root[data-theme="light"] .telemetry-picker-panel,
+:root[data-theme="light"] .telemetry-drawer {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .msg-image-btn,
+:root[data-theme="light"] .msg-image-card.is-deferred .msg-image-btn,
+:root[data-theme="light"] .user-question-reply,
+:root[data-theme="light"] .msg-file-chip {
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(37, 99, 235, 0.22);
+  color: #1e293b;
+}
+
+:root[data-theme="light"] .msg-image-btn:hover,
+:root[data-theme="light"] .msg-image-card.is-deferred .msg-image-btn:hover,
+:root[data-theme="light"] .msg-file-chip.is-clickable:hover,
+:root[data-theme="light"] .md-inline-img-trigger:hover {
+  background: rgba(37, 99, 235, 0.1);
+  border-color: rgba(37, 99, 235, 0.36);
+}
+
+:root[data-theme="light"] .msg-image-caption,
+:root[data-theme="light"] .msg-image-card.is-deferred .msg-image-caption {
+  color: #1e293b;
+}
+
+:root[data-theme="light"] .msg-image-card.is-deferred .msg-image-caption::after {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .msg-image-card.is-deferred .msg-image-deferred-lead {
+  color: #2563eb;
+}
+
+:root[data-theme="light"] .msg-reveal-thread-images-btn {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.35);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .msg-reveal-thread-images-btn:hover {
+  background: rgba(37, 99, 235, 0.16);
+  border-color: rgba(37, 99, 235, 0.55);
+  color: #1e40af;
+}
+
+:root[data-theme="light"] .voice-scope-pill {
+  background: rgba(15, 23, 42, 0.04);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .voice-scope-pill:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .voice-scope-pill.is-active {
+  background: rgba(37, 99, 235, 0.12);
+  border-color: rgba(37, 99, 235, 0.35);
+  color: var(--accent-strong);
+}
+
+:root[data-theme="light"] .locale-select {
+  background: #ffffff;
+  color: var(--text);
+  border-color: rgba(15, 23, 42, 0.16);
+}
+
+:root[data-theme="light"] .toast-banner {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.12);
+  color: var(--text);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme="light"] .sidebar-resizer:hover::after,
+:root[data-theme="light"] .sidebar-resizer:focus-visible::after,
+:root[data-theme="light"] .sidebar-resizer.is-resizing::after {
+  background: rgba(37, 99, 235, 0.55);
+}
+
+:root[data-theme="light"] .ac-select-trigger {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.14);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .ac-select-trigger:hover:not(:disabled) {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.24);
+}
+
+:root[data-theme="light"] .ac-select-trigger:disabled,
+:root[data-theme="light"] .ac-select-trigger.is-disabled {
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .ac-select-trigger.is-tone-turbo,
+:root[data-theme="light"] .composer-config-chip.tone-turbo,
+:root[data-theme="light"] .ctrl-permission.is-turbo {
+  background: rgba(217, 119, 6, 0.1);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: #b45309;
+}
+
+:root[data-theme="light"] .ac-select-trigger.is-tone-auto,
+:root[data-theme="light"] .composer-config-chip.tone-auto {
+  background: rgba(5, 150, 105, 0.1);
+  border-color: rgba(5, 150, 105, 0.35);
+  color: #047857;
+}
+
+:root[data-theme="light"] .ac-select-trigger.is-tone-workspace,
+:root[data-theme="light"] .composer-config-chip.tone-workspace {
+  background: rgba(37, 99, 235, 0.1);
+  border-color: rgba(37, 99, 235, 0.32);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .ac-select-trigger.is-tone-safe,
+:root[data-theme="light"] .composer-config-chip.tone-safe {
+  background: rgba(15, 23, 42, 0.05);
+  border-color: rgba(15, 23, 42, 0.18);
+  color: #334155;
+}
+
+:root[data-theme="light"] .ac-select-trigger.is-tone-plan,
+:root[data-theme="light"] .composer-config-chip.tone-plan {
+  background: rgba(124, 58, 237, 0.1);
+  border-color: rgba(124, 58, 237, 0.32);
+  color: #6d28d9;
+}
+
+:root[data-theme="light"] .ac-select-popover {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+}
+
+:root[data-theme="light"] .ac-select-option {
+  color: var(--text);
+}
+
+:root[data-theme="light"] .ac-select-option:hover:not(:disabled),
+:root[data-theme="light"] .ac-select-option:focus-visible {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="light"] .ac-select-option.is-selected {
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .sidebar-update-btn {
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .sidebar-update-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .sidebar-update-btn.has-update {
+  background: rgba(37, 99, 235, 0.08);
+  border-color: rgba(37, 99, 235, 0.28);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .sidebar-update-badge,
+:root[data-theme="light"] .menu-update-badge {
+  background: rgba(37, 99, 235, 0.12);
+  border-color: rgba(37, 99, 235, 0.3);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .sidebar-auto-tag {
+  background: rgba(5, 150, 105, 0.1);
+  border-color: rgba(5, 150, 105, 0.28);
+  color: #047857;
+}
+
+:root[data-theme="light"] .provider-badge.is-claude,
+:root[data-theme="light"] .quota-chip-provider.is-claude,
+:root[data-theme="light"] .profile-badge.is-cooldown,
+:root[data-theme="light"] .cfg-chip-profile.is-cooldown,
+:root[data-theme="light"] .telemetry-run-badge.is-queued,
+:root[data-theme="light"] .telemetry-quota-chip.is-warn .telemetry-chip-v,
+:root[data-theme="light"] .task-notif-badge.is-warn,
+:root[data-theme="light"] .tunnel-state-pill.is-starting,
+:root[data-theme="light"] .slash-badge.is-skill,
+:root[data-theme="light"] .thread-warnings,
+:root[data-theme="light"] .sr-badge {
+  color: #b45309;
+}
+
+:root[data-theme="light"] .provider-badge.is-antigravity,
+:root[data-theme="light"] .quota-chip-provider.is-antigravity,
+:root[data-theme="light"] .slash-badge.is-control {
+  color: #6d28d9;
+}
+
+:root[data-theme="light"] .quota-chip-provider.is-codex {
+  color: #047857;
+}
+
+:root[data-theme="light"] .profile-badge.is-disabled,
+:root[data-theme="light"] .cfg-chip-profile.is-disabled,
+:root[data-theme="light"] .telemetry-quota-chip.is-danger .telemetry-chip-v,
+:root[data-theme="light"] .task-notif-badge.is-err,
+:root[data-theme="light"] .tunnel-state-pill.is-error {
+  color: #b91c1c;
+}
+
+:root[data-theme="light"] .task-notif-badge,
+:root[data-theme="light"] .task-notif-pill,
+:root[data-theme="light"] .heartbeat-count-pill {
+  color: #475569;
+}
+
+/* ===== 日间模式全量 Tag / 胶囊 / 状态文字对比度统一增强 ===== */
+:root[data-theme="light"] .telemetry-compact-tps,
+:root[data-theme="light"] .telemetry-summary-stat.is-tps,
+:root[data-theme="light"] .telemetry-tps-badge.is-active,
+:root[data-theme="light"] .telemetry-action-btn.is-open,
+:root[data-theme="light"] .telemetry-picker-link,
+:root[data-theme="light"] .telemetry-pick-check,
+:root[data-theme="light"] .telemetry-topbar-btn.is-open,
+:root[data-theme="light"] .telemetry-filter-btn.is-active,
+:root[data-theme="light"] .telemetry-card-filter.is-active,
+:root[data-theme="light"] .execution-thread-link,
+:root[data-theme="light"] .provider-badge,
+:root[data-theme="light"] .provider-badge.is-grok,
+:root[data-theme="light"] .quota-chip-provider.is-grok,
+:root[data-theme="light"] .quota-detail-title .is-grok,
+:root[data-theme="light"] .telemetry-provider-glyph.is-grok,
+:root[data-theme="light"] .item-status.running,
+:root[data-theme="light"] .process-summary-hint,
+:root[data-theme="light"] .process-count-tag,
+:root[data-theme="light"] .process-model-pill,
+:root[data-theme="light"] .live-phase,
+:root[data-theme="light"] .composer-status,
+:root[data-theme="light"] .composer-status.is-pending,
+:root[data-theme="light"] .composer-edit-banner,
+:root[data-theme="light"] .composer-edit-banner-cancel,
+:root[data-theme="light"] .queued-meta-tag.is-editing,
+:root[data-theme="light"] .queued-meta-tag.is-control,
+:root[data-theme="light"] .slash-badge.is-native,
+:root[data-theme="light"] .user-qr-badge,
+:root[data-theme="light"] .profile-pill-lock,
+:root[data-theme="light"] .profile-pill-action-btn.is-copy-login,
+:root[data-theme="light"] .profile-pill-action-btn.is-copy-login:hover:not(:disabled),
+:root[data-theme="light"] .instance-mgr-badge.is-managed,
+:root[data-theme="light"] .heartbeat-badge,
+:root[data-theme="light"] .task-notif-badge.is-info {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .telemetry-compact-quota.is-ok,
+:root[data-theme="light"] .telemetry-run-badge.is-running,
+:root[data-theme="light"] .telemetry-quota-chip.is-ok .telemetry-chip-v,
+:root[data-theme="light"] .telemetry-db-val.is-ok,
+:root[data-theme="light"] .quota-bucket-val.tone-ok,
+:root[data-theme="light"] .quota-detail-title .is-codex,
+:root[data-theme="light"] .quota-plan-pill.is-credits,
+:root[data-theme="light"] .provider-badge.is-codex,
+:root[data-theme="light"] .profile-badge.is-healthy,
+:root[data-theme="light"] .goal-pill,
+:root[data-theme="light"] .phase-tag.is-streaming,
+:root[data-theme="light"] .md-body .md-skill-chip,
+:root[data-theme="light"] .item-status.ok,
+:root[data-theme="light"] .live-frontier-text,
+:root[data-theme="light"] .queued-meta-tag.is-media,
+:root[data-theme="light"] .slash-badge.is-workflow,
+:root[data-theme="light"] .composer-status.is-success,
+:root[data-theme="light"] .cfg-chip-profile.is-healthy,
+:root[data-theme="light"] .profile-pill-action-btn.is-enable,
+:root[data-theme="light"] .status-failover-btn,
+:root[data-theme="light"] .tunnel-state-pill.is-running,
+:root[data-theme="light"] .heartbeat-notify-tag,
+:root[data-theme="light"] .task-notif-badge.is-ok,
+:root[data-theme="light"] .update-desktop-tag.is-ok {
+  color: #047857;
+}
+
+:root[data-theme="light"] .telemetry-compact-quota.is-warn,
+:root[data-theme="light"] .telemetry-quota-alert.is-warn,
+:root[data-theme="light"] .telemetry-db-val.is-warn,
+:root[data-theme="light"] .quota-bucket-val.tone-warn,
+:root[data-theme="light"] .quota-detail-title .is-claude,
+:root[data-theme="light"] .process-step-row.is-soft-warn .tool-kind,
+:root[data-theme="light"] .process-step-row.is-soft-warn .process-note-text,
+:root[data-theme="light"] .live-progress-row.is-warn .tool-kind,
+:root[data-theme="light"] .queued-meta-tag.is-goal,
+:root[data-theme="light"] .composer-voice-btn.is-transcribing,
+:root[data-theme="light"] .update-desktop-tag.is-warn {
+  color: #b45309;
+}
+
+:root[data-theme="light"] .telemetry-compact-quota.is-danger,
+:root[data-theme="light"] .telemetry-quota-alert.is-danger,
+:root[data-theme="light"] .telemetry-db-val.is-danger,
+:root[data-theme="light"] .quota-bucket-val.tone-exhausted,
+:root[data-theme="light"] .live-banner.is-error .live-phase,
+:root[data-theme="light"] .item-status.err,
+:root[data-theme="light"] .composer-status.is-error,
+:root[data-theme="light"] .composer-voice-btn.is-recording {
+  color: #b91c1c;
+}
+
+:root[data-theme="light"] .quota-detail-title .is-antigravity,
+:root[data-theme="light"] .queued-meta-tag.is-native {
+  color: #6d28d9;
+}
+
+:root[data-theme="light"] .live-progress-feed .item-status.ok,
+:root[data-theme="light"] .live-cmd-snippet,
+:root[data-theme="light"] .slash-badge,
+:root[data-theme="light"] .quota-bucket-val.tone-unknown {
+  color: #334155;
+}
+
+:root[data-theme="light"] .md-body a {
+  color: #1d4ed8;
+  text-decoration-color: rgba(29, 78, 216, 0.38);
+}
+
+:root[data-theme="light"] .md-body a:hover {
+  color: #1e40af;
+}
+
+:root[data-theme="light"] .md-body a.md-file-link {
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .md-body a.md-file-link:hover {
+  background: rgba(37, 99, 235, 0.15);
+  border-color: rgba(37, 99, 235, 0.34);
+  color: #1e3a8a;
+}
+
+:root[data-theme="light"] .md-body blockquote {
+  background: rgba(15, 23, 42, 0.03);
+  border-left-color: rgba(37, 99, 235, 0.38);
+}
+
+:root[data-theme="light"] .slash-menu-head {
+  background: rgba(15, 23, 42, 0.03);
+  border-bottom-color: rgba(15, 23, 42, 0.08);
+  color: var(--text-muted);
+}
+
+:root[data-theme="light"] .slash-command-name {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .slash-command-item:hover,
+:root[data-theme="light"] .slash-command-item.is-active {
+  background: rgba(37, 99, 235, 0.1);
+}
+
+:root[data-theme="light"] .slash-command-item.is-active .slash-command-name {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .slash-badge {
+  border-color: rgba(15, 23, 42, 0.14);
+}
+
+:root[data-theme="light"] .user-qr-a,
+:root[data-theme="light"] .md-body table.md-table.is-headless td:first-child,
+:root[data-theme="light"] .task-notif-title,
+:root[data-theme="light"] .task-notif-result,
+:root[data-theme="light"] .claude-bash-cmd {
+  color: #0f172a;
+}
+
+:root[data-theme="light"] .user-qr-q,
+:root[data-theme="light"] .heartbeat-msg,
+:root[data-theme="light"] .heartbeat-time,
+:root[data-theme="light"] .heartbeat-inst-body,
+:root[data-theme="light"] .task-notif-snippet,
+:root[data-theme="light"] .task-notif-chevron,
+:root[data-theme="light"] .task-notif-note,
+:root[data-theme="light"] .task-notif-tech code,
+:root[data-theme="light"] .claude-bash-output,
+:root[data-theme="light"] .file-line-no {
+  color: #475569;
+}
+
+:root[data-theme="light"] .batch-mode-toggle-btn.is-active,
+:root[data-theme="light"] .topbar-icon-action.is-active-voice,
+:root[data-theme="light"] .md-code-file:hover,
+:root[data-theme="light"] .md-body .md-checkbox.is-checked,
+:root[data-theme="light"] .md-body .md-alert-title,
+:root[data-theme="light"] .md-body .md-alert.is-note .md-alert-title,
+:root[data-theme="light"] .md-inline-img-trigger,
+:root[data-theme="light"] .sr-q-header,
+:root[data-theme="light"] .queued-item-btn.is-steer,
+:root[data-theme="light"] .queued-item-btn.is-steer:hover:not(:disabled),
+:root[data-theme="light"] .btn-probe-inline,
+:root[data-theme="light"] .inst-provider-tab.is-active,
+:root[data-theme="light"] .btn-xs.is-primary-outline,
+:root[data-theme="light"] .heartbeat-inst-details summary,
+:root[data-theme="light"] .update-meta-row code,
+:root[data-theme="light"] .update-pending-sha {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .md-body .md-copy-btn.is-copied,
+:root[data-theme="light"] .md-body .md-alert.is-tip .md-alert-title,
+:root[data-theme="light"] .btn-toggle[aria-pressed="true"] {
+  color: #047857;
+}
+
+:root[data-theme="light"] .active-project-crumb.is-pinned,
+:root[data-theme="light"] .md-body .md-alert.is-warning .md-alert-title,
+:root[data-theme="light"] .md-body .md-truncated-note,
+:root[data-theme="light"] .turn-no-summary-hint.is-incomplete,
+:root[data-theme="light"] .turn-resume-inline-btn,
+:root[data-theme="light"] .queued-item-blocked,
+:root[data-theme="light"] .tunnel-install-box,
+:root[data-theme="light"] .file-preview-trunc-note,
+:root[data-theme="light"] .update-dirty-box {
+  color: #b45309;
+}
+
+:root[data-theme="light"] .md-body .md-alert.is-important .md-alert-title,
+:root[data-theme="light"] .md-body .md-math-inline,
+:root[data-theme="light"] .md-body .md-math-block {
+  color: #6d28d9;
+}
+
+:root[data-theme="light"] .md-body .md-alert.is-caution .md-alert-title,
+:root[data-theme="light"] .turn-error,
+:root[data-theme="light"] .queued-item-btn.is-cancel:hover,
+:root[data-theme="light"] .btn-xs.is-danger-outline,
+:root[data-theme="light"] .btn-danger,
+:root[data-theme="light"] .file-preview-error,
+:root[data-theme="light"] .claude-bash-output.is-stderr {
+  color: #b91c1c;
+}
+
+:root[data-theme="light"] .msg-automation-trigger {
+  background: #f1f5fe;
+  border-color: rgba(37, 99, 235, 0.24);
+  color: var(--text);
+}
+
+:root[data-theme="light"] .automation-item {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+:root[data-theme="light"] .process-summary-box {
+  background: #f8fafc;
+  border-color: rgba(15, 23, 42, 0.1);
+}
+
+:root[data-theme="light"] .telemetry-compact-pill.is-running,
+:root[data-theme="light"] .telemetry-agent-card.is-running {
+  background: rgba(5, 150, 105, 0.08);
+  border-color: rgba(5, 150, 105, 0.28);
+}
+
+:root[data-theme="light"] .image-preview-meta {
+  color: #1d4ed8;
+}
+
+:root[data-theme="light"] .md-inline-img-hint {
+  color: #64748b;
 }

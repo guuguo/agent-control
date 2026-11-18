@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import os from "node:os";
 import { promisify } from "node:util";
 import { formatCompositeThreadId } from "../composite-id.mjs";
@@ -7,6 +7,7 @@ import { cleanPreviewText, displayThreadTitle } from "../thread-display.mjs";
 import { visibleControlThreads } from "../thread-access.mjs";
 import { readCodexAccount } from "./codex-account.mjs";
 import {
+  appServerEnvironment,
   appServerExecutable,
   CodexAppServerClient,
   createServerRequestResponse,
@@ -80,10 +81,21 @@ function buildCodexInputItems(text, images = []) {
   return items;
 }
 
+function shellQuote(value) {
+  const str = String(value || "");
+  if (/^[A-Za-z0-9_./:-]+$/.test(str)) return str;
+  return `'${str.replace(/'/g, `'\\''`)}'`;
+}
+
+function applescriptQuote(value) {
+  return `"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 export class CodexProvider {
   id = "codex";
   label = "Codex";
   #env;
+  #dataDir;
   #profiles = [];
   #clients = new Map();
   #writers = new CodexThreadWriterRegistry();
@@ -97,29 +109,45 @@ export class CodexProvider {
 
   constructor({
     env = process.env,
+    dataDir = "",
     execFileImpl = execFileAsync,
     onEvent = () => {},
     onServerRequest = () => {},
   } = {}) {
     this.#env = env;
+    this.#dataDir = dataDir;
     this.#execFileImpl = execFileImpl;
     this.#onEvent = onEvent;
     this.#onServerRequest = onServerRequest;
   }
 
+  setCallbacks({ onEvent, onServerRequest } = {}) {
+    if (onEvent) this.#onEvent = onEvent;
+    if (onServerRequest) this.#onServerRequest = onServerRequest;
+  }
+
   async refreshProfiles() {
-    const discovered = await discoverCodexProfiles({ env: this.#env });
+    const discovered = await discoverCodexProfiles({ env: this.#env, dataDir: this.#dataDir });
+    const hasEnvApiKey = Boolean(String(this.#env?.OPENAI_API_KEY || "").trim());
     this.#profiles = await Promise.all(discovered.map(async (profile) => {
       const [account, endpoint] = await Promise.all([
         readCodexAccount(profile.home),
         readCodexPublicEndpoint(profile.home),
       ]);
+      const needsLogin = Boolean(
+        !account.signedIn
+        && !endpoint.endpointHost
+        && !hasEnvApiKey
+        && (profile.managed || (profile.exists && profile.id !== "default")),
+      );
       return {
         ...profile,
         account,
         modelProvider: endpoint.modelProvider || "",
         endpointHost: endpoint.endpointHost || "",
         endpointLabel: endpoint.endpointLabel || "",
+        needsLogin,
+        loginCommand: `CODEX_HOME=${shellQuote(profile.home)} codex login`,
         installed: Boolean(profile.exists || account.signedIn),
       };
     }));
@@ -178,6 +206,18 @@ export class CodexProvider {
       this.#writers.markActive(rawId, { turnId: params.turn?.id || "" });
     } else if (method === "turn/completed" && rawId) {
       this.#writers.clearActive(rawId, params.turn?.id || "");
+    } else if (method === "account/login/completed" || method === "account/updated") {
+      this.#modelsCache.delete(profileId);
+      this.#modelsRefreshInFlight.delete(profileId);
+      this.#rateLimitsByProfile.delete(profileId);
+      this.#onEvent({
+        type: "profile_auth_updated",
+        provider: "codex",
+        profileId,
+        loginId: params?.loginId || null,
+        success: method === "account/login/completed" ? Boolean(params?.success) : true,
+        error: params?.error || null,
+      });
     } else if (method === "account/rateLimits/updated") {
       const rl = params?.rateLimits || params?.rate_limits || params;
       const byLimit = params?.rateLimitsByLimitId || params?.rate_limits_by_limit_id || null;
@@ -809,6 +849,88 @@ export class CodexProvider {
         return { supported: false };
       }
       throw error;
+    }
+  }
+
+  async startProfileLogin(profileId = "default", { mode = "oauth", openOnHost = false } = {}) {
+    const profile = await this.#getProfile(profileId);
+    const loginCommand = `CODEX_HOME=${shellQuote(profile.home)} codex login`;
+    const canOpenHost = Boolean(openOnHost && this.#env.AGENT_CONTROL_NO_HOST_OPEN !== "1");
+
+    if (mode === "app") {
+      try {
+        const child = spawn(appServerExecutable(this.#env), ["app"], {
+          env: appServerEnvironment(this.#env, profile.home),
+          detached: true,
+          stdio: "ignore",
+        });
+        child.on("error", () => {});
+        child.unref();
+      } catch {}
+      return {
+        ok: true,
+        provider: "codex",
+        profileId,
+        mode: "app",
+        loginCommand,
+        message: "已使用独立实例目录启动 Codex 桌面端，登录或查看后可随时关闭窗口。",
+      };
+    }
+
+    if (mode === "terminal") {
+      let openedTerminal = false;
+      if (process.platform === "darwin" && canOpenHost) {
+        try {
+          await this.#execFileImpl("osascript", [
+            "-e",
+            `tell application "Terminal" to do script ${applescriptQuote(loginCommand)}`,
+            "-e",
+            `tell application "Terminal" to activate`,
+          ]);
+          openedTerminal = true;
+        } catch {}
+      }
+      return {
+        ok: true,
+        provider: "codex",
+        profileId,
+        mode: "terminal",
+        openedTerminal,
+        loginCommand,
+      };
+    }
+
+    const client = await this.#getClient(profileId);
+    const res = await client.request("account/login/start", { type: "chatgpt" });
+    const authUrl = String(res?.authUrl || "");
+    const loginId = String(res?.loginId || "");
+    let openedBrowser = false;
+    if (canOpenHost && authUrl && process.platform === "darwin") {
+      try {
+        await this.#execFileImpl("open", [authUrl]);
+        openedBrowser = true;
+      } catch {}
+    }
+    return {
+      ok: true,
+      provider: "codex",
+      profileId,
+      mode: "oauth",
+      authUrl,
+      loginId,
+      openedBrowser,
+      loginCommand,
+    };
+  }
+
+  async closeProfile(profileId = "default") {
+    this.#modelsCache.delete(profileId);
+    this.#modelsRefreshInFlight.delete(profileId);
+    this.#rateLimitsByProfile.delete(profileId);
+    const client = this.#clients.get(profileId);
+    if (client) {
+      this.#clients.delete(profileId);
+      await client.close().catch(() => {});
     }
   }
 

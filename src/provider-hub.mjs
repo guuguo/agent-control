@@ -19,6 +19,7 @@ import { createGoalController, GOAL_COMPLETE_MARKER } from "./goal-controller.mj
 import { createInflightTurnStore, inflightTurnsPath } from "./inflight-turns.mjs";
 import { ExecutionStats } from "./execution-stats.mjs";
 import { ForkStore, buildForkContextPrompt, stripForkContextPrefix } from "./fork-store.mjs";
+import { createManagedProfile, deleteManagedProfile } from "./managed-profiles.mjs";
 import { isInternalVoiceCallThread } from "./thread-access.mjs";
 import { defaultDataDir } from "./instance-identity.mjs";
 import { CliMaintenanceManager } from "./providers/cli-maintenance.mjs";
@@ -625,10 +626,10 @@ export class ProviderHub {
     const emitServerRequest = (req) => this.#handleProviderServerRequest(req);
 
     const list = providers || [
-      new CodexProvider({ env, onEvent: emitEvent, onServerRequest: emitServerRequest }),
-      new ClaudeProvider({ env, onEvent: emitEvent, onServerRequest: emitServerRequest }),
+      new CodexProvider({ env, dataDir, onEvent: emitEvent, onServerRequest: emitServerRequest }),
+      new ClaudeProvider({ env, dataDir, onEvent: emitEvent, onServerRequest: emitServerRequest }),
       new AntigravityProvider({ env, onEvent: emitEvent, onServerRequest: emitServerRequest }),
-      new GrokProvider({ env, onEvent: emitEvent }),
+      new GrokProvider({ env, dataDir, onEvent: emitEvent }),
       new QoderProvider({ env, dataDir, onEvent: emitEvent, onServerRequest: emitServerRequest }),
     ];
     this.#quotaService = quotaService || new QuotaService({
@@ -968,6 +969,25 @@ export class ProviderHub {
   }
 
   #handleProviderEvent(evt) {
+    if (evt?.type === "profile_auth_updated") {
+      const impl = this.#providers.get(evt.provider);
+      void (async () => {
+        await impl?.refreshProfiles?.().catch(() => {});
+        if (evt.success && evt.profileId) {
+          await this.probeProfiles({ provider: evt.provider, profileId: evt.profileId }).catch(() => {});
+        } else {
+          await this.#broadcastProfilesUpdated().catch(() => {});
+        }
+        this.#broadcast("profile_auth_updated", {
+          provider: evt.provider,
+          profileId: evt.profileId,
+          success: Boolean(evt.success),
+          error: evt.error || null,
+        });
+      })();
+      return;
+    }
+
     const threadId = evt.threadId || "";
     this.#executionStats.handle(evt, threadId ? (this.#metaStore.get(threadId) || {}) : {});
 
@@ -1579,6 +1599,71 @@ export class ProviderHub {
     await this.#metaStore.setProfileMeta(key, patch);
     const payload = await this.#broadcastProfilesUpdated();
     return { ok: true, key, ...payload };
+  }
+
+  async createProfile({ provider = "", name = "", customHome = "" } = {}) {
+    const cleanProvider = String(provider || "").trim().toLowerCase();
+    const impl = this.getProvider(cleanProvider);
+    const currentProfiles = await impl.listProfiles().catch(() => []);
+    const existingHomes = currentProfiles.map((item) => item?.home || item?.cliConfigDir).filter(Boolean);
+    const existingIds = currentProfiles.map((item) => item?.id).filter(Boolean);
+    const created = await createManagedProfile({
+      dataDir: this.#dataDir,
+      provider: cleanProvider,
+      name,
+      customHome,
+      existingHomes,
+      existingIds,
+    });
+    await impl.refreshProfiles?.().catch(() => {});
+    const key = formatProfileKey(cleanProvider, created.id);
+    await this.#metaStore.setProfileMeta(key, {
+      alias: created.name,
+      autoAliasSource: "manual",
+    });
+    const payload = await this.#broadcastProfilesUpdated();
+    return { ok: true, created, key, ...payload };
+  }
+
+  async deleteProfile({ provider = "", profileId = "" } = {}) {
+    const cleanProvider = String(provider || "").trim().toLowerCase();
+    const cleanProfileId = String(profileId || "").trim();
+    if (!cleanProvider || !cleanProfileId) {
+      throw Object.assign(new Error("provider 与 profileId 不能为空"), { status: 400 });
+    }
+    const impl = this.getProvider(cleanProvider);
+    const prefix = `${cleanProvider}:${cleanProfileId}:`;
+    for (const activeId of this.#activeTurns.keys()) {
+      if (String(activeId).startsWith(prefix)) {
+        throw Object.assign(new Error("该实例仍有正在运行的任务，请先停止后再移除"), {
+          status: 409,
+          code: "profile_busy",
+        });
+      }
+    }
+    const deleted = await deleteManagedProfile({
+      dataDir: this.#dataDir,
+      provider: cleanProvider,
+      profileId: cleanProfileId,
+    });
+    await impl.closeProfile?.(cleanProfileId).catch(() => {});
+    await impl.refreshProfiles?.().catch(() => {});
+    const payload = await this.#broadcastProfilesUpdated();
+    return { ok: true, deletedId: cleanProfileId, deleted, ...payload };
+  }
+
+  async startProfileLogin({ provider = "", profileId = "", mode = "", openOnHost = true } = {}) {
+    const cleanProvider = String(provider || "").trim().toLowerCase();
+    const cleanProfileId = String(profileId || "").trim() || "default";
+    const impl = this.getProvider(cleanProvider);
+    await impl.refreshProfiles?.().catch(() => {});
+    if (typeof impl.startProfileLogin !== "function") {
+      throw Object.assign(new Error("当前智能体不支持托管登录引导"), { status: 400 });
+    }
+    return impl.startProfileLogin(cleanProfileId, {
+      ...(mode ? { mode: String(mode).trim() } : {}),
+      openOnHost: openOnHost !== false,
+    });
   }
 
   async listModels({ provider = "", profileId = "" } = {}) {

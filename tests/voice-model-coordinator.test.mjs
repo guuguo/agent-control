@@ -120,6 +120,36 @@ test("legacy local-only selections migrate to auto and no local rule option rema
   assert.doesNotMatch(renderVoiceModelSelectOptionsHtml(), /local-rules|本机规则/);
 });
 
+test("resolveVoicePlanTarget allows threads[].cwd outside top projects slice while still blocking invented paths, and prompts annotate overlap speech", async (t) => {
+  const { resolveVoicePlanTarget } = await import("../src/voice-call-service.mjs");
+  const snapshot = {
+    projects: [{ cwd: "/dev/top1", name: "top1", threads: [] }],
+    threads: [{ id: "antigravity:desktop:t-15", cwd: "/dev/extra/agent-control", title: "语音优化", provider: "antigravity" }],
+  };
+  const resolved = resolveVoicePlanTarget({
+    intent: "send_turn",
+    targetProjectCwd: "/dev/extra/agent-control",
+    targetThreadId: "antigravity:desktop:t-15",
+  }, snapshot);
+  assert.equal(resolved.valid, true);
+  assert.equal(resolved.cwd, "/dev/extra/agent-control");
+  assert.equal(resolved.threadId, "antigravity:desktop:t-15");
+
+  const invented = resolveVoicePlanTarget({
+    intent: "create_thread",
+    targetProjectCwd: "/dev/not-in-snapshot",
+  }, snapshot);
+  assert.equal(invented.valid, false);
+
+  const f = await fixture(t);
+  f.setResponse({ ...basePlan, intent: "summarize_progress", spokenReply: "已结合你播报时说的话连贯处理。" });
+  await f.turn("先停一下看看工作项目", {
+    overlapDurationMs: 1200,
+    overlapBotText: "当前项目正在运行测试。",
+  });
+  assert.match(f.calls.at(-1).text, /<SPEECH_TIMING_CONTEXT>.*overlapDurationMs":1200.*aiWasSpeakingText":"当前项目正在运行测试。".*<\/SPEECH_TIMING_CONTEXT>/);
+});
+
 test("no available model reports an error instead of using local rules", async (t) => {
   const dir = await mkdtemp(join(os.tmpdir(), "ac-no-voice-model-"));
   const svc = new VoiceCallService({ dataDir: dir, env: { AGY_BIN: "none" }, hub: {

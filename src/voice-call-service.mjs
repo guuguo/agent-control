@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -842,13 +842,21 @@ export function resolveVoicePlanTarget(plan = {}, snapshot = {}) {
   const threads = snapshot.threads || projects.flatMap((p) =>
     (p.threads || []).map((t) => ({ ...t, cwd: p.cwd })));
   const thread = plan.targetThreadId ? threads.find((t) => t.id === plan.targetThreadId) : null;
-  const project = plan.targetProjectCwd
+  let project = plan.targetProjectCwd
     ? projects.find((p) => normCwd(p.cwd) === normCwd(plan.targetProjectCwd))
-    : (thread ? projects.find((p) => p.cwd === thread.cwd) : null);
+    : (thread ? projects.find((p) => normCwd(p.cwd) === normCwd(thread.cwd)) : null);
+  let fallbackCwd = "";
+  if (!project && plan.targetProjectCwd) {
+    const matchedThreadByCwd = threads.find((t) => normCwd(t.cwd) === normCwd(plan.targetProjectCwd));
+    if (matchedThreadByCwd?.cwd) {
+      fallbackCwd = matchedThreadByCwd.cwd;
+    }
+  }
+  const resolvedCwd = project?.cwd || fallbackCwd || thread?.cwd || "";
   const valid = (!plan.targetThreadId || Boolean(thread))
-    && (!plan.targetProjectCwd || Boolean(project))
-    && (!thread || !project || thread.cwd === project.cwd);
-  return { project, thread, cwd: project?.cwd || thread?.cwd || "", threadId: thread?.id || "", valid };
+    && (!plan.targetProjectCwd || Boolean(project || fallbackCwd))
+    && (!thread || !resolvedCwd || normCwd(thread.cwd) === normCwd(resolvedCwd));
+  return { project, thread, cwd: resolvedCwd, threadId: thread?.id || "", valid };
 }
 
 export class VoiceCallService {
@@ -887,7 +895,22 @@ export class VoiceCallService {
   #kokoroReadyPromise = null;
   #kokoroStdoutBuf = "";
   #kokoroPending = new Map();
+  #diagLogQueue = Promise.resolve();
   #closed = false;
+
+  #appendVoiceDiagLog(entry = {}) {
+    if (!this.#dataDir) return;
+    const line = `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`;
+    const logPath = resolve(this.#dataDir, "logs", "voice-turns.jsonl");
+    this.#diagLogQueue = this.#diagLogQueue.then(async () => {
+      await mkdir(dirname(logPath), { recursive: true });
+      const info = await stat(logPath).catch(() => null);
+      if (info && info.size > 2 * 1024 * 1024) {
+        await rename(logPath, `${logPath}.prev`).catch(() => {});
+      }
+      await appendFile(logPath, line, { encoding: "utf8", mode: 0o600 });
+    }).catch(() => {});
+  }
 
   constructor({
     hub,
@@ -1563,6 +1586,17 @@ export class VoiceCallService {
     }
 
     const unheardItems = this.getUnheardUtterances(cleanCallId);
+    this.#appendVoiceDiagLog({
+      type: "playback_feedback",
+      callId: cleanCallId,
+      utteranceId: rec.utteranceId,
+      deliveryStatus: rec.deliveryStatus,
+      heard: rec.heard,
+      reason: rec.reason,
+      provider: rec.provider,
+      playedMs: rec.playedMs,
+      expectedMs: rec.expectedMs,
+    });
     return {
       ok: true,
       callId: cleanCallId,
@@ -1802,7 +1836,7 @@ export class VoiceCallService {
       model: dispatchModel,
       shortLabel: dispatchLabel,
     };
-    return {
+    const startResult = {
       ok: true,
       callId: cleanCallId,
       callScope: effectiveScope,
@@ -1819,6 +1853,19 @@ export class VoiceCallService {
       ttsEngine: ttsBin ? "edge-tts" : (sayBin ? "macos-say" : "none"),
       ...(warning ? { warning } : {}),
     };
+    this.#appendVoiceDiagLog({
+      type: "call_start",
+      callId: cleanCallId,
+      callScope: effectiveScope,
+      activeThreadId: String(activeThreadId || "").trim(),
+      dispatchProvider,
+      dispatchModel,
+      asrEngine,
+      ttsEngine: startResult.ttsEngine,
+      warmed,
+      ...(warning ? { warning } : {}),
+    });
+    return startResult;
   }
 
   endCall({ callId = "" } = {}) {
@@ -1826,6 +1873,7 @@ export class VoiceCallService {
     if (cleanCallId) {
       this.#calls.delete(cleanCallId);
       this.#callStates.delete(cleanCallId);
+      this.#appendVoiceDiagLog({ type: "call_end", callId: cleanCallId });
     }
     if (this.#calls.size === 0 && this.#callStates.size === 0) {
       this.#resetEdgeTtsWorker("通话已结束");
@@ -1976,14 +2024,25 @@ export class VoiceCallService {
       });
     }
 
+    const activeThreadCwd = activeThreadId ? normCwd(threadById.get(activeThreadId)?.cwd || "") : "";
+    const isInternalScratchCwd = (dir) => {
+      const normalized = String(dir || "").replace(/\\/g, "/");
+      return normalized.includes("/.gemini/antigravity/brain/")
+        || normalized.includes("/Claude/scratch-workspaces/");
+    };
+
     const projects = [...byCwd.values()]
+      .filter((p) => !isInternalScratchCwd(p.cwd) || (activeThreadCwd && normCwd(p.cwd) === activeThreadCwd))
       .sort((a, b) => {
+        const aIsActive = Boolean(activeThreadCwd && normCwd(a.cwd) === activeThreadCwd);
+        const bIsActive = Boolean(activeThreadCwd && normCwd(b.cwd) === activeThreadCwd);
+        if (aIsActive !== bIsActive) return aIsActive ? -1 : 1;
         if (b.pendingCount !== a.pendingCount) return b.pendingCount - a.pendingCount;
         if (b.liveCount !== a.liveCount) return b.liveCount - a.liveCount;
         if (Boolean(b.pinned) !== Boolean(a.pinned)) return b.pinned ? -1 : 1;
         return (b.updatedAt || 0) - (a.updatedAt || 0);
       })
-      .slice(0, 14);
+      .slice(0, 24);
 
     let activeThreadReply = "";
     if (activeThreadId) {
@@ -2285,12 +2344,34 @@ export class VoiceCallService {
     return this.#runSerializedPrompt(entry.sessionId, promptText);
   }
 
+  #buildSpeechTimingLines(speechTiming = null, transcriptText = "") {
+    if (!speechTiming || !(Number(speechTiming.overlapDurationMs) > 0 || speechTiming.duringPlaybackText)) {
+      return [];
+    }
+    const duringText = String(speechTiming.duringPlaybackText || "").trim();
+    const afterText = String(speechTiming.afterPlaybackText || "").trim();
+    const botText = String(speechTiming.overlapBotText || "").trim();
+    const payload = {
+      overlapDurationMs: Number(speechTiming.overlapDurationMs) || 0,
+      ...(botText ? { aiWasSpeakingText: botText } : {}),
+      ...(duringText ? { userSpokeDuringAiPlayback: duringText } : {}),
+      ...(afterText ? { userSpokeAfterAiPlayback: afterText } : {}),
+      fullTranscript: transcriptText,
+    };
+    return [
+      "说明：用户这次语音是从「AI 播报期间的缓冲收听」无缝拼接「播报结束后的继续讲话」得到的完整识别结果。",
+      "请把播报期间和播报之后的两段话连贯起来理解用户完整意图；如果 `userSpokeDuringAiPlayback` 内容与 `aiWasSpeakingText` 高度重合且明显只是外放回声，则忽略回声部分，仅响应用户的真实提问或指令。",
+      `<SPEECH_TIMING_CONTEXT>${JSON.stringify(payload)}</SPEECH_TIMING_CONTEXT>`,
+    ];
+  }
+
   #buildThreadScopedCoordinatorPrompt({
     snapshot,
     transcriptText = "",
     mode = "turn",
     unheardUtterances = [],
     lastUtterance = null,
+    speechTiming = null,
   }) {
     const contextPayload = {
       thread: snapshot.currentThread || null,
@@ -2301,7 +2382,7 @@ export class VoiceCallService {
     const lines = [
       `${VOICE_CALL_TAG} 你是【当前对话专属】极速语音副驾。只围绕下方这一个当前会话服务，以最快速度回答或把任务交给当前会话。`,
       "决策规则（三选一，绝不调用工具）：",
-      "1. 能直接根据 <CURRENT_THREAD_CONTEXT> 回答的追问、解释、总结、方案讨论、进展询问、闲聊，一律设 action=\"reply\"，由你直接用 1~3 句精炼电话口语回答（最快响应）。",
+      "1. 能直接根据 <CURRENT_THREAD_CONTEXT> 回答的追问、解释、总结、方案讨论、进展询问、闲聊，一律设 action=\"reply\"，由你直接用 1~2 句精炼短口语回答（控制 3~6 秒播完，方便一来一回连续对话）。",
       "2. 需要修改代码、读取未展示文件、运行命令/测试、继续推进具体实现的任务，交给当前会话执行：若当前会话空闲或允许排队设 action=\"send\"（或 \"queue\"）；只有用户明确说“别等了/停下重做/立即改/直接插话”才设 action=\"steer\"。instruction 写清楚整理后的书面任务指令，spokenReply 用 1 句简短口语确认已交给当前对话。",
       "3. 明确同意/拒绝当前会话待确认请求设 action=\"approve\" 且 decision=\"accept\" 或 \"decline\"；明确要求停止当前运行任务设 action=\"interrupt\"；要求重播设 action=\"repeat_last\"；纯背景杂音/乱码设 action=\"no_speech\" 且 spokenReply=\"\"。",
       "4. spokenReply 严禁念出路径、斜杠、代码块、Markdown 符号或长 ID。只输出唯一合法 JSON：",
@@ -2315,6 +2396,7 @@ export class VoiceCallService {
       lines.push("若下方 <UNHEARD> 中有刚才未播完的内容，且对用户依然重要（未被本次新话覆盖），请把核心信息与本次新回复自然融合成一句连贯的口语一起说出，严禁使用“另外补播刚才未听到的提醒”等生硬套话。");
       lines.push(`<UNHEARD>${JSON.stringify(unheardUtterances.map((u) => ({ text: u.text })))}</UNHEARD>`);
     }
+    lines.push(...this.#buildSpeechTimingLines(speechTiming, transcriptText));
     if (mode === "briefing") {
       lines.push("用户点击【播报最新进度】：用 1~2 句口语播报当前对话最新进展或结果，action=\"reply\"。");
     } else if (transcriptText) {
@@ -2329,6 +2411,7 @@ export class VoiceCallService {
     mode = "turn",
     unheardUtterances = [],
     lastUtterance = null,
+    speechTiming = null,
   }) {
     const rules = [
       `${VOICE_CALL_TAG} 你是运行在用户本机 Agent Control 里的实时语音通话副驾。`,
@@ -2339,7 +2422,7 @@ export class VoiceCallService {
       "3. 先判断指令复杂度与归属：（a）简单查询/打开项目/审批/重播/唤醒由你自己直接完成，`executionTier` 设为 `self_simple`；（b）你自己可做但需要较长耗时分析/排查/梳理/总结上下文/对比方案的任务，`intent` 设为 `subagent_hydrogen`、`executionTier` 设为 `subagent_hydrogen`；（c）需要交由其他项目或会话执行的任务，`intent` 设为 `send_turn`（或 `create_thread`）、`executionTier` 设为 `external_thread`（若用户要求直接出结果、给结论、停止等待、别等了、立即发送或别排队，`dispatchMode` 设为 `immediate`，否则设为 `queue`）；若仅停止任务设 `interrupt_thread`；若用户没听清要求再说一遍，设 `intent` 为 `repeat_last`。",
       "询问原因、否认授权、引用别人说的话，均不等于要求执行其中的动作。比如询问为什么停止任务，应只读解释记录，不能再次停止任务。自然问答、闲聊咨询或询问你当前使用的是什么模型/为何没回答时，必须设 intent=summarize_progress、executionTier=self_simple 并直接礼貌回答（严禁当成 no_speech 忽略）；无法确定指代或操作范围时，先口头询问，intent=summarize_progress，不得猜选第一个任务或审批。操作目标必须复制快照中完整的 ID/CWD；新建任务必须指定项目，停止任务必须指定单个会话，审批必须指定 requestId 和明确 decision。",
       "只有明确并非面向你的背景电视声/环境旁白或无意义识别乱码才设 intent=no_speech、spokenReply 留空；只要用户明确在与语音助手对话提问（哪怕只问你是什么模型、在吗、为什么不说话），一律正常回复，不得设为 no_speech。repeat_last 应根据最近播报和未听到的记录重新组织回复。provider/model 只在用户明确要求切换任务执行模型时填写；否则保留已有会话配置。",
-      "4. `spokenReply` 用 1~3 句自然简洁的电话口语回复（像电话里的得力副驾），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
+      "4. `spokenReply` 用 1~2 句简短自然的电话口语回复（像电话里的得力副驾，尽量控制在 3~6 秒内播完，方便一来一回对话），绝不念出文件路径、斜杠、代码块、长 ID 或 Markdown 符号；若 `executionTier` 为 `external_thread`，告知已交付给对应会话处理即可，不要念出未完成或冗余长文。",
       "5. 最终回复必须且只能输出一个合法 JSON 对象，格式如下：",
       '{"heardText":"听到的用户原话","intent":"no_speech|wake_ping|summarize_progress|open_thread|open_project|subagent_hydrogen|send_turn|create_thread|approve_request|interrupt_thread|repeat_last","executionTier":"self_simple|subagent_hydrogen|external_thread","targetProjectCwd":"","targetThreadId":"","provider":"","model":"","dispatchMode":"immediate|queue","instruction":"","requestId":"","decision":"accept|decline|","spokenReply":"用于电话朗读的简短自然中文回复"}',
       "",
@@ -2360,8 +2443,10 @@ export class VoiceCallService {
       rules.push("</UNHEARD_PREVIOUS_REPLIES>");
     }
 
+    rules.push(...this.#buildSpeechTimingLines(speechTiming, transcriptText));
+
     if (mode === "briefing") {
-      rules.push("用户点击了【播报最新进度】：请用 2~3 句电话口语总结当前最需要关注的待确认请求、运行中任务与最新进展，heardText 填 \"播报当前任务进度\"，intent 填 \"summarize_progress\"。");
+      rules.push("用户点击了【播报最新进度】：请用 1~2 句电话口语总结当前最需要关注的待确认请求、运行中任务与最新进展，heardText 填 \"播报当前任务进度\"，intent 填 \"summarize_progress\"。");
     } else if (transcriptText) {
       rules.push(`用户补充输入：${transcriptText}`);
     }
@@ -3969,6 +4054,7 @@ export class VoiceCallService {
     audioMimeType = "audio/wav",
     language = "zh",
     promptHints = "",
+    overlapMs = 0,
   } = {}) {
     const cleanAudio = String(audioBase64 || "").replace(/^data:[^;]+;base64,/, "").trim();
     if (!cleanAudio) {
@@ -4016,13 +4102,18 @@ export class VoiceCallService {
           id: reqId,
           audioPath,
           language,
+          ...(Number(overlapMs) > 0 ? { overlapMs: Math.round(Number(overlapMs)) } : {}),
           ...(promptHints ? { prompt: promptHints } : {}),
         })}\n`);
       });
       const text = String(result?.text || "").trim();
+      const duringPlaybackText = String(result?.duringPlaybackText || "").trim();
+      const afterPlaybackText = String(result?.afterPlaybackText || "").trim();
       return {
         ok: true,
         text,
+        duringPlaybackText,
+        afterPlaybackText,
         engine: String(result?.engine || "mlx-whisper"),
         durationMs: Number(result?.durationMs) || 0,
         ...(result?.noSpeech || !text
@@ -4051,6 +4142,8 @@ export class VoiceCallService {
     autoExecute = true,
     asyncDispatch = false,
     tts = true,
+    overlapDurationMs = 0,
+    overlapBotText = "",
   } = {}) {
     const cleanCallId = String(callId || "").trim() || `call-${randomUUID().slice(0, 8)}`;
     const callState = this.#ensureCallState(cleanCallId);
@@ -4083,7 +4176,17 @@ export class VoiceCallService {
       audioMetrics = null,
       pendingCount = 0,
       liveProjectCount = 0,
-    } = {}) => ({
+    } = {}) => {
+      this.#appendVoiceDiagLog({
+        type: "turn_filtered",
+        callId: cleanCallId,
+        callScope: effectiveScope,
+        silenceReason,
+        localAudioFiltered,
+        ignoredText: String(ignoredText || "").slice(0, 80),
+        ...(audioMetrics ? { audioMetrics } : {}),
+      });
+      return {
       ok: true,
       noSpeech: true,
       localAudioFiltered,
@@ -4122,7 +4225,8 @@ export class VoiceCallService {
         pendingCount,
         liveProjectCount,
       },
-    });
+    };
+    };
 
     if (mode !== "briefing") {
       if (!cleanAudio && !cleanTranscript) {
@@ -4176,20 +4280,29 @@ export class VoiceCallService {
 
     let heard = cleanTranscript;
     let engineLabel = "";
+    const overlapMs = Math.max(0, Math.round(Number(overlapDurationMs) || 0));
+    const cleanOverlapBotText = String(overlapBotText || "").trim();
     const snapshotPromise = effectiveScope === "thread"
       ? this.buildThreadScopedSnapshot({ activeThreadId: effectiveThreadId, callId: cleanCallId })
       : this.buildLiveSnapshot({ activeThreadId: effectiveThreadId, callId: cleanCallId });
+    const asrStartedAt = Date.now();
     const asrPromise = (cleanAudio && !heard && (!isMockAgy || hasExplicitAsrBin))
       ? this.transcribeAudio({
         audioBase64: cleanAudio,
         audioMimeType,
+        overlapMs,
         promptHints: effectiveScope === "thread" && effectiveThreadId ? "围绕当前代码仓库与会话上下文的技术对话。" : "",
       })
       : Promise.resolve(null);
 
     const [snapshot, asr] = await Promise.all([snapshotPromise, asrPromise]);
+    const asrMs = asr ? Math.max(0, Date.now() - asrStartedAt) : 0;
+    let duringPlaybackText = "";
+    let afterPlaybackText = "";
     if (asr) {
       heard = String(asr.text || "").trim();
+      duringPlaybackText = String(asr.duringPlaybackText || "").trim();
+      afterPlaybackText = String(asr.afterPlaybackText || "").trim();
       engineLabel = asr.engine || "";
       if (!heard && mode !== "briefing") return buildLocalNoSpeechPayload({
         silenceReason: asr.silenceReason || "empty_transcript", model: engineLabel,
@@ -4197,6 +4310,14 @@ export class VoiceCallService {
         liveProjectCount: snapshot.projects.filter((p) => p.liveCount > 0).length,
       });
     }
+    const speechTiming = (overlapMs > 0 || duringPlaybackText)
+      ? {
+          overlapDurationMs: overlapMs,
+          overlapBotText: cleanOverlapBotText,
+          duringPlaybackText: duringPlaybackText || (overlapMs > 0 ? heard : ""),
+          afterPlaybackText,
+        }
+      : null;
 
     const isThreadScoped = effectiveScope === "thread" && snapshot.callScope === "thread" && Boolean(snapshot.activeThreadId);
     const shortcutPlan = (isThreadScoped && mode !== "briefing")
@@ -4205,9 +4326,11 @@ export class VoiceCallService {
 
     let plan;
     let model = "local-shortcut";
+    let llmMs = 0;
     if (shortcutPlan) {
       plan = shortcutPlan;
     } else {
+      const llmStartedAt = Date.now();
       const target = await this.resolveVoiceTarget({ callId: cleanCallId });
       callState.resolvedTarget = target;
       const promptText = isThreadScoped
@@ -4217,6 +4340,7 @@ export class VoiceCallService {
           mode,
           unheardUtterances,
           lastUtterance,
+          speechTiming,
         })
         : this.#buildCoordinatorPrompt({
           snapshot,
@@ -4224,15 +4348,35 @@ export class VoiceCallService {
           mode,
           unheardUtterances,
           lastUtterance,
+          speechTiming,
         });
-      const rawResponse = await this.#runVoiceCoordinator({ callId: cleanCallId, target, promptText });
-      plan = isThreadScoped
-        ? parseThreadScopedCoordinatorJson(rawResponse, heard, {
-          activeThreadId: snapshot.activeThreadId,
-          activeProjectCwd: snapshot.activeProjectCwd,
-          defaultRequestId: snapshot.pendingRequests?.[0]?.requestId || "",
-        })
-        : parseCoordinatorJson(rawResponse, heard);
+      let rawResponse = "";
+      try {
+        rawResponse = await this.#runVoiceCoordinator({ callId: cleanCallId, target, promptText });
+        plan = isThreadScoped
+          ? parseThreadScopedCoordinatorJson(rawResponse, heard, {
+            activeThreadId: snapshot.activeThreadId,
+            activeProjectCwd: snapshot.activeProjectCwd,
+            defaultRequestId: snapshot.pendingRequests?.[0]?.requestId || "",
+          })
+          : parseCoordinatorJson(rawResponse, heard);
+        llmMs = Math.max(0, Date.now() - llmStartedAt);
+      } catch (err) {
+        llmMs = Math.max(0, Date.now() - llmStartedAt);
+        this.#appendVoiceDiagLog({
+          type: "turn_error",
+          callId: cleanCallId,
+          callScope: effectiveScope,
+          heardText: heard.slice(0, 120),
+          asrEngine: engineLabel,
+          asrMs,
+          llmMs,
+          model: target.model,
+          error: err?.message || "语音协调失败",
+          rawSnippet: String(rawResponse || "").slice(0, 280),
+        });
+        throw err;
+      }
       model = target.model;
     }
     const usedFallback = false;
@@ -4334,6 +4478,7 @@ export class VoiceCallService {
     const utterancePriority = (plan.intent === "approve_request" || (snapshot.pendingRequests?.length > 0 && plan.intent === "summarize_progress"))
       ? "critical"
       : "normal";
+    const ttsStartedAt = Date.now();
     const speechResult = tts
       ? await this.synthesizeSpeech({
           text: plan.spokenReply,
@@ -4351,6 +4496,7 @@ export class VoiceCallService {
           utteranceId,
           expectedMs: estimateSpeechDurationMs(plan.spokenReply),
         };
+    const ttsMs = tts ? Math.max(0, Date.now() - ttsStartedAt) : 0;
 
     const uttRecord = this.registerUtterance({
       callId: cleanCallId,
@@ -4370,6 +4516,27 @@ export class VoiceCallService {
         utteranceId: uttRecord.utteranceId,
       });
     }
+
+    this.#appendVoiceDiagLog({
+      type: "turn_result",
+      callId: cleanCallId,
+      utteranceId: uttRecord.utteranceId,
+      callScope: effectiveScope,
+      heardText: String(plan.heardText || "").slice(0, 120),
+      intent: plan.intent,
+      model,
+      asrEngine: cleanAudio ? engineLabel : "",
+      asrMs,
+      llmMs,
+      ttsMs,
+      ttsProvider: speechResult.provider,
+      ttsBytes: speechResult.audioBase64 ? Buffer.byteLength(speechResult.audioBase64, "base64") : 0,
+      spokenReplyLen: String(plan.spokenReply || "").length,
+      ...(overlapMs > 0 ? { overlapDurationMs: overlapMs } : {}),
+      ...(duringPlaybackText ? { duringPlaybackText: duringPlaybackText.slice(0, 80) } : {}),
+      ...(afterPlaybackText ? { afterPlaybackText: afterPlaybackText.slice(0, 80) } : {}),
+      dispatchPending: Boolean(pendingDispatchStart),
+    });
 
     return {
       ok: true,
@@ -4444,6 +4611,7 @@ export class VoiceCallService {
     this.#resetAsrWorker("语音通话服务已关闭");
     this.#resetEdgeTtsWorker("语音通话服务已关闭");
     this.#resetKokoroWorker("语音通话服务已关闭");
+    await this.#diagLogQueue;
     if (this.#client) {
       await this.#client.close().catch(() => {});
       this.#client = null;

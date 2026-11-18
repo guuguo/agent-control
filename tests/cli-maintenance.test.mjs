@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { prepareCrossPlatformSpawn } from "../src/platform.mjs";
 import { CliMaintenanceManager, hasSignedInProfile } from "../src/providers/cli-maintenance.mjs";
 
 test("hasSignedInProfile checks signedIn or authenticated flags per provider", () => {
@@ -25,8 +26,8 @@ test("CliMaintenanceManager auto-installs missing npm-based CLI when auth exists
       if (binaryName === "codex" && installedCodex) return "C:\\Users\\Admin\\AppData\\Roaming\\npm\\codex.cmd";
       return null;
     },
-    execImpl: async (bin, args) => {
-      calls.push({ bin, args });
+    execImpl: async (bin, args, opts) => {
+      calls.push({ bin, args, opts });
       installedCodex = true;
       return { stdout: "added 1 package", stderr: "" };
     },
@@ -53,7 +54,18 @@ test("CliMaintenanceManager auto-installs missing npm-based CLI when auth exists
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].args.slice(0, 3), ["install", "-g", "@openai/codex"]);
+  assert.equal(calls[0].opts.shell, false);
   assert.equal(calls[1].bin, "powershell.exe");
+
+  const winPrepared = prepareCrossPlatformSpawn(
+    "C:\\Program Files\\nodejs\\npm.cmd",
+    ["install", "-g", "@openai/codex"],
+    {},
+    { platform: "win32", existsSyncImpl: () => false },
+  );
+  assert.equal(winPrepared.options.shell, false);
+  assert.equal(winPrepared.options.windowsVerbatimArguments, true);
+  assert.match(winPrepared.args[3], /^""C:\\Program Files\\nodejs\\npm\.cmd" install -g @openai\/codex"$/);
   assert.deepEqual(updated, [{
     provider: "codex",
     executable: "C:\\Users\\Admin\\AppData\\Roaming\\npm\\codex.cmd",

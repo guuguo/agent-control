@@ -1021,3 +1021,160 @@ test("readLargeThreadPreview skips oversized non-message lines across chunk boun
   assert.equal(third.turns.length, 2);
   assert.equal(third.turns[1].items[1].text, "第二轮完成");
 });
+
+test("managed multi-instance lifecycle supports Cockpit Codex discovery, isolated OAuth login, thread execution, and removal", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-codex-multi-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const homeDir = resolve(root, "home");
+  const dataDir = resolve(root, "data");
+  const defaultCodexHome = resolve(homeDir, ".codex");
+  const cockpitDir = resolve(homeDir, ".antigravity_cockpit");
+  const cockpitExtraCodexHome = resolve(root, "cockpit-extra-codex");
+  await Promise.all([
+    mkdir(defaultCodexHome, { recursive: true }),
+    mkdir(cockpitDir, { recursive: true }),
+    mkdir(cockpitExtraCodexHome, { recursive: true }),
+  ]);
+  await writeFile(
+    resolve(cockpitDir, "codex_instances.json"),
+    JSON.stringify({
+      instances: [
+        { id: "c-extra", name: "Cockpit外置", userDataDir: cockpitExtraCodexHome, launchMode: "app" },
+      ],
+    }),
+    "utf8",
+  );
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    CODEX_BIN: MOCK_CODEX_BIN,
+    AGENT_CONTROL_NO_HOST_OPEN: "1",
+    AGENT_CONTROL_AUTO_INSTALL_CLI: "0",
+  };
+
+  const codexProvider = new CodexProvider({ env, dataDir });
+  const srv = await createAgentControlServer({
+    port: 0,
+    env,
+    dataDir,
+    providers: [codexProvider],
+    disableRelay: true,
+    disableTunnel: true,
+    disableUpdateCheck: true,
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close().catch(() => {});
+  });
+
+  const baseUrl = srv.url;
+  const headers = { "Content-Type": "application/json" };
+
+  // 1. 应能发现 Cockpit codex_instances.json 中登记的外部目录
+  const initialProvidersRes = await fetch(`${baseUrl}/api/providers`);
+  assert.equal(initialProvidersRes.status, 200);
+  const initialProviders = await initialProvidersRes.json();
+  const cockpitExtra = initialProviders.profiles.find(
+    (p) => p.provider === "codex" && p.home === cockpitExtraCodexHome,
+  );
+  assert.ok(cockpitExtra, "should discover Cockpit external codex instance");
+  assert.equal(cockpitExtra.label, "Codex · Cockpit外置");
+
+  // 2. 通过 /api/profile/create 创建托管多开 Codex 实例
+  const createRes = await fetch(`${baseUrl}/api/profile/create`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ provider: "codex", name: "备用工作号" }),
+  });
+  assert.equal(createRes.status, 200);
+  const createJson = await createRes.json();
+  assert.equal(createJson.ok, true);
+  assert.equal(createJson.created.provider, "codex");
+  assert.equal(createJson.created.name, "备用工作号");
+
+  const createdProfile = createJson.profiles.find(
+    (p) => p.provider === "codex" && p.id === createJson.created.id,
+  );
+  assert.ok(createdProfile);
+  assert.equal(createdProfile.managed, true);
+  assert.equal(createdProfile.needsLogin, true);
+
+  // 3. 写入模拟登录邮箱提示后触发 /api/profile/login，验证自动写回隔离 auth.json 并更新账户与健康状态
+  await writeFile(resolve(createdProfile.home, ".mock-auto-login-email"), "alt-codex@example.com\n", "utf8");
+  const loginRes = await fetch(`${baseUrl}/api/profile/login`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: createdProfile.id,
+      mode: "oauth",
+      openOnHost: false,
+    }),
+  });
+  assert.equal(loginRes.status, 200);
+  const loginJson = await loginRes.json();
+  assert.equal(loginJson.ok, true);
+  assert.equal(loginJson.mode, "oauth");
+  assert.match(loginJson.authUrl, /^https:\/\/auth\.openai\.com\/authorize/);
+
+  const pollUntil = async (fn, timeoutMs = 5_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const val = await fn();
+      if (val) return val;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    throw new Error("等待异步条件超时");
+  };
+
+  const updatedProfile = await pollUntil(async () => {
+    const r = await fetch(`${baseUrl}/api/providers`).then((res) => res.json());
+    const found = r.profiles.find((p) => p.provider === "codex" && p.id === createdProfile.id);
+    if (found?.account?.email === "alt-codex@example.com" && found?.needsLogin === false && found?.health?.status === "healthy") {
+      return found;
+    }
+    return null;
+  });
+  assert.equal(updatedProfile.account.email, "alt-codex@example.com");
+  assert.equal(updatedProfile.needsLogin, false);
+
+  // 4. 直接用该独立实例启动新会话并执行
+  const newThreadRes = await fetch(`${baseUrl}/api/thread/new`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: createdProfile.id,
+      cwd: root,
+      text: "多开实例验证执行",
+    }),
+  });
+  assert.equal(newThreadRes.status, 200);
+  const newThreadJson = await newThreadRes.json();
+  assert.equal(newThreadJson.thread.profileId, createdProfile.id);
+
+  await pollUntil(async () => {
+    const detail = await fetch(`${baseUrl}/api/thread?id=${encodeURIComponent(newThreadJson.thread.id)}`).then((r) => r.json());
+    const lastTurn = detail.thread?.turns?.[detail.thread.turns.length - 1];
+    return lastTurn?.status === "completed" ? detail : null;
+  });
+
+  // 5. 拒绝删除 default 实例；支持删除托管多开实例
+  const delDefaultRes = await fetch(`${baseUrl}/api/profile/delete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ provider: "codex", profileId: "default" }),
+  });
+  assert.equal(delDefaultRes.status, 404);
+
+  const delRes = await fetch(`${baseUrl}/api/profile/delete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ provider: "codex", profileId: createdProfile.id }),
+  });
+  assert.equal(delRes.status, 200);
+  const delJson = await delRes.json();
+  assert.equal(delJson.profiles.some((p) => p.provider === "codex" && p.id === createdProfile.id), false);
+});

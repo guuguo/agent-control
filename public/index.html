@@ -3,10 +3,23 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261118bargein" />
+  <meta name="ac-ui-version" content="20261118theme8" />
   <title>Agent Control · 多智能体远程控制台</title>
-  <link rel="stylesheet" href="./app.css?v=20261118bargein" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261118bargein" />
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("ac-theme-mode");
+        var mode = saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+        var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+        var resolved = mode === "system" ? (prefersLight ? "light" : "dark") : mode;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themeMode = mode;
+        document.documentElement.style.colorScheme = resolved;
+      } catch {}
+    })();
+  </script>
+  <link rel="stylesheet" href="./app.css?v=20261118theme8" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261118theme8" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -15,10 +28,17 @@
     <aside id="sidebar" class="sidebar" aria-label="会话列表">
       <div class="sidebar-header">
         <div class="brand-row">
-          <div class="brand-title">
+          <button
+            type="button"
+            id="themeToggleBtn"
+            class="brand-title brand-theme-toggle"
+            title="主题：跟随系统（点击切换日间 / 深色模式，右键恢复跟随系统）"
+            aria-label="切换日间与深色模式"
+          >
             <span class="brand-dot" id="sseStatusDot" title="实时连接状态"></span>
             <strong>Agent Control</strong>
-          </div>
+            <span id="themeToggleIcon" class="brand-theme-icon" data-icon="monitor" data-icon-size="12" aria-hidden="true"></span>
+          </button>
           <span class="host-pill" id="hostBadge">本机</span>
         </div>
         <div class="sidebar-actions">
@@ -286,7 +306,10 @@
         <div class="field field-profile-picker">
           <div class="field-label-row">
             <span>实例配置</span>
-            <button type="button" id="newModalProbeProfilesBtn" class="btn-probe-inline" title="手动测通当前智能体的全部实例"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="11" aria-hidden="true"></span><span>测通</span></button>
+            <div class="field-label-actions">
+              <button type="button" id="newModalAddProfileBtn" class="btn-probe-inline" title="创建或管理独立多开实例"><span class="btn-icon-glyph" data-icon="plus" data-icon-size="11" aria-hidden="true"></span><span>多开实例</span></button>
+              <button type="button" id="newModalProbeProfilesBtn" class="btn-probe-inline" title="手动测通当前智能体的全部实例"><span class="btn-icon-glyph" data-icon="bolt" data-icon-size="11" aria-hidden="true"></span><span>测通</span></button>
+            </div>
           </div>
           <select id="newProfileSelect"></select>
           <div id="newProfilePills" class="profile-pills-strip"></div>
@@ -765,7 +788,43 @@
     </div>
   </dialog>
 
-  <script type="module" src="./i18n.js?v=20261118bargein"></script>
-  <script type="module" src="./app.js?v=20261118bargein"></script>
+  <dialog id="instanceManagerModal" class="modal-dialog" aria-label="多开实例管理">
+    <div class="modal-card instance-manager-modal-card">
+      <div class="modal-head">
+        <h3>多开实例管理</h3>
+        <button type="button" id="closeInstanceManagerBtn" class="icon-btn" data-close-modal="instanceManagerModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
+      </div>
+      <div class="modal-body instance-manager-modal-body">
+        <p class="instance-mgr-intro">每个实例使用独立隔离目录保存登录态；首次登录授权后即可关闭外部窗口，平时由 Agent Control 在后台直接接管控制。</p>
+        <div id="instProviderTabs" class="inst-provider-tabs" role="tablist" aria-label="选择智能体">
+          <button type="button" class="inst-provider-tab is-active" data-inst-provider="codex">Codex</button>
+          <button type="button" class="inst-provider-tab" data-inst-provider="claude">Claude Code</button>
+        </div>
+        <form id="instanceCreateForm" class="tunnel-card instance-create-form">
+          <div class="instance-create-grid">
+            <label class="field">
+              <span>实例名称</span>
+              <input id="instNameInput" type="text" maxlength="40" placeholder="例如：Codex 备用号 / 工作号" required />
+            </label>
+            <label class="field">
+              <span>独立目录（可选）</span>
+              <input id="instCustomHomeInput" type="text" placeholder="留空则自动创建独立隔离目录" />
+            </label>
+          </div>
+          <div class="instance-create-actions">
+            <button type="submit" id="instCreateAndLoginBtn" class="btn-primary btn-sm">创建并去登录</button>
+            <button type="button" id="instCreateOnlyBtn" class="btn-secondary btn-sm">仅创建</button>
+          </div>
+        </form>
+        <div id="instLoginGuide" class="inst-login-guide" hidden></div>
+        <div id="instanceManagerList" class="instance-mgr-list">
+          <div class="empty-state">正在加载实例列表…</div>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./i18n.js?v=20261118theme8"></script>
+  <script type="module" src="./app.js?v=20261118theme8"></script>
 </body>
 </html>
