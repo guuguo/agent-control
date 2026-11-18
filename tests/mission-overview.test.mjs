@@ -721,7 +721,7 @@ test("Adaptive dispatch respects configurable priority, avoids exhausted quotas,
       { id: "gpt-6.2-astra", model: "gpt-6.2-astra" },
     ],
   });
-  assert.equal(heavyCodex.model, "gpt-6.2-astra");
+  assert.equal(heavyCodex.model, "gpt-6.2-sol");
   assert.equal(heavyCodex.effort, "high");
 
   const fastCodex = selectAdaptiveModelForRoute({

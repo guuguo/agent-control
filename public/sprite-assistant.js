@@ -201,7 +201,7 @@ export function buildSpriteOpeningBriefing(overview, threads = []) {
     });
   }
 
-  const text = `厂长好！${parts.join("，")}。${topFocus ? `今日主线建议优先推进「${topFocus.name}」。` : "随时跟我说派工指令！"}`;
+  const text = `${parts.join(" · ")}${topFocus ? ` · 主线优先「${topFocus.name}」` : ""}`;
   const spokenText = `厂长好，当前${parts.join("，")}。`;
 
   return { tone, text, spokenText, chips: chips.slice(0, 3) };
@@ -209,7 +209,7 @@ export function buildSpriteOpeningBriefing(overview, threads = []) {
 
 export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() / 1000)) {
   if (!topic) {
-    return { tone: "idle", text: "已就绪，请告诉我你要在这条产线执行什么操作。", spokenText: "已就绪。", chips: [] };
+    return { tone: "idle", text: "已就绪，请直接下达产线指令。", spokenText: "已就绪。", chips: [] };
   }
   const active = (topic.activeThreads || []).filter((t) => !t.isSlice);
   const older = topic.archivedThreads || [];
@@ -222,14 +222,14 @@ export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() /
   const digest = topic.archiveDigest;
 
   const parts = [`已聚焦「${topic.name}」`];
-  if (liveCount > 0) parts.push(`${liveCount} 个工位运转中`);
-  else parts.push(`${active.length} 个近期工位`);
+  if (liveCount > 0) parts.push(`${liveCount} 工位运转`);
+  else parts.push(`${active.length} 近期工位`);
 
   if (staleCount > 0) {
-    parts.push(`发现 ${staleCount} 条闲置超 3 天的历史对话可归档沉淀`);
+    parts.push(`${staleCount} 条久远对话待归档`);
   }
   if (digest?.summary) {
-    parts.push(`已有归档记忆（累计沉淀 ${digest.totalArchivedDigested || 0} 条，新开分身默认继承）`);
+    parts.push(`已沉淀 ${digest.totalArchivedDigested || 0} 条记忆`);
   }
 
   const chips = [];
@@ -245,7 +245,7 @@ export function buildSpriteTopicBriefing(topic, nowSec = Math.floor(Date.now() /
 
   return {
     tone: staleCount > 0 ? "coin" : "idle",
-    text: `${parts.join("，")}。你可以点下方按钮一键归档提炼摘要，或直接对我说要在「${topic.name}」派什么活。`,
+    text: parts.join(" · "),
     spokenText: `已进入${topic.name}产线管家，${staleCount > 0 ? `有 ${staleCount} 条历史会话可归档提炼摘要。` : "请下达指令。"}`,
     chips: chips.slice(0, 3),
   };
@@ -635,7 +635,18 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
   `;
 }
 
-export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false } = {}) {
+function formatVoiceElapsed(sec = 0) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const m = String(Math.floor(s / 60)).padStart(2, "0");
+  const r = String(s % 60).padStart(2, "0");
+  return `${m}:${r}`;
+}
+
+export function renderSpriteAssistantHtml(spriteState = {}, {
+  is3dMode = false,
+  enteringOpen = false,
+  enteringToast = false,
+} = {}) {
   const {
     open = false,
     ttsEnabled = false,
@@ -650,6 +661,10 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
     scopedTopicName = "",
     busy = false,
     recording = false,
+    handsFree = false,
+    speechActive = false,
+    speaking = false,
+    recordElapsedSec = 0,
     transcribing = false,
     draft = "",
   } = spriteState;
@@ -658,10 +673,51 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
   const effectiveMood = hasPendingCard ? "coin" : mood;
   const badgeCount = unreadCount + (hasPendingCard ? 1 : 0);
 
+  const showVoiceBar = Boolean(recording || handsFree || transcribing || speaking);
+  const voiceBarStateCls = transcribing
+    ? "is-transcribing"
+    : speaking
+      ? "is-speaking"
+      : speechActive
+        ? "is-speech"
+        : recording
+          ? "is-listening"
+          : "is-standby";
+  const voiceStatusLabel = transcribing
+    ? "正在识别语音…"
+    : speaking
+      ? (handsFree ? "正在播报 · 开口自动打断" : "小精灵播报中…")
+      : speechActive
+        ? "正在收听人声…"
+        : handsFree
+          ? "免提收听中 · 直接开口说话"
+          : "正在收听 · 说完自动发送";
+
+  const voiceBarHtml = showVoiceBar ? `
+    <div id="spriteVoiceBar" class="sprite-voice-bar ${voiceBarStateCls}" role="status" aria-live="polite">
+      <div class="sprite-vbar-main">
+        <span class="sprite-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="sprite-vbar-text">${escapeHtml(voiceStatusLabel)}</span>
+        ${(recording && !transcribing && !speaking) ? `<span id="spriteVoiceTimer" class="sprite-vbar-timer">${formatVoiceElapsed(recordElapsedSec)}</span>` : ""}
+      </div>
+      <div class="sprite-vbar-actions">
+        ${speaking ? `
+          <button type="button" class="sprite-vbar-btn" data-sprite-action="stop-speech">打断播报</button>
+        ` : ""}
+        ${handsFree ? `
+          <button type="button" class="sprite-vbar-btn is-hangup" data-sprite-action="open-call">结束免提</button>
+        ` : (recording && !transcribing ? `
+          <button type="button" class="sprite-vbar-btn" data-sprite-action="cancel-mic">取消</button>
+          <button type="button" class="sprite-vbar-btn is-done" data-sprite-action="finish-mic">说完了</button>
+        ` : "")}
+      </div>
+    </div>
+  ` : "";
+
   return `
     <div class="sprite-assistant-wrap ${open ? "is-open" : "is-closed"} ${is3dMode ? "is-3d-host" : "is-2d-host"}">
       ${!open && toastBubble?.text ? `
-        <div class="sprite-toast-bubble is-${escapeHtml(toastBubble.tone || "idle")}" role="status">
+        <div class="sprite-toast-bubble is-${escapeHtml(toastBubble.tone || "idle")}${enteringToast ? " is-entering" : ""}" role="status">
           <button type="button" class="sprite-toast-body" data-sprite-action="open">
             <span class="sprite-toast-text">${escapeHtml(toastBubble.text)}</span>
           </button>
@@ -670,13 +726,13 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
       ` : ""}
 
       ${open ? `
-        <section class="sprite-popover-card" aria-label="面板小精灵助手">
+        <section class="sprite-popover-card${enteringOpen ? " is-entering" : ""}${recording || handsFree ? " is-voice-live" : ""}" aria-label="面板小精灵助手">
           <header class="sprite-pop-head">
             <div class="sprite-pop-brand">
-              ${renderSpriteAvatarSvg({ mood: effectiveMood, size: 26 })}
+              ${renderSpriteAvatarSvg({ mood: effectiveMood, size: 24 })}
               <div class="sprite-pop-titles">
-                <strong>${scopedTopicId ? `产线小精灵 · ${escapeHtml(scopedTopicName || scopedTopicId)}` : "小精灵总管"}</strong>
-                <span>${recording ? "正在倾听指令…" : transcribing ? "语音识别中…" : busy ? "正在处理任务…" : (scopedTopicId ? "归档沉淀 · 继承上下文派工" : "盯盘汇报 · 预览派单")}</span>
+                <strong>${scopedTopicId ? `小精灵 · ${escapeHtml(scopedTopicName || scopedTopicId)}` : "小精灵总管"}</strong>
+                ${busy ? `<span>正在处理…</span>` : ""}
               </div>
             </div>
             <div class="sprite-pop-tools">
@@ -693,7 +749,13 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
               <button type="button" class="sprite-icon-btn" data-sprite-action="briefing" title="立即汇报当前进展">
                 ${iconSvg("refresh", { size: 13 })}
               </button>
-              <button type="button" class="sprite-icon-btn" data-sprite-action="open-call" title="切换到持续长语音通话">
+              <button
+                type="button"
+                class="sprite-icon-btn ${handsFree ? "is-active is-handsfree" : ""}"
+                data-sprite-action="open-call"
+                aria-pressed="${handsFree ? "true" : "false"}"
+                title="${handsFree ? "免提连续对话中（点击结束免提）" : "开启免提连续语音对话（自动收听 · 播报 · 开口打断）"}"
+              >
                 ${iconSvg("radio", { size: 13 })}
               </button>
               <button type="button" class="sprite-icon-btn" data-sprite-action="close" title="收起小精灵">
@@ -712,7 +774,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
               </div>
             `).join("") : `
               <div class="sprite-msg is-sprite">
-                <div class="sprite-msg-text">嗨！我是你的面板小精灵。可以随时让我汇报进展、归档久远对话生成产线记忆摘要，或语音/文字预览派单。</div>
+                <div class="sprite-msg-text">随时让我汇报进展、归档沉淀记忆，或点击下方麦克风直接语音对话。</div>
               </div>
             `}
           </div>
@@ -733,23 +795,25 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
             `}
           </div>
 
+          ${voiceBarHtml}
+
           <form id="spriteCommandForm" class="sprite-input-row">
             <button
               type="button"
-              class="sprite-mic-btn ${recording ? "is-recording" : ""} ${transcribing ? "is-transcribing" : ""}"
+              class="sprite-mic-btn ${recording ? "is-recording" : ""} ${speechActive ? "is-speech" : ""} ${handsFree ? "is-handsfree" : ""} ${transcribing ? "is-transcribing" : ""}"
               data-sprite-action="mic"
-              title="${recording ? "点击结束录音并识别" : "点击开始语音指令"}"
+              title="${handsFree ? "免提连续收听中（点击立即提交当前语音或结束免提）" : recording ? "正在收听（说完停顿自动发送，或点击立即识别）" : "点击开始语音对话"}"
               ${transcribing || busy ? "disabled" : ""}
-            >${iconSvg(recording ? "stop" : transcribing ? "clock" : "mic", { size: 14 })}</button>
+            >${iconSvg(transcribing ? "clock" : "mic", { size: 14 })}</button>
             <input
               id="spriteCommandInput"
               type="text"
               class="sprite-cmd-input"
               value="${escapeHtml(draft)}"
-              placeholder="${hasPendingCard ? "说「确认」执行，或输入新指令…" : (scopedTopicId ? `在「${scopedTopicName || scopedTopicId}」派工或说「归档历史对话」…` : "语音或输入派工 / 归档指令…")}"
+              placeholder="${recording ? "正在收听语音，也可随时打字发送…" : hasPendingCard ? "说「确认」执行，或输入新指令…" : (scopedTopicId ? `在「${scopedTopicName || scopedTopicId}」派工或说「归档历史对话」…` : "语音或输入派工 / 归档指令…")}"
               ${busy ? "disabled" : ""}
             />
-            <button type="submit" class="btn-primary btn-xs sprite-send-btn" ${busy || recording || transcribing ? "disabled" : ""}>
+            <button type="submit" class="btn-primary btn-xs sprite-send-btn" ${busy || transcribing ? "disabled" : ""}>
               ${iconSvg("send", { size: 12 })}
             </button>
           </form>
@@ -758,13 +822,13 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
 
       <button
         type="button"
-        class="sprite-avatar-trigger is-${escapeHtml(effectiveMood)} ${recording ? "is-recording" : ""}"
+        class="sprite-avatar-trigger is-${escapeHtml(effectiveMood)} ${recording || handsFree ? "is-recording" : ""}"
         data-sprite-action="toggle"
-        title="召唤面板小精灵助手（汇报进展 / 归档总结 / 自动派单）"
+        title="召唤面板小精灵助手（汇报进展 / 归档总结 / 语音派单）"
         aria-expanded="${open ? "true" : "false"}"
       >
         ${renderSpriteAvatarSvg({ mood: effectiveMood, size: 34 })}
-        <span class="sprite-trigger-label">${scopedTopicId ? escapeHtml((scopedTopicName || "小精灵").slice(0, 6)) : "小精灵"}</span>
+        <span class="sprite-trigger-label">${handsFree ? "免提收听中" : recording ? "收听中…" : (scopedTopicId ? escapeHtml((scopedTopicName || "小精灵").slice(0, 6)) : "小精灵")}</span>
         ${badgeCount > 0 && !open ? `<span class="sprite-unread-badge">${badgeCount > 9 ? "9+" : badgeCount}</span>` : ""}
       </button>
     </div>

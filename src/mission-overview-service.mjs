@@ -393,7 +393,7 @@ export const TASK_DIFFICULTY_LABELS = Object.freeze({
 
 const MODEL_TIERS_BY_PROVIDER = Object.freeze({
   codex: {
-    heavy: { models: ["gpt-6.2-astra", "gpt-6-astra", "gpt-5.4", "gpt-6.2-sol"], effort: "high" },
+    heavy: { models: ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-5.4"], effort: "high" },
     balanced: { models: ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-5.4"], effort: "medium" },
     fast: { models: ["gpt-6.2-sol", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-luna"], effort: "low" },
   },

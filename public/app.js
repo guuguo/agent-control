@@ -93,7 +93,7 @@ import {
   renderSidebarThreadListHtml,
   resolveProjectGroupCollapsed,
 } from "./project-board.js?v=20261118views";
-import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261118ctx";
+import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261119preserve";
 import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261118ctx";
 import {
   buildSpriteOpeningBriefing,
@@ -105,7 +105,12 @@ import {
   loadSpritePrefs,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261118reorg";
+} from "./sprite-assistant.js?v=20261119spritevoice";
+import {
+  captureSubtreeUiState,
+  replaceHtmlPreservingUiState,
+  restoreSubtreeUiState,
+} from "./dom-preserve.js?v=20261119preserve";
 import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117qoder";
 import {
   applySlashCommandSelection,
@@ -550,7 +555,14 @@ const state = {
   immersiveOverview: false,
   tycoonSelectedTopicId: "",
   tycoonInspectorMode: "",
-  tycoonQuestCollapsed: false,
+  tycoonQuestCollapsed: (() => {
+    try {
+      return localStorage.getItem("ac-tycoon-quest-collapsed") !== "0";
+    } catch {
+      return true;
+    }
+  })(),
+  tycoonDispatchConfigOpen: false,
   tycoonMobileDockOpen: false,
   overviewShowChilled: false,
   dispatchDraft: "",
@@ -579,6 +591,11 @@ const state = {
     scopedTopicName: "",
     busy: false,
     recording: false,
+    handsFree: false,
+    speechActive: false,
+    speaking: false,
+    recordElapsedSec: 0,
+    prevTtsPref: null,
     transcribing: false,
     draft: "",
     greetedSession: false,
@@ -588,6 +605,11 @@ const state = {
       micStream: null,
       source: null,
       processor: null,
+      vad: null,
+      tickTimer: null,
+      startedAtMs: 0,
+      lastLevelUiAt: 0,
+      bargeInFrames: 0,
       chunks: [],
       maxTimer: null,
     },
@@ -917,8 +939,8 @@ function setProviderFilter(nextFilter = "all") {
 }
 
 function renderProviderTabs() {
-  $("providerTabs").innerHTML = renderProviderTabsHtml(state.hiddenProviderTabs, state.providerFilter);
-  $("providerTabsSettingsMenu").innerHTML = renderProviderTabsSettingsHtml(state.hiddenProviderTabs);
+  replaceHtmlPreservingUiState($("providerTabs"), renderProviderTabsHtml(state.hiddenProviderTabs, state.providerFilter));
+  replaceHtmlPreservingUiState($("providerTabsSettingsMenu"), renderProviderTabsSettingsHtml(state.hiddenProviderTabs));
 }
 
 function defaultProfileForProvider(provider) {
@@ -1557,10 +1579,7 @@ function renderAgentTelemetryBar() {
   });
 
   if (desktopSlot) {
-    if (desktopSlot._acLastHtml !== compactSlotHtml) {
-      desktopSlot._acLastHtml = compactSlotHtml;
-      desktopSlot.innerHTML = compactSlotHtml;
-    }
+    replaceHtmlPreservingUiState(desktopSlot, compactSlotHtml);
     desktopSlot.hidden = !compactSlotHtml;
     desktopSlot.classList.toggle("is-popover-open", isDetailOpen);
   }
@@ -1573,7 +1592,7 @@ function renderAgentTelemetryBar() {
 
   if (telemetryClosing) return;
 
-  let html = isDetailOpen
+  const liveHtml = isDetailOpen
     ? renderAgentTelemetryBarHtml(state.profiles, merged, {
         providerFilter: state.providerFilter,
         expanded: state.telemetryExpanded,
@@ -1584,19 +1603,37 @@ function renderAgentTelemetryBar() {
         activeProfileId,
       })
     : compactSlotHtml;
-  if (isDetailOpen) html += renderExecutionStatsHtml(state.executionStats, {
-    days: state.executionStatsDays, provider: state.executionStatsProvider,
-    loading: state.executionStatsLoading, error: state.executionStatsError,
-  });
+  const statsHtml = isDetailOpen
+    ? renderExecutionStatsHtml(state.executionStats, {
+        days: state.executionStatsDays,
+        provider: state.executionStatsProvider,
+        loading: state.executionStatsLoading,
+        error: state.executionStatsError,
+      })
+    : "";
 
   if (!el) return;
-  if (el._acLastHtml !== html) {
-    el._acLastHtml = html;
-    el.innerHTML = html;
+  const hasAny = Boolean(liveHtml || statsHtml);
+  if (!hasAny) {
+    el._acLastHtml = "";
+    el.innerHTML = "";
+  } else if (isDetailOpen) {
+    let liveSec = el.querySelector(":scope > .telemetry-live-section");
+    let statsSec = el.querySelector(":scope > .telemetry-stats-section");
+    if (!liveSec || !statsSec) {
+      el._acLastHtml = "__split__";
+      el.innerHTML = `<div class="telemetry-live-section"></div><div class="telemetry-stats-section"></div>`;
+      liveSec = el.querySelector(":scope > .telemetry-live-section");
+      statsSec = el.querySelector(":scope > .telemetry-stats-section");
+    }
+    replaceHtmlPreservingUiState(liveSec, liveHtml);
+    replaceHtmlPreservingUiState(statsSec, statsHtml);
+  } else {
+    replaceHtmlPreservingUiState(el, liveHtml);
   }
-  el.hidden = !html;
-  el.classList.toggle("is-expanded", Boolean(html && isDetailOpen));
-  el.classList.toggle("is-mobile-open", Boolean(html && (state.mobileTelemetryOpen || isDetailOpen)));
+  el.hidden = !hasAny;
+  el.classList.toggle("is-expanded", Boolean(hasAny && isDetailOpen));
+  el.classList.toggle("is-mobile-open", Boolean(hasAny && (state.mobileTelemetryOpen || isDetailOpen)));
   if (isDetailOpen) syncTelemetryPopoverAnchor(el, getTelemetryHeroAnchorEl());
 }
 
@@ -2532,10 +2569,7 @@ function renderThreadList() {
     allowOpenProjectWindow: !state.scopedProjectCwd,
   });
   syncScopedDocumentTitle();
-  if (listEl._acLastHtml !== sidebarHtml) {
-    listEl._acLastHtml = sidebarHtml;
-    listEl.innerHTML = sidebarHtml;
-  }
+  replaceHtmlPreservingUiState(listEl, sidebarHtml);
 
   // Populate recent CWDs datalist for modal.
   const cwds = groups.map((g) => g.cwd).filter(Boolean).slice(0, 24);
@@ -2626,6 +2660,7 @@ function ensureTycoon3DMounted(boardEl) {
   if (!viewportEl || !hudEl || !boardEl.contains(viewportEl)) {
     tycoon3dInstance?.dispose?.();
     tycoon3dInstance = null;
+    boardEl._acLastHtml = "";
     boardEl.innerHTML = `
       <div id="tycoon3dViewport" class="tycoon3d-viewport"></div>
       <div id="tycoonHudLayer" class="tycoon-hud-layer"></div>
@@ -2664,6 +2699,16 @@ function ensureTycoon3DMounted(boardEl) {
   return { viewportEl, hudEl };
 }
 
+function ensureOverview2DMounted(boardEl) {
+  let deckMountEl = $("moDeckMount");
+  if (!deckMountEl || !boardEl.contains(deckMountEl)) {
+    boardEl._acLastHtml = "";
+    boardEl.innerHTML = `<div id="moDeckMount" class="mo-deck-mount"></div>`;
+    deckMountEl = $("moDeckMount");
+  }
+  return { deckMountEl };
+}
+
 function renderProjectBoard() {
   const boardEl = $("projectBoard");
   if (!boardEl) return;
@@ -2672,6 +2717,7 @@ function renderProjectBoard() {
   if (!shouldShowBoard) {
     tycoon3dInstance?.pause?.();
     boardEl.hidden = true;
+    renderSpriteAssistantMount();
     renderBatchActionBars();
     return;
   }
@@ -2699,7 +2745,7 @@ function renderProjectBoard() {
       domainFilter: state.overviewDomainFilter,
     });
     if (hudEl) {
-      hudEl.innerHTML = renderTycoonHudHtml(state.missionOverview, {
+      const nextHudHtml = renderTycoonHudHtml(state.missionOverview, {
         activeThreadId: state.activeThreadId,
         searchText: state.searchText,
         loading: state.missionOverviewLoading,
@@ -2716,6 +2762,7 @@ function renderProjectBoard() {
         selectedTopicId: state.tycoonSelectedTopicId,
         inspectorMode: state.tycoonInspectorMode,
         questCollapsed: state.tycoonQuestCollapsed,
+        dispatchConfigOpen: state.tycoonDispatchConfigOpen,
         mobileDockOpen: state.tycoonMobileDockOpen,
         showChilledSparks: state.overviewShowChilled,
         dispatchDraft: state.dispatchDraft,
@@ -2727,6 +2774,7 @@ function renderProjectBoard() {
         lastDispatchReceipt: state.lastDispatchReceipt,
         dispatchAgent: buildDispatchAgentContext(),
       });
+      replaceHtmlPreservingUiState(hudEl, nextHudHtml);
     }
     if (savedSparkVal && $("moSparkInput")) {
       $("moSparkInput").value = savedSparkVal;
@@ -2741,7 +2789,9 @@ function renderProjectBoard() {
     if (!state.missionOverview && !state.missionOverviewLoading) {
       void loadMissionOverview({ trigger: "open" });
     }
-    boardEl.innerHTML = renderMissionOverviewHtml(state.missionOverview, {
+    const boardSnap = captureSubtreeUiState(boardEl);
+    const { deckMountEl } = ensureOverview2DMounted(boardEl);
+    const nextOverviewHtml = renderMissionOverviewHtml(state.missionOverview, {
       activeThreadId: state.activeThreadId,
       searchText: state.searchText,
       loading: state.missionOverviewLoading,
@@ -2765,6 +2815,8 @@ function renderProjectBoard() {
       lastDispatchReceipt: state.lastDispatchReceipt,
       dispatchAgent: buildDispatchAgentContext(),
     });
+    replaceHtmlPreservingUiState(deckMountEl, nextOverviewHtml);
+    if (boardSnap?.rootTop > 0) boardEl.scrollTop = boardSnap.rootTop;
     if (savedSparkVal && $("moSparkInput")) {
       $("moSparkInput").value = savedSparkVal;
     }
@@ -2775,7 +2827,7 @@ function renderProjectBoard() {
       tycoon3dInstance.dispose();
       tycoon3dInstance = null;
     }
-    boardEl.innerHTML = renderProjectBoardHtml({
+    const nextBoardHtml = renderProjectBoardHtml({
       groups,
       allGroups,
       pendingRequests: state.pendingRequests,
@@ -2788,6 +2840,7 @@ function renderProjectBoard() {
       profiles: state.profiles,
       allowOpenProjectWindow: !state.scopedProjectCwd,
     });
+    replaceHtmlPreservingUiState(boardEl, nextBoardHtml);
   }
 
   if (activeInputId) {
@@ -3372,17 +3425,19 @@ function patchNodeWithSameClassOrTag(existingNode, nextNode) {
     if (prevSummary && nextSummary) {
       const nextSumRaw = nextSummary.outerHTML;
       if (prevSummary._acRawHtml !== nextSumRaw) {
-        const wasOpen = prevSummary.open;
+        const uiSnap = captureSubtreeUiState(prevSummary);
         nextSummary._acRawHtml = nextSumRaw;
         hydrateRevealedDeferredImages(nextSummary);
         prevSummary.replaceWith(nextSummary);
-        if (wasOpen) nextSummary.open = true;
+        restoreSubtreeUiState(nextSummary, uiSnap, { restoreFocus: false });
       }
       if (prevFeed && nextFeed) {
         const nextFeedRaw = nextFeed.outerHTML;
         if (prevFeed._acRawHtml !== nextFeedRaw) {
+          const feedSnap = captureSubtreeUiState(prevFeed);
           nextFeed._acRawHtml = nextFeedRaw;
           prevFeed.replaceWith(nextFeed);
+          restoreSubtreeUiState(nextFeed, feedSnap, { restoreFocus: false });
         }
       } else if (!prevFeed && nextFeed) {
         nextFeed._acRawHtml = nextFeed.outerHTML;
@@ -3394,9 +3449,11 @@ function patchNodeWithSameClassOrTag(existingNode, nextNode) {
       return true;
     }
   }
+  const nodeSnap = captureSubtreeUiState(existingNode);
   nextNode._acRawHtml = rawNext;
   hydrateRevealedDeferredImages(nextNode);
   existingNode.replaceWith(nextNode);
+  restoreSubtreeUiState(nextNode, nodeSnap, { restoreFocus: false });
   return true;
 }
 
@@ -3693,9 +3750,7 @@ function renderStreamingTurn({ preserveAnchor = true } = {}) {
     `);
   }
   const streamHtml = parts.join("");
-  if (el._acLastHtml !== streamHtml) {
-    el._acLastHtml = streamHtml;
-    el.innerHTML = streamHtml;
+  if (replaceHtmlPreservingUiState(el, streamHtml, { restoreFocus: false })) {
     hydrateRevealedDeferredImages(el);
   }
   if (state.autoFollow) {
@@ -7478,6 +7533,8 @@ async function submitSmartDispatch({ confirmOnly = false } = {}) {
 }
 
 function stopSpriteSpeech() {
+  const wasSpeaking = Boolean(state.sprite.speaking);
+  state.sprite.speaking = false;
   if (state.sprite.audioEl) {
     try {
       state.sprite.audioEl.pause();
@@ -7486,24 +7543,40 @@ function stopSpriteSpeech() {
     state.sprite.audioEl = null;
   }
   try {
-    if (typeof speechSynthesis !== "undefined" && !state.voice.callActive) {
+    if (typeof speechSynthesis !== "undefined") {
       speechSynthesis.cancel();
     }
   } catch {}
+  if (wasSpeaking) {
+    renderSpriteAssistantMount();
+  }
 }
 
 async function speakSpriteText(text = "") {
-  if (!state.sprite.ttsEnabled || state.voice.callActive) return;
+  if (!state.sprite.ttsEnabled) return;
   const clean = stripMarkdownForSpeech(text, 220);
   if (!clean) return;
   stopSpriteSpeech();
+  state.sprite.speaking = true;
+  renderSpriteAssistantMount();
+  const clearSpeaking = () => {
+    if (state.sprite.speaking) {
+      state.sprite.speaking = false;
+      renderSpriteAssistantMount();
+    }
+  };
   const tts = await fetchVoiceTtsAudio({ text: clean });
-  if (!state.sprite.ttsEnabled || state.voice.callActive) return;
+  if (!state.sprite.ttsEnabled || !state.sprite.speaking) {
+    clearSpeaking();
+    return;
+  }
   if (tts?.audioBase64 && typeof Audio !== "undefined") {
     try {
       const mime = tts.mimeType || "audio/mp3";
       const audio = new Audio(`data:${mime};base64,${tts.audioBase64}`);
       state.sprite.audioEl = audio;
+      audio.addEventListener("ended", clearSpeaking, { once: true });
+      audio.addEventListener("error", clearSpeaking, { once: true });
       await audio.play();
       return;
     } catch {
@@ -7516,38 +7589,116 @@ async function speakSpriteText(text = "") {
       const v = pickPreferredChineseSpeechVoice(speechSynthesis.getVoices?.() || []);
       if (v) u.voice = v;
       u.lang = "zh-CN";
+      u.onend = clearSpeaking;
+      u.onerror = clearSpeaking;
       speechSynthesis.speak(u);
+      return;
     }
   } catch {}
+  clearSpeaking();
 }
 
 function renderSpriteAssistantMount() {
   const mount = $("spriteAssistantMount");
-  const hasPendingCard = Boolean(state.sprite.pendingPreview || state.sprite.pendingArchive);
+  const hasPendingCard = Boolean(
+    state.sprite.pendingPreview
+    || state.sprite.pendingArchive
+    || state.sprite.pendingReorg,
+  );
   const badgeCount = state.sprite.unreadCount + (hasPendingCard ? 1 : 0);
   const effMood = hasPendingCard ? "coin" : state.sprite.mood;
   tycoon3dInstance?.syncSpriteState?.({ badgeCount: state.sprite.open ? 0 : badgeCount, mood: effMood });
   if (!mount) return;
-  const wasFocused = document.activeElement?.id === "spriteCommandInput";
-  const prevSelStart = wasFocused ? document.activeElement.selectionStart : null;
-  const prevSelEnd = wasFocused ? document.activeElement.selectionEnd : null;
 
-  mount.innerHTML = renderSpriteAssistantHtml(state.sprite, {
-    is3dMode: state.boardViewMode === "tycoon3d",
+  const onBoard = isBoardViewActive();
+  const is3d = Boolean(onBoard && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd);
+  const isChat = !onBoard;
+  const hasInspector = Boolean(
+    is3d
+    && (state.tycoonInspectorMode === "unassigned"
+      || state.tycoonInspectorMode === "incubator"
+      || state.tycoonSelectedTopicId),
+  );
+  const isChatIdle = Boolean(
+    isChat
+    && !state.sprite.open
+    && !state.sprite.recording
+    && !state.sprite.handsFree
+    && !state.sprite.toastBubble?.text,
+  );
+  mount.classList.toggle("is-3d", is3d);
+  mount.classList.toggle("is-2d", onBoard && !is3d);
+  mount.classList.toggle("is-chat", isChat);
+  mount.classList.toggle("is-chat-idle", isChatIdle);
+  mount.classList.toggle("has-inspector", hasInspector);
+
+  const launchBtn = $("voiceModeBtn");
+  if (launchBtn) {
+    const voiceHot = Boolean(state.sprite.open || state.sprite.handsFree || state.sprite.recording);
+    launchBtn.classList.toggle("is-active", voiceHot);
+    launchBtn.setAttribute("aria-pressed", voiceHot ? "true" : "false");
+  }
+
+  // Sync live input draft before re-rendering so typing is never lost on background SSE ticks
+  const liveInput = $("spriteCommandInput");
+  if (liveInput && document.activeElement === liveInput) {
+    state.sprite.draft = liveInput.value;
+  }
+
+  const wasOpen = Boolean(mount._acSpriteWasOpen);
+  const prevToastText = mount._acPrevToastText || "";
+  const curToastText = !state.sprite.open && state.sprite.toastBubble?.text ? String(state.sprite.toastBubble.text) : "";
+  const enteringOpen = Boolean(state.sprite.open && !wasOpen);
+  const enteringToast = Boolean(curToastText && curToastText !== prevToastText);
+
+  mount._acSpriteWasOpen = Boolean(state.sprite.open);
+  mount._acPrevToastText = curToastText;
+
+  const msgs = Array.isArray(state.sprite.messages) ? state.sprite.messages : [];
+  const lastMsgId = msgs.length ? String(msgs[msgs.length - 1]?.id || msgs.length) : "";
+  const isNewMsg = Boolean(lastMsgId && lastMsgId !== mount._acLastMsgId);
+  mount._acLastMsgId = lastMsgId;
+
+  const prevFeedEl = $("spriteFeedList");
+  const feedWasNearBottom = !prevFeedEl
+    || (prevFeedEl.scrollHeight - prevFeedEl.scrollTop - prevFeedEl.clientHeight <= 28);
+  const shouldPinFeedToBottom = enteringOpen || isNewMsg || feedWasNearBottom;
+
+  const stableHtml = renderSpriteAssistantHtml(state.sprite, {
+    is3dMode: is3d,
+    enteringOpen: false,
+    enteringToast: false,
+  });
+  if (!enteringOpen && !enteringToast && mount._acLastStableHtml === stableHtml) {
+    return;
+  }
+  mount._acLastStableHtml = stableHtml;
+
+  const renderHtml = (enteringOpen || enteringToast)
+    ? renderSpriteAssistantHtml(state.sprite, {
+        is3dMode: is3d,
+        enteringOpen,
+        enteringToast,
+      })
+    : stableHtml;
+
+  replaceHtmlPreservingUiState(mount, renderHtml, {
+    skipIds: shouldPinFeedToBottom ? new Set(["spriteFeedList"]) : null,
   });
 
-  const feedEl = $("spriteFeedList");
-  if (feedEl) {
-    feedEl.scrollTop = feedEl.scrollHeight;
-  }
-  if (wasFocused) {
-    const nextInput = $("spriteCommandInput");
-    if (nextInput) {
-      nextInput.focus();
-      if (typeof prevSelStart === "number") {
-        try { nextInput.setSelectionRange(prevSelStart, prevSelEnd ?? prevSelStart); } catch {}
-      }
+  if (shouldPinFeedToBottom) {
+    const feedEl = $("spriteFeedList");
+    if (feedEl) {
+      feedEl.scrollTop = feedEl.scrollHeight;
     }
+  }
+
+  if (enteringOpen || enteringToast) {
+    setTimeout(() => {
+      for (const animEl of mount.querySelectorAll(".is-entering")) {
+        animEl.classList.remove("is-entering");
+      }
+    }, 220);
   }
 }
 
@@ -7803,7 +7954,7 @@ function toggleSpriteAssistant({ open = null } = {}) {
         chips: brief.chips,
       });
     }
-  } else if (state.sprite.recording) {
+  } else if (state.sprite.recording && !state.sprite.handsFree) {
     void stopSpriteMic({ submit: false });
   }
   renderSpriteAssistantMount();
@@ -8101,11 +8252,22 @@ async function handleSpriteCommand(rawInput = "") {
   }
 }
 
+function formatSpriteTimerText(sec = 0) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const m = String(Math.floor(s / 60)).padStart(2, "0");
+  const r = String(s % 60).padStart(2, "0");
+  return `${m}:${r}`;
+}
+
 function teardownSpriteMic() {
   const mic = state.sprite.mic;
   if (mic.maxTimer) {
     clearTimeout(mic.maxTimer);
     mic.maxTimer = null;
+  }
+  if (mic.tickTimer) {
+    clearInterval(mic.tickTimer);
+    mic.tickTimer = null;
   }
   try { mic.processor?.disconnect?.(); } catch {}
   try { mic.source?.disconnect?.(); } catch {}
@@ -8121,62 +8283,112 @@ function teardownSpriteMic() {
   mic.source = null;
   mic.micStream = null;
   mic.audioCtx = null;
+  mic.vad = null;
+  mic.bargeInFrames = 0;
+  state.sprite.speechActive = false;
+  state.sprite.recordElapsedSec = 0;
 }
 
-async function stopSpriteMic({ submit = true } = {}) {
-  if (!state.sprite.recording) return;
-  state.sprite.recording = false;
-  const chunks = state.sprite.mic.chunks;
-  state.sprite.mic.chunks = [];
-  teardownSpriteMic();
-
-  const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-  if (!submit || totalLen < 1600) {
-    renderSpriteAssistantMount();
-    if (submit && totalLen > 0) {
-      pushSpriteMessage({ role: "sprite", tone: "idle", text: "录音太短没听清，再按一下麦克风告诉我吧。" });
-    }
-    return;
-  }
-
-  const merged = new Int16Array(totalLen);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-
+async function transcribeSpritePcmSamples(samples) {
+  if (!samples || samples.length < 1600) return false;
   state.sprite.transcribing = true;
   renderSpriteAssistantMount();
   try {
-    const wavBytes = encodePcm16SamplesToWav(merged, 16000);
+    const wavBytes = encodePcm16SamplesToWav(samples, 16000);
     const res = await apiPostWithHotFallback("api/voice/transcribe", {
       audioBase64: uint8ArrayToBase64(wavBytes),
       audioMimeType: "audio/wav",
     });
     const recognized = String(res?.text || "").trim();
     state.sprite.transcribing = false;
+    renderSpriteAssistantMount();
     if (recognized) {
       await handleSpriteCommand(recognized);
-    } else {
+      return true;
+    }
+    if (!state.sprite.handsFree) {
       pushSpriteMessage({ role: "sprite", tone: "idle", text: "没有识别到清晰人声，可以再说一次或直接打字。" });
     }
+    return false;
   } catch (error) {
     state.sprite.transcribing = false;
-    pushSpriteMessage({ role: "sprite", tone: "urgent", text: `语音识别失败：${formatActionError(error)}` });
+    pushSpriteAssistantErrorOrNotice(`语音识别失败：${formatActionError(error)}`);
+    return false;
   } finally {
     state.sprite.transcribing = false;
     renderSpriteAssistantMount();
   }
 }
 
-async function toggleSpriteMic() {
-  if (state.sprite.transcribing || state.sprite.busy) return;
-  if (state.sprite.recording) {
-    await stopSpriteMic({ submit: true });
+function pushSpriteAssistantErrorOrNotice(msg) {
+  pushSpriteMessage({ role: "sprite", tone: "urgent", text: msg });
+}
+
+async function stopSpriteMic({ submit = true, stopHandsFree = false, explicitSamples = null } = {}) {
+  if (stopHandsFree && state.sprite.handsFree) {
+    state.sprite.handsFree = false;
+    if (typeof state.sprite.prevTtsPref === "boolean") {
+      state.sprite.ttsEnabled = state.sprite.prevTtsPref;
+      state.sprite.prevTtsPref = null;
+    }
+  }
+  const wasRecording = state.sprite.recording;
+  state.sprite.recording = false;
+
+  let merged = explicitSamples;
+  const vadFlushed = state.sprite.mic.vad?.flush?.();
+  const chunks = state.sprite.mic.chunks;
+  state.sprite.mic.chunks = [];
+  teardownSpriteMic();
+
+  if (!wasRecording && !merged) {
+    renderSpriteAssistantMount();
     return;
   }
-  stopSpriteSpeech();
+
+  if (!merged && submit) {
+    if (vadFlushed?.samples?.length >= 1600) {
+      merged = vadFlushed.samples;
+    } else {
+      const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+      if (totalLen >= 1600) {
+        merged = new Int16Array(totalLen);
+        let offset = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+      } else if (totalLen > 0 && !stopHandsFree) {
+        renderSpriteAssistantMount();
+        pushSpriteMessage({ role: "sprite", tone: "idle", text: "录音太短没听清，再按一下麦克风告诉我吧。" });
+        return;
+      }
+    }
+  }
+
+  renderSpriteAssistantMount();
+  if (submit && merged && merged.length >= 1600) {
+    await transcribeSpritePcmSamples(merged);
+  }
+}
+
+async function startSpriteMic({ handsFree = false } = {}) {
+  if (state.sprite.recording) {
+    if (handsFree && !state.sprite.handsFree) {
+      state.sprite.prevTtsPref = state.sprite.ttsEnabled;
+      state.sprite.ttsEnabled = true;
+      state.sprite.handsFree = true;
+      if (state.sprite.mic.maxTimer) {
+        clearTimeout(state.sprite.mic.maxTimer);
+        state.sprite.mic.maxTimer = null;
+      }
+      renderSpriteAssistantMount();
+    }
+    return;
+  }
+  if (!handsFree) {
+    stopSpriteSpeech();
+  }
   if (!navigator.mediaDevices?.getUserMedia) {
     pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前浏览器不支持麦克风权限，请直接输入文字指令。" });
     return;
@@ -8199,12 +8411,87 @@ async function toggleSpriteMic() {
     const silentGain = ctx.createGain();
     silentGain.gain.value = 0;
 
+    const vad = createVadTurnDetector({
+      sampleRate: 16000,
+      silenceMs: handsFree ? 950 : 1100,
+      minSpeechMs: 280,
+      maxSpeechMs: 22000,
+      rmsThreshold: 0.016,
+      adaptive: true,
+      requireSustainedOnset: true,
+    });
+
     state.sprite.mic.chunks = [];
+    state.sprite.mic.vad = vad;
+    state.sprite.mic.startedAtMs = Date.now();
+    state.sprite.mic.lastLevelUiAt = 0;
+    state.sprite.mic.bargeInFrames = 0;
+    state.sprite.recordElapsedSec = 0;
+    state.sprite.speechActive = false;
+
+    if (handsFree && !state.sprite.handsFree) {
+      state.sprite.prevTtsPref = state.sprite.ttsEnabled;
+      state.sprite.ttsEnabled = true;
+      state.sprite.handsFree = true;
+    }
+
     processor.onaudioprocess = (ev) => {
       if (!state.sprite.recording) return;
       const input = ev.inputBuffer?.getChannelData?.(0);
       if (!input?.length) return;
-      state.sprite.mic.chunks.push(downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000));
+      const rms = computeRmsLevel(input);
+      const now = Date.now();
+      if (now - state.sprite.mic.lastLevelUiAt >= 65) {
+        state.sprite.mic.lastLevelUiAt = now;
+        const barEl = $("spriteVoiceBar");
+        if (barEl) {
+          const norm = Math.min(1, Math.max(0.08, rms * 11.5));
+          barEl.style.setProperty("--voice-level", norm.toFixed(2));
+        }
+      }
+
+      // While transcribing or busy in hands-free mode, wait before feeding next turn
+      if (state.sprite.transcribing || state.sprite.busy) return;
+
+      // Echo guard + Barge-in when Sprite TTS is speaking
+      if (state.sprite.speaking) {
+        if (rms >= 0.045) {
+          state.sprite.mic.bargeInFrames += 1;
+          if (state.sprite.mic.bargeInFrames >= 3) {
+            state.sprite.mic.bargeInFrames = 0;
+            stopSpriteSpeech();
+          }
+        } else {
+          state.sprite.mic.bargeInFrames = 0;
+        }
+        return;
+      }
+
+      const pcm16 = downsampleFloat32ToInt16(input, ctx.sampleRate || 48000, 16000);
+      if (!state.sprite.handsFree && state.sprite.mic.chunks.length < 450) {
+        state.sprite.mic.chunks.push(pcm16);
+      }
+
+      const vadEv = vad.pushSamples(pcm16, rms);
+      if (vadEv.type === "speech_start") {
+        if (!state.sprite.speechActive) {
+          state.sprite.speechActive = true;
+          renderSpriteAssistantMount();
+        }
+      } else if (vadEv.type === "utterance" && vadEv.samples?.length >= 1600) {
+        state.sprite.speechActive = false;
+        if (state.sprite.handsFree) {
+          state.sprite.mic.chunks = [];
+          void transcribeSpritePcmSamples(vadEv.samples);
+        } else {
+          void stopSpriteMic({ submit: true, explicitSamples: vadEv.samples });
+        }
+      } else if (vadEv.type === "discarded_short" || vadEv.type === "discarded_noise") {
+        if (state.sprite.speechActive) {
+          state.sprite.speechActive = false;
+          renderSpriteAssistantMount();
+        }
+      }
     };
 
     source.connect(processor);
@@ -8216,15 +8503,65 @@ async function toggleSpriteMic() {
     state.sprite.mic.source = source;
     state.sprite.mic.processor = processor;
     state.sprite.recording = true;
-    state.sprite.mic.maxTimer = setTimeout(() => {
-      void stopSpriteMic({ submit: true });
-    }, 25000);
+
+    state.sprite.mic.tickTimer = setInterval(() => {
+      if (!state.sprite.recording) return;
+      const elapsed = Math.floor((Date.now() - state.sprite.mic.startedAtMs) / 1000);
+      state.sprite.recordElapsedSec = elapsed;
+      const timerEl = $("spriteVoiceTimer");
+      if (timerEl) timerEl.textContent = formatSpriteTimerText(elapsed);
+    }, 1000);
+
+    if (!state.sprite.handsFree) {
+      state.sprite.mic.maxTimer = setTimeout(() => {
+        void stopSpriteMic({ submit: true });
+      }, 25000);
+    }
     renderSpriteAssistantMount();
   } catch (error) {
     teardownSpriteMic();
     state.sprite.recording = false;
+    state.sprite.handsFree = false;
+    renderSpriteAssistantMount();
     pushSpriteMessage({ role: "sprite", tone: "urgent", text: `麦克风启动失败：${error?.message || "请检查权限"}` });
   }
+}
+
+async function toggleSpriteHandsFree() {
+  if (state.sprite.handsFree) {
+    stopSpriteSpeech();
+    await stopSpriteMic({ submit: false, stopHandsFree: true });
+    return;
+  }
+  if (!state.sprite.open) {
+    toggleSpriteAssistant({ open: true });
+  }
+  if (!state.missionOverview && !state.missionOverviewLoading) {
+    void loadMissionOverview({ trigger: "open" });
+  }
+  await startSpriteMic({ handsFree: true });
+}
+
+async function toggleSpriteMic() {
+  if (state.sprite.transcribing || state.sprite.busy) return;
+  if (state.sprite.handsFree) {
+    // In hands-free mode, clicking mic flushes current speech immediately if speaking, else stops hands-free
+    if (state.sprite.speechActive && state.sprite.mic.vad) {
+      const flushed = state.sprite.mic.vad.flush();
+      state.sprite.speechActive = false;
+      if (flushed?.samples?.length >= 1600) {
+        await transcribeSpritePcmSamples(flushed.samples);
+        return;
+      }
+    }
+    await toggleSpriteHandsFree();
+    return;
+  }
+  if (state.sprite.recording) {
+    await stopSpriteMic({ submit: true });
+    return;
+  }
+  await startSpriteMic({ handsFree: false });
 }
 
 function setBoardViewMode(mode) {
@@ -10304,97 +10641,17 @@ async function toggleComposerDictation() {
 async function openVoiceModal() {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
-
-  if (state.voice.callActive) {
-    state.voice.minimized = false;
-    state.voice.callScope = "global";
-    state.voice.scopedThreadId = "";
-    renderVoiceTranscript();
-    renderVoiceLiveProgress();
-    renderVoiceCallUi();
-    const textForm = $("voiceTextForm");
-    if (textForm) textForm.hidden = false;
-    const modal = $("voiceCopilotModal");
-    if (modal && !modal.open) modal.showModal();
-    if (!state.voice.voiceEnabled) $("voiceTextInput")?.focus();
-    if (state.voice.voiceEnabled && state.voice.unheardQueue.some((u) => u.reason === "autoplay_blocked" || u.reason === "muted_output" || u.reason === "fake_short_end")) {
-      void replayUnheardVoiceItems({ onlyBlocked: true });
-    }
-    return;
+  const legacyModal = $("voiceCopilotModal");
+  if (legacyModal?.open) {
+    try { legacyModal.close(); } catch {}
   }
-
-  state.voice.callId = `call-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  state.voice.callScope = "global";
-  state.voice.scopedThreadId = "";
-  state.voice.callActive = true;
-  state.voice.voiceEnabled = false;
-  state.voice.isMuted = true;
-  state.voice.minimized = false;
-  state.voice.callStartedAt = Date.now();
-  state.voice.lastUserActivityAt = Date.now();
-  state.voice.backendMissing = false;
-  state.voice.isProcessing = false;
-  state.voice.isSpeaking = false;
-  state.voice.isRecording = false;
-  state.voice.pendingVoiceTurns = [];
-  state.voice.broadcastQueue = [];
-  state.voice.unheardQueue = [];
-  state.voice.currentBotText = "";
-  resetVoiceOverlapBuffer();
-  state.voice.remindedRequestIds.clear();
-  clearApprovalVoiceReminder();
-
-  if (state.voice.callTimerId) clearInterval(state.voice.callTimerId);
-  state.voice.callTimerId = setInterval(updateVoiceCallTimerLabel, 1000);
-  updateVoiceCallTimerLabel();
-
-  renderVoiceModelSelector();
-  renderVoiceTranscript();
-  renderVoiceLiveProgress();
-  renderVoiceCallUi();
-
-  const textForm = $("voiceTextForm");
-  if (textForm) textForm.hidden = false;
-  const modal = $("voiceCopilotModal");
-  if (modal && !modal.open) modal.showModal();
-  $("voiceTextInput")?.focus();
-
-  const warmPromise = apiPostWithHotFallback("api/voice/call/start", {
-    callId: state.voice.callId,
-    callScope: "global",
-    activeThreadId: "",
-    ...voiceSelectionPayload(),
-  })
-    .then((res) => {
-      if (res?.dispatchModel || res?.model) {
-        state.voice.modelName = res?.dispatchModel || res.model;
-      }
-      if (res?.dispatchProvider) {
-        state.voice.dispatchProvider = res.dispatchProvider;
-      }
-      if (Array.isArray(res?.modelOptions)) {
-        state.voice.modelOptions = res.modelOptions;
-      }
-      const prevAsrAvailable = state.voice.asrAvailable;
-      state.voice.asrAvailable = res?.asrAvailable !== false;
-      state.voice.asrEngine = res?.asrEngine || (state.voice.asrAvailable ? "mlx-whisper" : "browser");
-      state.voice.backendMissing = false;
-      renderVoiceModelSelector();
-      renderVoiceCallUi();
-      if (state.voice.voiceEnabled && prevAsrAvailable && state.voice.asrAvailable === false && state.voice.callActive && !state.voice.speechRecognition) {
-        void startVoiceCallMicPipeline();
-      }
-    })
-    .catch((err) => {
-      if (Number(err?.status) === 404 || Number(err?.status) === 502) {
-        state.voice.backendMissing = true;
-        $("voiceStateText").textContent = "本机轻量助手服务尚未连上（/api/voice/call）";
-        $("voiceSubHintText").textContent = "下方仍可实时查看任务动态，重启本地服务后即可使用轻量总控助手";
-        renderVoiceCallUi();
-      }
-    });
-
-  await warmPromise;
+  if (!state.missionOverview && !state.missionOverviewLoading) {
+    void loadMissionOverview({ trigger: "open" });
+  }
+  toggleSpriteAssistant({ open: true });
+  if (!state.sprite.recording) {
+    await startSpriteMic({ handsFree: false });
+  }
 }
 
 function hangupVoiceCall({ closeModal = true } = {}) {
@@ -10923,7 +11180,18 @@ function bindEvents() {
 
   $("boardToggleBtn").addEventListener("click", () => openProjectBoardView());
 
-  $("voiceModeBtn").addEventListener("click", () => void openVoiceModal());
+  $("voiceModeBtn").addEventListener("click", () => {
+    setTopbarMenuOpen(false);
+    setComposerConfigOpen(false);
+    if (!state.missionOverview && !state.missionOverviewLoading) {
+      void loadMissionOverview({ trigger: "open" });
+    }
+    const nextOpen = !state.sprite.open;
+    toggleSpriteAssistant({ open: nextOpen });
+    if (nextOpen) {
+      requestAnimationFrame(() => $("spriteCommandInput")?.focus());
+    }
+  });
 
   $("activeProfileBadge")?.addEventListener("click", () => {
     const provider = state.activeThread?.provider || defaultProviderValue();
@@ -11219,10 +11487,15 @@ function bindEvents() {
           chips: brief.chips,
         });
       } else if (sAct === "open-call") {
-        toggleSpriteAssistant({ open: false });
-        void openVoiceModal();
+        void toggleSpriteHandsFree();
       } else if (sAct === "mic") {
         void toggleSpriteMic();
+      } else if (sAct === "finish-mic") {
+        void stopSpriteMic({ submit: true });
+      } else if (sAct === "cancel-mic") {
+        void stopSpriteMic({ submit: false });
+      } else if (sAct === "stop-speech") {
+        stopSpriteSpeech();
       } else if (sAct === "clear-scope") {
         state.sprite.scopedTopicId = "";
         state.sprite.scopedTopicName = "";
@@ -11396,6 +11669,15 @@ function bindEvents() {
 
     if (e.target.closest("[data-tycoon-toggle-quest]")) {
       state.tycoonQuestCollapsed = !state.tycoonQuestCollapsed;
+      try {
+        localStorage.setItem("ac-tycoon-quest-collapsed", state.tycoonQuestCollapsed ? "1" : "0");
+      } catch {}
+      renderProjectBoard();
+      return;
+    }
+
+    if (e.target.closest("[data-tycoon-toggle-dispatch-cfg]")) {
+      state.tycoonDispatchConfigOpen = !state.tycoonDispatchConfigOpen;
       renderProjectBoard();
       return;
     }
@@ -11653,8 +11935,7 @@ function bindEvents() {
         if (state.batchSelect.active) exitBatchSelectMode();
         else enterBatchSelectMode();
       } else if (act === "voice") {
-        if (isOverviewBoardMode() && !state.scopedProjectCwd) toggleSpriteAssistant();
-        else void openVoiceModal();
+        void openVoiceModal();
       }
       else if (act === "new") openNewThreadModal({
         cwd: state.scopedProjectCwd || "",

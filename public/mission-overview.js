@@ -882,6 +882,7 @@ function renderTopicCardHtml(topic, {
   editingContextTopicId = "",
   expandedMetricsTopics = new Set(),
   searchText = "",
+  inInspector = false,
 } = {}) {
   const q = String(searchText || "").trim().toLowerCase();
   const matchesQuery = (t) => {
@@ -945,6 +946,7 @@ function renderTopicCardHtml(topic, {
 
   const cardClasses = [
     "mo-topic-card",
+    inInspector ? "is-in-inspector" : "",
     topic.pinned ? "is-pinned" : "",
     topic.liveCount > 0 ? "has-live" : "",
     topic.pendingCount > 0 ? "has-pending" : "",
@@ -953,11 +955,11 @@ function renderTopicCardHtml(topic, {
 
   return `
     <article class="${cardClasses}" id="mo-topic-${escapeHtml(topic.id)}" data-mo-topic-id="${escapeHtml(topic.id)}">
-      <div class="mo-card-glow" aria-hidden="true"></div>
+      ${inInspector ? "" : `<div class="mo-card-glow" aria-hidden="true"></div>`}
       <header class="mo-topic-head">
         <div class="mo-topic-title-wrap">
           <div class="mo-topic-title-row">
-            <strong class="mo-topic-name">${escapeHtml(topic.name)}</strong>
+            ${inInspector ? "" : `<strong class="mo-topic-name">${escapeHtml(topic.name)}</strong>`}
             ${topic.landmark && LANDMARK_BADGE_LABELS[topic.landmark] ? `<span class="mo-landmark-chip">${escapeHtml(LANDMARK_BADGE_LABELS[topic.landmark])}</span>` : ""}
             <span class="mo-yield-chip ${ym.cls}">${iconSvg(ym.icon, { size: 11 })} ${escapeHtml(ym.text)}</span>
             ${pipeline.readyToHarvest ? `<span class="mo-harvest-pill">准收菜</span>` : ""}
@@ -967,38 +969,40 @@ function renderTopicCardHtml(topic, {
             ${gitBadgeHtml}
             ${ledgerBadgeHtml}
           </div>
-          <div class="mo-topic-desc">${escapeHtml(topic.description || "")}</div>
+          ${topic.description ? `<div class="mo-topic-desc" title="${escapeHtml(topic.description)}">${escapeHtml(topic.description)}</div>` : ""}
         </div>
-        <div class="mo-topic-actions">
-          <button
-            type="button"
-            class="mo-pin-focus-btn ${topic.isBossPinned ? "is-pinned" : ""}"
-            data-mo-toggle-focus="${escapeHtml(topic.id)}"
-            title="${topic.isBossPinned ? "取消今日主攻置顶" : "置顶到老板今日主攻台"}"
-          >${iconSvg(topic.isBossPinned ? "star-filled" : "star", { size: 12 })}</button>
-          <button
-            type="button"
-            class="mo-launch-new-btn is-sprite"
-            data-sprite-summon-topic="${escapeHtml(topic.id)}"
-            data-sprite-summon-name="${escapeHtml(topic.name)}"
-            title="在此产线召唤小精灵（归档久远对话并提炼摘要 / 继承上下文派工）"
-          >${iconSvg("bulb", { size: 11 })}<span>小精灵</span></button>
-          <button
-            type="button"
-            class="mo-launch-new-btn"
-            data-mo-select-dispatch-topic="${escapeHtml(topic.id)}"
-            title="定向派工到此产线（自动匹配干净工位或新开并发分身）"
-          >${iconSvg("split", { size: 11 })}<span>派工</span></button>
-          <button
-            type="button"
-            class="mo-launch-new-btn is-plain"
-            data-new-in-cwd="${escapeHtml(topic.primaryCwd || "")}"
-            title="手动在该产线主目录新建会话"
-          >${iconSvg("plus", { size: 11 })}</button>
-        </div>
+        ${inInspector ? "" : `
+          <div class="mo-topic-actions">
+            <button
+              type="button"
+              class="mo-pin-focus-btn ${topic.isBossPinned ? "is-pinned" : ""}"
+              data-mo-toggle-focus="${escapeHtml(topic.id)}"
+              title="${topic.isBossPinned ? "取消今日主攻置顶" : "置顶到老板今日主攻台"}"
+            >${iconSvg(topic.isBossPinned ? "star-filled" : "star", { size: 12 })}</button>
+            <button
+              type="button"
+              class="mo-launch-new-btn is-sprite"
+              data-sprite-summon-topic="${escapeHtml(topic.id)}"
+              data-sprite-summon-name="${escapeHtml(topic.name)}"
+              title="在此产线召唤小精灵（归档久远对话并提炼摘要 / 继承上下文派工）"
+            >${iconSvg("bulb", { size: 11 })}<span>小精灵</span></button>
+            <button
+              type="button"
+              class="mo-launch-new-btn"
+              data-mo-select-dispatch-topic="${escapeHtml(topic.id)}"
+              title="定向派工到此产线（自动匹配干净工位或新开并发分身）"
+            >${iconSvg("split", { size: 11 })}<span>派工</span></button>
+            <button
+              type="button"
+              class="mo-launch-new-btn is-plain"
+              data-new-in-cwd="${escapeHtml(topic.primaryCwd || "")}"
+              title="手动在该产线主目录新建会话"
+            >${iconSvg("plus", { size: 11 })}</button>
+          </div>
+        `}
       </header>
 
-      ${renderPipelineMeterHtml(pipeline, stages)}
+      ${renderPipelineMeterHtml(pipeline, stages, { compact: inInspector })}
       ${renderTopicMetricsPanelHtml(topic, { editingMetricsTopicId, expandedMetricsTopics })}
       ${renderTopicArchiveDigestHtml(topic, { expandedContexts, editingContextTopicId })}
       ${podsHtml}
@@ -1324,7 +1328,6 @@ export function renderMissionOverviewHtml(overview, {
           </div>
         </section>
       ` : ""}
-      <div id="spriteAssistantMount" class="sprite-assistant-mount is-2d"></div>
     </div>
   `;
 }
@@ -1346,6 +1349,7 @@ export function renderTycoonHudHtml(overview, {
   selectedTopicId = "",
   inspectorMode = "",
   questCollapsed = false,
+  dispatchConfigOpen = false,
   mobileDockOpen = false,
   showChilledSparks = false,
   dispatchDraft = "",
@@ -1410,6 +1414,19 @@ export function renderTycoonHudHtml(overview, {
   const isDockOpen = Boolean(mobileDockOpen || dispatchBusy || routes.length || receipts.length);
   const hasDockDraftOrQuery = Boolean(String(dispatchDraft || "").trim() || String(searchText || "").trim());
 
+  const selectedDispatchTopic = dispatchTopicId
+    ? allTopics.find((tp) => tp.id === dispatchTopicId) || null
+    : null;
+  const isRouteCustom = Boolean(
+    dispatchTopicId
+    || (dispatchAgent?.selectedAgentKey && dispatchAgent.selectedAgentKey !== "auto")
+    || dispatchMode === "new"
+    || dispatchInheritContext === false,
+  );
+  const routeSummaryLabel = selectedDispatchTopic
+    ? selectedDispatchTopic.name.slice(0, 7)
+    : (isRouteCustom ? "自定义路由" : "自动路由");
+
   let inspectorDrawerHtml = "";
   if (inspectorMode === "unassigned") {
     inspectorDrawerHtml = `
@@ -1419,7 +1436,7 @@ export function renderTycoonHudHtml(overview, {
           <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
         </div>
         <div class="tycoon-inspector-scroll">
-          <p class="tycoon-drawer-hint">这些近期会话没匹配到任何产线。点右侧文件夹图标选择归属，归类后会进入对应 3D 建筑；点标题直接打开会话。</p>
+          <p class="tycoon-drawer-hint">点右侧文件夹图标归入产线，或点标题直接进入对话。</p>
           ${unassignedActive.length ? `
             <div class="mo-thread-list">
               ${unassignedActive.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId })).join("")}
@@ -1432,7 +1449,7 @@ export function renderTycoonHudHtml(overview, {
     inspectorDrawerHtml = `
       <aside class="tycoon-hud-inspector" aria-label="3D 灵感孵化温室控制台">
         <div class="tycoon-drawer-bar">
-          <span>${iconSvg("egg", { size: 13 })} 灵感孵化温室 · 3D 培养舱</span>
+          <span>${iconSvg("egg", { size: 13 })} 灵感孵化温室</span>
           <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
         </div>
         ${renderIncubatorHtml(incubator, { showChilled: showChilledSparks, allTopics })}
@@ -1442,8 +1459,35 @@ export function renderTycoonHudHtml(overview, {
     inspectorDrawerHtml = `
       <aside class="tycoon-hud-inspector" aria-label="3D 产线工位详情">
         <div class="tycoon-drawer-bar">
-          <span>${iconSvg("layers", { size: 13 })} 工位检视 · ${escapeHtml(selectedTopic.name)}</span>
-          <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭详情 (点击空白地板也可收起)">${iconSvg("close", { size: 13 })}</button>
+          <span class="tycoon-drawer-title" title="${escapeHtml(selectedTopic.name)}">${iconSvg("layers", { size: 13 })} <strong>${escapeHtml(selectedTopic.name)}</strong></span>
+          <div class="tycoon-drawer-actions">
+            <button
+              type="button"
+              class="mo-pin-focus-btn ${selectedTopic.isBossPinned ? "is-pinned" : ""}"
+              data-mo-toggle-focus="${escapeHtml(selectedTopic.id)}"
+              title="${selectedTopic.isBossPinned ? "取消今日主攻置顶" : "置顶到主线 Top 3"}"
+            >${iconSvg(selectedTopic.isBossPinned ? "star-filled" : "star", { size: 12 })}</button>
+            <button
+              type="button"
+              class="mo-launch-new-btn is-sprite"
+              data-sprite-summon-topic="${escapeHtml(selectedTopic.id)}"
+              data-sprite-summon-name="${escapeHtml(selectedTopic.name)}"
+              title="召唤此产线小精灵（归档总结 / 继承记忆派工）"
+            >${iconSvg("bulb", { size: 11 })}<span>小精灵</span></button>
+            <button
+              type="button"
+              class="mo-launch-new-btn"
+              data-mo-select-dispatch-topic="${escapeHtml(selectedTopic.id)}"
+              title="定向派工到此产线"
+            >${iconSvg("split", { size: 11 })}<span>派工</span></button>
+            <button
+              type="button"
+              class="mo-launch-new-btn is-plain"
+              data-new-in-cwd="${escapeHtml(selectedTopic.primaryCwd || "")}"
+              title="手动在该产线目录新建会话"
+            >${iconSvg("plus", { size: 11 })}</button>
+            <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭详情 (点击空白地板也可收起)">${iconSvg("close", { size: 13 })}</button>
+          </div>
         </div>
         <div class="tycoon-inspector-scroll">
           ${renderTopicCardHtml(selectedTopic, {
@@ -1458,6 +1502,7 @@ export function renderTycoonHudHtml(overview, {
             editingContextTopicId,
             expandedMetricsTopics,
             searchText: "",
+            inInspector: true,
           })}
         </div>
       </aside>
@@ -1510,7 +1555,7 @@ export function renderTycoonHudHtml(overview, {
           <button type="button" class="mo-ctrl-btn tycoon-top-btn ${immersive ? "is-active" : ""}" data-mo-action="toggle-immersive" title="全屏游戏沉浸模式 (Esc 退出)">
             ${iconSvg(immersive ? "minimize" : "maximize", { size: 13 })}<span>${immersive ? "退全屏" : "全屏"}</span>
           </button>
-          <button type="button" class="mo-ctrl-btn tycoon-top-btn is-icon-only" data-board-action="voice" title="召唤面板小精灵助手（汇报进展 / 语音派单）">
+          <button type="button" class="mo-ctrl-btn tycoon-top-btn is-icon-only" data-board-action="voice" title="开启长语音通话助手">
             ${iconSvg("mic", { size: 13 })}
           </button>
           ${allowResume ? `<button type="button" class="mo-ctrl-btn tycoon-top-btn" data-board-action="resume">回对话</button>` : ""}
@@ -1518,9 +1563,9 @@ export function renderTycoonHudHtml(overview, {
       </header>
 
       <div class="tycoon-hud-middle">
-        <aside class="tycoon-quest-box ${questCollapsed ? "is-collapsed" : ""}" aria-label="主线任务收菜榜">
-          <div class="tycoon-quest-head">
-            <span class="tycoon-quest-title">${iconSvg("crown", { size: 13 })} 今日主线 · 临门一脚 Top 3</span>
+        <aside class="tycoon-quest-box ${questCollapsed ? "is-collapsed" : ""}" aria-label="主线任务收菜榜" title="左键按住拖拽平移地图 · WASD移动 · 滚轮缩放">
+          <div class="tycoon-quest-head" ${questCollapsed ? `data-tycoon-toggle-quest="1" role="button" tabindex="0"` : ""}>
+            <span class="tycoon-quest-title">${iconSvg("crown", { size: 13 })} ${questCollapsed ? `主线 Top ${Math.min(3, bossFocus.length || 3)}` : "今日主线 · 临门一脚 Top 3"}</span>
             <button type="button" class="tycoon-quest-fold" data-tycoon-toggle-quest="1" title="${questCollapsed ? "展开主线任务" : "收起任务栏"}">
               ${iconSvg(questCollapsed ? "chevron-down" : "chevron-up", { size: 12 })}
             </button>
@@ -1562,7 +1607,7 @@ export function renderTycoonHudHtml(overview, {
       <footer class="tycoon-bottom-dock ${isDockOpen ? "is-mobile-expanded" : "is-mobile-collapsed"}" aria-label="镜头切换与智能召唤派单台">
         ${searchMatchedThreads.length ? `
           <div class="tycoon-search-popup">
-            <span class="tycoon-search-pop-label">3D 光柱已锁定「${escapeHtml(searchText)}」相关会话：</span>
+            <span class="tycoon-search-pop-label">3D 光柱已锁定「${escapeHtml(searchText)}」：</span>
             <div class="tycoon-search-pop-pills">
               ${searchMatchedThreads.map((mt) => `
                 <button type="button" class="mo-radar-pill is-live" data-board-open-thread="${escapeHtml(mt.id)}">
@@ -1577,7 +1622,7 @@ export function renderTycoonHudHtml(overview, {
         ${routes.length ? `
           <div class="mo-dispatch-feedback is-preview tycoon-dock-popup">
             <div class="mo-dispatch-fb-head">
-              <strong>派工预览（共 ${routes.length} 个工单，点「召唤派工」立即派遣 3D 员工）：</strong>
+              <strong>派工预览（${routes.length} 单）：</strong>
               <button type="button" class="mo-mini-link-btn" data-mo-action="clear-dispatch-feedback">关闭</button>
             </div>
             <div class="mo-dispatch-route-list">
@@ -1589,7 +1634,7 @@ export function renderTycoonHudHtml(overview, {
                   <strong class="mo-route-topic">${escapeHtml(rt.topicName)}</strong>
                   ${rt.willInheritContext ? `<span class="mo-inherit-pill" title="${escapeHtml(rt.contextSummaryPreview || "")}">继承归档记忆</span>` : ""}
                   ${renderRouteAgentHtml(rt)}
-                <span class="mo-route-reason">${escapeHtml(rt.reason)}</span>
+                  <span class="mo-route-reason">${escapeHtml(rt.reason)}</span>
                 </div>
               `).join("")}
             </div>
@@ -1599,7 +1644,7 @@ export function renderTycoonHudHtml(overview, {
         ${!routes.length && receipts.length ? `
           <div class="mo-dispatch-feedback is-receipt tycoon-dock-popup">
             <div class="mo-dispatch-fb-head">
-              <strong>已召唤 ${receipts.length} 名 AI 员工上岗（产线归属已锁定）：</strong>
+              <strong>已召唤 ${receipts.length} 名 AI 员工上岗：</strong>
               <button type="button" class="mo-mini-link-btn" data-mo-action="clear-dispatch-feedback">收起</button>
             </div>
             <div class="mo-dispatch-route-list">
@@ -1611,9 +1656,9 @@ export function renderTycoonHudHtml(overview, {
                   <strong class="mo-route-topic">${escapeHtml(rc.topicName)}</strong>
                   ${rc.willInheritContext ? `<span class="mo-inherit-pill" title="${escapeHtml(rc.contextSummaryPreview || "")}">已继承归档记忆</span>` : ""}
                   ${renderRouteAgentHtml(rc)}
-                <span class="mo-route-reason">${escapeHtml(rc.reason)}</span>
+                  <span class="mo-route-reason">${escapeHtml(rc.reason)}</span>
                   ${rc.threadId ? `
-                    <button type="button" class="mo-route-open-btn" data-board-open-thread="${escapeHtml(rc.threadId)}">进入工位对话 →</button>
+                    <button type="button" class="mo-route-open-btn" data-board-open-thread="${escapeHtml(rc.threadId)}">进入工位 →</button>
                   ` : ""}
                 </div>
               `).join("")}
@@ -1650,15 +1695,14 @@ export function renderTycoonHudHtml(overview, {
               type="search"
               class="board-search-input tycoon-search-input"
               value="${escapeHtml(searchText)}"
-              placeholder="3D 光柱寻人（搜：语音助手 / 爱发电 / SEO）…"
+              placeholder="3D 光柱搜会话…"
             />
             ${searchText ? `<button type="button" class="mo-clear-search-btn" data-board-action="clear-search">${iconSvg("close", { size: 12 })}</button>` : ""}
           </div>
         </div>
 
         <form id="moDispatchForm" class="tycoon-dock-dispatch-row">
-          <div class="tycoon-dispatch-config">
-            <span class="mo-dispatch-badge">${iconSvg("split", { size: 12 })}<span>派单</span></span>
+          <div class="tycoon-dispatch-config" ${dispatchConfigOpen ? "" : "hidden"}>
             <select id="moDispatchTopicSelect" class="mo-dispatch-select is-topic" aria-label="目标车间产线">
               <option value="" ${!dispatchTopicId ? "selected" : ""}>产线：自动识别（支持分号拆单）</option>
               ${allTopics.map((tp) => `
@@ -1676,22 +1720,28 @@ export function renderTycoonHudHtml(overview, {
             </label>
           </div>
           <div class="tycoon-dispatch-input-row">
+            <button
+              type="button"
+              class="mo-ctrl-btn tycoon-route-toggle ${dispatchConfigOpen || isRouteCustom ? "is-active" : ""}"
+              data-tycoon-toggle-dispatch-cfg="1"
+              aria-expanded="${dispatchConfigOpen ? "true" : "false"}"
+              title="点击展开/收起产线、账号、模型与工位复用设置"
+            >${iconSvg("settings", { size: 12 })}<span>${escapeHtml(routeSummaryLabel)}</span></button>
             <input
               id="moDispatchInput"
               type="text"
               class="mo-dispatch-input"
               value="${escapeHtml(dispatchDraft)}"
-              placeholder="下达指令，例如：给漫画翻译补爱发电回调日志…"
+              placeholder="${selectedDispatchTopic ? `向「${escapeHtml(selectedDispatchTopic.name)}」下达派工指令…` : "输入指令自动匹配干净工位派工（分号拆多单）…"}"
               ${dispatchBusy ? "disabled" : ""}
             />
             <button type="button" class="mo-ctrl-btn" data-mo-action="preview-dispatch" ${dispatchBusy ? "disabled" : ""}>预览</button>
             <button type="submit" class="btn-primary btn-sm mo-dispatch-submit-btn" ${dispatchBusy ? "disabled" : ""}>
-              ${iconSvg("send", { size: 12 })}<span>${dispatchBusy ? "召唤中…" : "召唤派工"}</span>
+              ${iconSvg("send", { size: 12 })}<span>${dispatchBusy ? "召唤中…" : "派工"}</span>
             </button>
           </div>
         </form>
       </footer>
-      <div id="spriteAssistantMount" class="sprite-assistant-mount is-3d"></div>
     </div>
   `;
 }
