@@ -361,12 +361,22 @@ export function diffSpriteOverviewEvents(prevSnap, nextSnap, { recentCompletedBy
 export function classifySpriteUserInput(rawText, {
   hasPendingPreview = false,
   hasPendingArchive = false,
+  hasPendingReorg = false,
   scopedTopicId = "",
   overview = null,
   agentOptions = [],
 } = {}) {
   const text = String(rawText || "").trim();
   if (!text) return { intent: "empty" };
+
+  if (hasPendingReorg) {
+    if (/^(确认|确定|确认调整|执行|应用|可以|好的|好|行|没问题|ok|yes)[!！。.,，~～]*$/i.test(text)) {
+      return { intent: "confirm_reorg" };
+    }
+    if (/^(取消|算了|不要|不改了|撤回|放弃|no|cancel)[!！。.,，~～]*$/i.test(text)) {
+      return { intent: "cancel_reorg" };
+    }
+  }
 
   if (hasPendingArchive) {
     if (/^(确认|确定|确认归档|归档|开始归档|执行|可以|好的|好|行|没问题|ok|yes)[!！。.,，~～]*$/i.test(text)) {
@@ -418,6 +428,20 @@ export function classifySpriteUserInput(rawText, {
     };
   }
 
+  // Blueprint / Dream Factory layout correction intent
+  if (
+    /(重新扫描|重扫|重新发现|恢复默认发现|清空重扫)/.test(text)
+    || /(改名为|重命名为|移到|移动到|归入|挪到|调整到|合并成|合并为|合并到)/.test(text)
+    || /(和|与|跟).{1,24}合并/.test(text)
+    || /^(?:请|帮我)?(?:删除|移除|去掉|隐藏|不要).{1,24}(?:产线|项目)$/.test(text)
+    || /(调整|纠偏|重排|整理|重构).{0,8}(梦工厂|产线|布局|房区|蓝图)/.test(text)
+  ) {
+    return {
+      intent: "reorg_preview",
+      instruction: text,
+    };
+  }
+
   // Natural language dispatch extraction
   let agentKey = "auto";
   const lower = text.toLowerCase();
@@ -466,6 +490,45 @@ function renderSpriteChipHtml(chip) {
     return `<button type="button" class="sprite-msg-chip is-accent" data-sprite-quick-preview="${escapeHtml(chip.text)}" data-sprite-quick-topic="${escapeHtml(chip.topicId || "")}">${iconSvg("bolt", { size: 11 })}<span>${escapeHtml(chip.label || "生成派工预览")}</span></button>`;
   }
   return "";
+}
+
+function renderPendingReorgCardHtml(pendingReorg, busy = false) {
+  if (!pendingReorg || !Array.isArray(pendingReorg.operations) || !pendingReorg.operations.length) return "";
+  const ops = pendingReorg.operations;
+  const typeTag = {
+    rename: "改名",
+    move: "换房区",
+    merge: "合并",
+    remove: "移除",
+    rescan: "重扫",
+    update_desc: "改简介",
+  };
+  return `
+    <div class="sprite-preview-card is-reorg-preview" role="region" aria-label="梦工厂布局纠偏预览">
+      <div class="sprite-preview-head">
+        <strong>${iconSvg("layers", { size: 12 })} 梦工厂布局调整方案（${ops.length} 项）</strong>
+      </div>
+      <div class="sprite-preview-routes">
+        ${ops.map((op) => `
+          <div class="sprite-preview-route">
+            <div class="sprite-preview-line1">
+              <span class="sprite-route-act is-spawn">${escapeHtml(typeTag[op.type] || op.type)}</span>
+              <strong class="sprite-route-topic">${escapeHtml(op.label || op.type)}</strong>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+      <div class="sprite-preview-actions">
+        <span class="sprite-preview-hint">确认后写入本地产线配置，可点确认或说「确认」</span>
+        <div class="sprite-preview-btns">
+          <button type="button" class="mo-ctrl-btn sprite-btn-cancel" data-sprite-action="cancel-reorg" ${busy ? "disabled" : ""}>取消</button>
+          <button type="button" class="btn-primary btn-xs sprite-btn-confirm" data-sprite-action="confirm-reorg" ${busy ? "disabled" : ""}>
+            ${iconSvg("check", { size: 11 })}<span>${busy ? "应用中…" : "确认调整"}</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderPendingArchiveCardHtml(pendingArchive, busy = false) {
@@ -582,6 +645,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
     messages = [],
     pendingPreview = null,
     pendingArchive = null,
+    pendingReorg = null,
     scopedTopicId = "",
     scopedTopicName = "",
     busy = false,
@@ -590,7 +654,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
     draft = "",
   } = spriteState;
 
-  const hasPendingCard = Boolean(pendingPreview || pendingArchive);
+  const hasPendingCard = Boolean(pendingPreview || pendingArchive || pendingReorg);
   const effectiveMood = hasPendingCard ? "coin" : mood;
   const badgeCount = unreadCount + (hasPendingCard ? 1 : 0);
 
@@ -653,6 +717,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
             `}
           </div>
 
+          ${renderPendingReorgCardHtml(pendingReorg, busy)}
           ${renderPendingArchiveCardHtml(pendingArchive, busy)}
           ${renderPendingPreviewCardHtml(pendingPreview, busy)}
 
@@ -664,6 +729,7 @@ export function renderSpriteAssistantHtml(spriteState = {}, { is3dMode = false }
               <button type="button" class="sprite-quick-chip" data-sprite-say="汇报进展">汇报进展</button>
               <button type="button" class="sprite-quick-chip" data-sprite-say="谁待拍板">待拍板</button>
               <button type="button" class="sprite-quick-chip" data-sprite-say="准收菜">准收菜</button>
+              <button type="button" class="sprite-quick-chip" data-sprite-action="reorg-guide">调整产线布局</button>
             `}
           </div>
 

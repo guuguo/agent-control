@@ -621,6 +621,18 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/overview/reorganize" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const result = await overviewService.planAndApplyBlueprintEdit({
+          instruction: body.instruction || "",
+          confirmOnly: body.confirmOnly !== false,
+          operations: Array.isArray(body.operations) ? body.operations : null,
+          preferredModel: body.preferredModel || "auto",
+        });
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/profile/probe" && request.method === "POST") {
         const body = await readJsonBody(request);
         const result = await hub.probeProfiles({

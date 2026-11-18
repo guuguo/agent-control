@@ -2870,4 +2870,362 @@ export class MissionOverviewService {
     if (this.#broadcast) this.#broadcast("overview_updated", overview);
     return { ok: true, digest: this.#contextsStore.topics[cleanId] || null, overview };
   }
+
+  #findTopicByQuery(query) {
+    const raw = String(query || "").trim().replace(/^[「"'【]+|[」"'】]+$/g, "").trim();
+    if (!raw) return null;
+    const low = raw.toLowerCase();
+    return (
+      this.#topics.find((t) => t.id.toLowerCase() === low || t.name.toLowerCase() === low)
+      || this.#topics.find((t) => t.name.toLowerCase().includes(low) || low.includes(t.name.toLowerCase()))
+      || null
+    );
+  }
+
+  #findDomainByQuery(query) {
+    const raw = String(query || "").trim().replace(/^[「"'【]+|[」"'】]+$/g, "").trim();
+    if (!raw) return null;
+    const low = raw.toLowerCase();
+    const direct = this.#domains.find((d) => (
+      d.id.toLowerCase() === low
+      || d.name.toLowerCase() === low
+      || String(d.shortName || "").toLowerCase() === low
+      || d.name.toLowerCase().includes(low)
+      || String(d.shortName || "").toLowerCase().includes(low)
+    ));
+    if (direct) return direct;
+    if (/(研发|软件|开发|代码|工程|tech|indie)/.test(low)) return this.#domains.find((d) => d.id === "indie-lab") || null;
+    if (/(创作|内容|漫剧|小说|视频|短剧|工坊|drama)/.test(low)) return this.#domains.find((d) => d.id === "drama-studio") || null;
+    if (/(发布|增长|发行|推广|海外|营销|pub|growth)/.test(low)) return this.#domains.find((d) => d.id === "global-pub") || null;
+    if (/(运维|专项|赏金|排查|支持|bounty|ops)/.test(low)) return this.#domains.find((d) => d.id === "bounty-guild") || null;
+    return null;
+  }
+
+  #parseDeterministicBlueprintOps(instruction) {
+    const text = String(instruction || "").trim();
+    if (!text) return [];
+    const ops = [];
+
+    if (/(重新扫描|重扫|重新发现|恢复默认发现|清空重扫)/.test(text)) {
+      const clearExisting = /(清空|重置|全部重新)/.test(text);
+      ops.push({
+        type: "rescan",
+        clearExisting,
+        label: clearExisting ? "清空当前产线并重新扫描本地仓库" : "补充扫描本地仓库并追加未收录产线",
+      });
+      return ops;
+    }
+
+    const clauses = text.split(/[，,。；;\n]+/).map((s) => s.trim()).filter(Boolean);
+    for (const clause of clauses) {
+      let m = clause.match(/^(?:请|帮我|把)?[「"'【]?(.+?)[」"'】]?(?:改名为|重命名为|改成|改叫|叫作?)[「"'【]?(.+?)[」"'】]?$/);
+      if (m) {
+        const topic = this.#findTopicByQuery(m[1]);
+        const toName = String(m[2] || "").trim().replace(/^[「"'【]+|[」"'】]+$/g, "");
+        if (topic && toName && toName !== topic.name) {
+          ops.push({
+            type: "rename",
+            topicId: topic.id,
+            fromName: topic.name,
+            toName,
+            label: `重命名产线：「${topic.name}」→「${toName}」`,
+          });
+          continue;
+        }
+      }
+
+      m = clause.match(/^(?:请|帮我|把)?[「"'【]?(.+?)[」"'】]?(?:移到|移动到|放到|归入|挪到|调整到)[「"'【]?(.+?)[」"'】]?$/);
+      if (m) {
+        const topic = this.#findTopicByQuery(m[1]);
+        const domain = this.#findDomainByQuery(m[2]);
+        if (topic && domain && topic.domainId !== domain.id) {
+          ops.push({
+            type: "move",
+            topicId: topic.id,
+            topicName: topic.name,
+            toDomainId: domain.id,
+            toDomainName: domain.name,
+            label: `移动房区：「${topic.name}」→「${domain.name}」`,
+          });
+          continue;
+        }
+      }
+
+      m = clause.match(/^(?:请|帮我|把)?[「"'【]?(.+?)[」"'】]?(?:和|与|跟)[「"'【]?(.+?)[」"'】]?合并(?:成|为)?[「"'【]?(.+?)[」"'】]?$/)
+        || clause.match(/^(?:请|帮我|把)?[「"'【]?(.+?)[」"'】]?(?:和|与|跟)[「"'【]?(.+?)[」"'】]?合并$/);
+      if (m) {
+        const src = this.#findTopicByQuery(m[1]);
+        const tgt = this.#findTopicByQuery(m[2]);
+        const newName = m[3] ? String(m[3]).trim().replace(/^[「"'【]+|[」"'】]+$/g, "") : "";
+        if (src && tgt && src.id !== tgt.id) {
+          ops.push({
+            type: "merge",
+            sourceTopicId: src.id,
+            sourceName: src.name,
+            targetTopicId: tgt.id,
+            targetName: newName || tgt.name,
+            newName: newName || "",
+            label: `合并产线：「${src.name}」并入「${newName || tgt.name}」`,
+          });
+          continue;
+        }
+      }
+
+      m = clause.match(/^(?:请|帮我|把)?[「"'【]?(.+?)[」"'】]?合并到[「"'【]?(.+?)[」"'】]?$/);
+      if (m) {
+        const src = this.#findTopicByQuery(m[1]);
+        const tgt = this.#findTopicByQuery(m[2]);
+        if (src && tgt && src.id !== tgt.id) {
+          ops.push({
+            type: "merge",
+            sourceTopicId: src.id,
+            sourceName: src.name,
+            targetTopicId: tgt.id,
+            targetName: tgt.name,
+            label: `合并产线：「${src.name}」并入「${tgt.name}」`,
+          });
+          continue;
+        }
+      }
+
+      m = clause.match(/^(?:请|帮我)?(?:删除|移除|去掉|隐藏|不要)[「"'【]?(.+?)[」"'】]?(?:产线|项目|这?条)?$/);
+      if (m) {
+        const topic = this.#findTopicByQuery(m[1]);
+        if (topic) {
+          ops.push({
+            type: "remove",
+            topicId: topic.id,
+            topicName: topic.name,
+            label: `移除产线：「${topic.name}」（保留原有会话，仅从梦工厂看板撤下）`,
+          });
+          continue;
+        }
+      }
+    }
+    return ops;
+  }
+
+  #normalizeBlueprintOps(rawOps = []) {
+    const out = [];
+    for (const raw of Array.isArray(rawOps) ? rawOps : []) {
+      if (!raw || !raw.type) continue;
+      if (raw.type === "rescan") {
+        const clearExisting = Boolean(raw.clearExisting);
+        out.push({
+          type: "rescan",
+          clearExisting,
+          label: raw.label || (clearExisting ? "清空当前产线并重新扫描本地仓库" : "补充扫描本地仓库并追加未收录产线"),
+        });
+      } else if (raw.type === "rename") {
+        const topic = this.#findTopicByQuery(raw.topicId || raw.fromName);
+        const toName = String(raw.toName || "").trim();
+        if (topic && toName) {
+          out.push({
+            type: "rename",
+            topicId: topic.id,
+            fromName: topic.name,
+            toName,
+            label: raw.label || `重命名产线：「${topic.name}」→「${toName}」`,
+          });
+        }
+      } else if (raw.type === "move") {
+        const topic = this.#findTopicByQuery(raw.topicId || raw.topicName);
+        const domain = this.#findDomainByQuery(raw.toDomainId || raw.toDomainName);
+        if (topic && domain) {
+          out.push({
+            type: "move",
+            topicId: topic.id,
+            topicName: topic.name,
+            toDomainId: domain.id,
+            toDomainName: domain.name,
+            label: raw.label || `移动房区：「${topic.name}」→「${domain.name}」`,
+          });
+        }
+      } else if (raw.type === "merge") {
+        const src = this.#findTopicByQuery(raw.sourceTopicId || raw.sourceName);
+        const tgt = this.#findTopicByQuery(raw.targetTopicId || raw.targetName);
+        if (src && tgt && src.id !== tgt.id) {
+          const newName = String(raw.newName || "").trim();
+          out.push({
+            type: "merge",
+            sourceTopicId: src.id,
+            sourceName: src.name,
+            targetTopicId: tgt.id,
+            targetName: newName || tgt.name,
+            newName,
+            label: raw.label || `合并产线：「${src.name}」并入「${newName || tgt.name}」`,
+          });
+        }
+      } else if (raw.type === "remove") {
+        const topic = this.#findTopicByQuery(raw.topicId || raw.topicName);
+        if (topic) {
+          out.push({
+            type: "remove",
+            topicId: topic.id,
+            topicName: topic.name,
+            label: raw.label || `移除产线：「${topic.name}」`,
+          });
+        }
+      } else if (raw.type === "update_desc") {
+        const topic = this.#findTopicByQuery(raw.topicId || raw.topicName);
+        const description = String(raw.description || "").trim();
+        if (topic && description) {
+          out.push({
+            type: "update_desc",
+            topicId: topic.id,
+            topicName: topic.name,
+            description,
+            label: raw.label || `更新「${topic.name}」简介`,
+          });
+        }
+      }
+    }
+    return out;
+  }
+
+  async planAndApplyBlueprintEdit({
+    instruction = "",
+    confirmOnly = true,
+    operations = null,
+    preferredModel = "auto",
+  } = {}) {
+    await this.#ensureLoaded();
+    const cleanInstruction = String(instruction || "").trim();
+    let plannedOps = Array.isArray(operations) && operations.length
+      ? this.#normalizeBlueprintOps(operations)
+      : this.#parseDeterministicBlueprintOps(cleanInstruction);
+    let aiUsed = false;
+    let summary = "";
+
+    if (!plannedOps.length && cleanInstruction) {
+      const domainLines = this.#domains.map((d) => `- ${d.id}: ${d.name} (${d.shortName})`).join("\n");
+      const topicLines = this.#topics.map((t) => `- ${t.id} | ${t.name} | 房区=${t.domainId} | 目录=${t.primaryCwd || "-"}`).join("\n");
+      const aiPrompt = [
+        "你是梦工厂总控台的产线蓝图规划器。用户通过口述/文字要求纠偏当前自动扫描出的梦工厂产线布局。",
+        "可选房区（domains）：",
+        domainLines,
+        "当前产线（topics）：",
+        topicLines || "（暂无）",
+        `用户要求：「${cleanInstruction}」`,
+        "请只输出一个合法 JSON 对象，不要附加 markdown 代码块或多余文字：",
+        `{"summary":"一句话说明本次调整方案","operations":[{"type":"rename|move|merge|remove|rescan|update_desc",...}]}`,
+        "operations 字段格式：",
+        '- rename: {"type":"rename","topicId":"...","toName":"新名称"}',
+        '- move: {"type":"move","topicId":"...","toDomainId":"indie-lab|drama-studio|global-pub|bounty-guild"}',
+        '- merge: {"type":"merge","sourceTopicId":"...","targetTopicId":"...","newName":"可选新名称"}',
+        '- remove: {"type":"remove","topicId":"..."}',
+        '- rescan: {"type":"rescan","clearExisting":false}',
+        '- update_desc: {"type":"update_desc","topicId":"...","description":"新简介"}',
+      ].join("\n");
+      const aiRes = await this.#invokeLightweightModel(aiPrompt, preferredModel || "auto").catch(() => null);
+      if (aiRes?.parsed && typeof aiRes.parsed === "object") {
+        plannedOps = this.#normalizeBlueprintOps(aiRes.parsed.operations);
+        summary = String(aiRes.parsed.summary || "").trim();
+        aiUsed = true;
+      }
+    }
+
+    if (!plannedOps.length) {
+      throw Object.assign(
+        new Error("未识别到可执行的梦工厂布局调整指令。你可以这样说：「把 xxx 改名为 yyy」「把 xxx 移到内容工坊」「把 A 和 B 合并」「删除 xxx」或「重新扫描本地仓库」。"),
+        { status: 400 },
+      );
+    }
+
+    if (!summary) {
+      summary = plannedOps.map((o) => o.label).join("；");
+    }
+
+    if (confirmOnly) {
+      return {
+        ok: true,
+        pendingConfirmation: true,
+        aiUsed,
+        summary,
+        operations: plannedOps,
+        instruction: cleanInstruction,
+      };
+    }
+
+    const applied = [];
+    for (const op of plannedOps) {
+      if (op.type === "rename") {
+        const t = this.#topics.find((item) => item.id === op.topicId);
+        if (t) {
+          t.name = op.toName;
+          t.autoDiscovered = false;
+          applied.push(op);
+        }
+      } else if (op.type === "move") {
+        const t = this.#topics.find((item) => item.id === op.topicId);
+        if (t && this.#domains.some((d) => d.id === op.toDomainId)) {
+          t.domainId = op.toDomainId;
+          t.autoDiscovered = false;
+          applied.push(op);
+        }
+      } else if (op.type === "update_desc") {
+        const t = this.#topics.find((item) => item.id === op.topicId);
+        if (t) {
+          t.description = op.description;
+          applied.push(op);
+        }
+      } else if (op.type === "merge") {
+        const srcIdx = this.#topics.findIndex((item) => item.id === op.sourceTopicId);
+        const tgt = this.#topics.find((item) => item.id === op.targetTopicId);
+        if (srcIdx >= 0 && tgt && tgt.id !== op.sourceTopicId) {
+          const src = this.#topics[srcIdx];
+          tgt.cwdPrefixes = [...new Set([...(tgt.cwdPrefixes || []), ...(src.cwdPrefixes || []), ...(src.primaryCwd ? [src.primaryCwd] : [])])];
+          tgt.keywords = [...new Set([...(tgt.keywords || []), ...(src.keywords || []), src.name.toLowerCase()])];
+          if (op.newName) tgt.name = op.newName;
+          tgt.autoDiscovered = false;
+          this.#topics.splice(srcIdx, 1);
+          applied.push(op);
+        }
+      } else if (op.type === "remove") {
+        const idx = this.#topics.findIndex((item) => item.id === op.topicId);
+        if (idx >= 0) {
+          this.#topics.splice(idx, 1);
+          applied.push(op);
+        }
+      } else if (op.type === "rescan") {
+        const rawThreads = typeof this.#hub?.listThreads === "function" ? await this.#hub.listThreads().catch(() => []) : [];
+        if (op.clearExisting) {
+          this.#topics = [];
+          await this.#discoverTopicsFromThreads(rawThreads);
+        } else {
+          const prevTopics = [...this.#topics];
+          const existingCwds = new Set(prevTopics.flatMap((t) => [t.primaryCwd, ...(t.cwdPrefixes || [])].filter(Boolean).map((p) => normPath(p))));
+          this.#topics = [];
+          await this.#discoverTopicsFromThreads(rawThreads);
+          const newlyFound = this.#topics.filter((t) => t.primaryCwd && !existingCwds.has(normPath(t.primaryCwd)));
+          const existingIds = new Set(prevTopics.map((t) => t.id));
+          for (const item of newlyFound) {
+            let candidateId = item.id;
+            let n = 2;
+            while (existingIds.has(candidateId)) {
+              candidateId = `${item.id}-${n}`;
+              n += 1;
+            }
+            item.id = candidateId;
+            existingIds.add(candidateId);
+          }
+          this.#topics = [...prevTopics, ...newlyFound];
+        }
+        applied.push(op);
+      }
+    }
+
+    await this.#persistDomains();
+    const overview = await this.getOverview({ trigger: "view", force: true });
+    if (this.#broadcast) this.#broadcast("overview_updated", overview);
+    return {
+      ok: true,
+      pendingConfirmation: false,
+      aiUsed,
+      summary,
+      appliedCount: applied.length,
+      operations: applied,
+      overview,
+    };
+  }
 }

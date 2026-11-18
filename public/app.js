@@ -105,7 +105,7 @@ import {
   loadSpritePrefs,
   renderSpriteAssistantHtml,
   saveSpritePrefs,
-} from "./sprite-assistant.js?v=20261118ctx";
+} from "./sprite-assistant.js?v=20261118reorg";
 import { collectUserInputAnswers, syncServerRequestCards, syncUserInputQuestion } from "./server-request-ui.js?v=20261117qoder";
 import {
   applySlashCommandSelection,
@@ -574,6 +574,7 @@ const state = {
     messages: [],
     pendingPreview: null,
     pendingArchive: null,
+    pendingReorg: null,
     scopedTopicId: "",
     scopedTopicName: "",
     busy: false,
@@ -6482,7 +6483,7 @@ function renderUpdateModal() {
             <span>桌面 App <strong>尚未安装</strong></span>
             <span class="update-desktop-tag">未安装</span>
           </div>
-          <div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason || "可在 Mac 上点击“构建桌面 App”或运行 agent-control desktop 安装")}</span></div>
+          <div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason || "可在当前系统点击“构建桌面 App”完成安装")}</span></div>
         `;
       }
     } else {
@@ -7932,6 +7933,82 @@ async function confirmSpriteDispatchPreview() {
   }
 }
 
+async function requestSpriteReorgPreview({ instruction = "" } = {}) {
+  const cleanText = String(instruction || "").trim();
+  if (!cleanText || state.sprite.busy) return;
+  state.sprite.busy = true;
+  renderSpriteAssistantMount();
+  try {
+    const res = await apiPost("/api/overview/reorganize", {
+      instruction: cleanText,
+      confirmOnly: true,
+    });
+    const ops = Array.isArray(res?.operations) ? res.operations : [];
+    if (!ops.length) {
+      pushSpriteMessage({
+        role: "sprite",
+        tone: "idle",
+        text: "未识别到需要调整的产线，请换个说法再试。",
+      });
+      return;
+    }
+    state.sprite.pendingReorg = {
+      instruction: cleanText,
+      summary: res.summary || "",
+      operations: ops,
+    };
+    pushSpriteMessage({
+      role: "sprite",
+      tone: "coin",
+      text: `已规划 ${ops.length} 项梦工厂布局调整：${res.summary || ""}。请点下方「确认调整」或直接说「确认」。`,
+      spokenText: `已规划 ${ops.length} 项梦工厂布局调整，请确认是否应用。`,
+    });
+  } catch (error) {
+    pushSpriteMessage({
+      role: "sprite",
+      tone: "urgent",
+      text: `布局调整规划失败：${formatActionError(error)}`,
+    });
+  } finally {
+    state.sprite.busy = false;
+    renderSpriteAssistantMount();
+  }
+}
+
+async function confirmSpriteReorgPreview() {
+  const pending = state.sprite.pendingReorg;
+  if (!pending?.operations?.length || state.sprite.busy) return;
+  state.sprite.busy = true;
+  renderSpriteAssistantMount();
+  try {
+    const res = await apiPost("/api/overview/reorganize", {
+      instruction: pending.instruction || "",
+      operations: pending.operations,
+      confirmOnly: false,
+    });
+    state.sprite.pendingReorg = null;
+    if (res?.overview) {
+      state.missionOverview = res.overview;
+      renderMissionOverview();
+    }
+    pushSpriteMessage({
+      role: "sprite",
+      tone: "work",
+      text: `梦工厂布局已更新（应用 ${res?.appliedCount || pending.operations.length} 项）：${res?.summary || pending.summary}。`,
+      spokenText: "梦工厂布局已更新。",
+    });
+  } catch (error) {
+    pushSpriteMessage({
+      role: "sprite",
+      tone: "urgent",
+      text: `应用布局调整失败：${formatActionError(error)}`,
+    });
+  } finally {
+    state.sprite.busy = false;
+    renderSpriteAssistantMount();
+  }
+}
+
 async function handleSpriteCommand(rawInput = "") {
   const text = String(rawInput || "").trim();
   if (!text || state.sprite.busy) return;
@@ -7943,10 +8020,30 @@ async function handleSpriteCommand(rawInput = "") {
   const parsed = classifySpriteUserInput(text, {
     hasPendingPreview: Boolean(state.sprite.pendingPreview),
     hasPendingArchive: Boolean(state.sprite.pendingArchive),
+    hasPendingReorg: Boolean(state.sprite.pendingReorg),
     scopedTopicId: state.sprite.scopedTopicId,
     overview: state.missionOverview,
     agentOptions: agentCtx.agentOptions,
   });
+
+  if (parsed.intent === "confirm_reorg") {
+    await confirmSpriteReorgPreview();
+    return;
+  }
+  if (parsed.intent === "cancel_reorg") {
+    state.sprite.pendingReorg = null;
+    pushSpriteMessage({
+      role: "sprite",
+      tone: "idle",
+      text: "好的，已取消本次梦工厂布局调整。",
+      spokenText: "已取消本次梦工厂布局调整。",
+    });
+    return;
+  }
+  if (parsed.intent === "reorg_preview") {
+    await requestSpriteReorgPreview({ instruction: parsed.instruction || text });
+    return;
+  }
 
   if (parsed.intent === "confirm_archive") {
     await confirmSpriteArchivePreview();
@@ -11130,6 +11227,17 @@ function bindEvents() {
         state.sprite.scopedTopicId = "";
         state.sprite.scopedTopicName = "";
         renderSpriteAssistantMount();
+      } else if (sAct === "confirm-reorg") {
+        void confirmSpriteReorgPreview();
+      } else if (sAct === "cancel-reorg") {
+        state.sprite.pendingReorg = null;
+        pushSpriteMessage({ role: "sprite", tone: "idle", text: "好的，已取消本次梦工厂布局调整。" });
+      } else if (sAct === "reorg-guide") {
+        pushSpriteMessage({
+          role: "sprite",
+          tone: "idle",
+          text: "你可以直接语音或打字告诉我如何调整梦工厂，例如：\n•「把 xxx 改名为 yyy」\n•「把 xxx 移到内容工坊」\n•「把 A 和 B 合并」\n•「删除 xxx 产线」\n•「重新扫描本地仓库」",
+        });
       } else if (sAct === "confirm-archive") {
         void confirmSpriteArchivePreview();
       } else if (sAct === "cancel-archive") {

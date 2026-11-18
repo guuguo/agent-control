@@ -418,3 +418,93 @@ test("UpdateService detects desktop shell drift, builds via /api/update/desktop,
   assert.equal(serviceRestartCalls, 2);
   svcOnly.close();
 });
+
+test("readInstalledDesktopAppInfo and applyDesktopUpdate support Windows and Linux desktop wrappers", async (t) => {
+  const { readInstalledDesktopAppInfo, computeDesktopSourceHash } = await import("../src/update-service.mjs");
+  const baseDir = await mkdtemp(resolve(os.tmpdir(), "ac-desktop-cross-"));
+  t.after(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  const rootDir = resolve(baseDir, "repo");
+  const winInstallDir = resolve(baseDir, "win-local");
+  const linuxInstallDir = resolve(baseDir, "linux-meta");
+  await mkdir(resolve(rootDir, "desktop", "windows"), { recursive: true });
+  await mkdir(resolve(rootDir, "desktop", "linux"), { recursive: true });
+  await mkdir(resolve(rootDir, "public"), { recursive: true });
+  await writeFile(resolve(rootDir, "package.json"), JSON.stringify({ name: "agent-control", version: "0.2.3" }), "utf8");
+  await writeFile(resolve(rootDir, "public", "index.html"), '<meta name="ac-ui-version" content="test" />', "utf8");
+  await writeFile(resolve(rootDir, "desktop", "windows", "install-app.ps1"), "# win installer\n", "utf8");
+  await writeFile(resolve(rootDir, "desktop", "linux", "install-app.sh"), "#!/usr/bin/env bash\n", "utf8");
+  await writeFile(resolve(rootDir, "desktop", "linux", "agent-control.py"), "# linux app\n", "utf8");
+
+  const expectedHash = await computeDesktopSourceHash(rootDir, "0.2.3");
+
+  // Windows: initially not installed, but supported & buildable
+  const winBefore = await readInstalledDesktopAppInfo({
+    rootDir,
+    packageVersion: "0.2.3",
+    platform: "win32",
+    installDir: winInstallDir,
+    env: { ...process.env, APPDATA: resolve(baseDir, "win-roaming") },
+  });
+  assert.equal(winBefore.supported, true);
+  assert.equal(winBefore.installed, false);
+  assert.equal(winBefore.canBuild, true);
+
+  const winSvc = new UpdateService({
+    rootDir,
+    dataDir: resolve(baseDir, "data-win"),
+    platform: "win32",
+    desktopInstallDir: winInstallDir,
+    disableAutoCheck: true,
+    execDesktopBuild: async ({ installDir }) => {
+      await mkdir(installDir, { recursive: true });
+      await writeFile(resolve(installDir, "desktop-meta.json"), JSON.stringify({
+        version: "0.2.3",
+        buildHash: expectedHash,
+        repoRoot: rootDir,
+        appPath: resolve(installDir, "Agent Control.lnk"),
+      }), "utf8");
+    },
+  });
+  t.after(() => winSvc.close());
+  const winBuilt = await winSvc.applyDesktopUpdate({ reason: "manual", relaunchIfRunning: false });
+  assert.equal(winBuilt.ok, true);
+  assert.equal(winBuilt.desktopApp.installed, true);
+  assert.equal(winBuilt.desktopApp.state, "up_to_date");
+
+  // Linux: initially not installed, supported & buildable
+  const linuxBefore = await readInstalledDesktopAppInfo({
+    rootDir,
+    packageVersion: "0.2.3",
+    platform: "linux",
+    installDir: linuxInstallDir,
+    env: { ...process.env, XDG_DATA_HOME: resolve(baseDir, "xdg-data") },
+  });
+  assert.equal(linuxBefore.supported, true);
+  assert.equal(linuxBefore.installed, false);
+  assert.equal(linuxBefore.canBuild, true);
+
+  const linuxSvc = new UpdateService({
+    rootDir,
+    dataDir: resolve(baseDir, "data-linux"),
+    platform: "linux",
+    desktopInstallDir: linuxInstallDir,
+    disableAutoCheck: true,
+    execDesktopBuild: async ({ installDir }) => {
+      await mkdir(installDir, { recursive: true });
+      await writeFile(resolve(installDir, "desktop-meta.json"), JSON.stringify({
+        version: "0.2.3",
+        buildHash: expectedHash,
+        repoRoot: rootDir,
+        appPath: resolve(installDir, "com.guuguo.AgentControl.desktop"),
+      }), "utf8");
+    },
+  });
+  t.after(() => linuxSvc.close());
+  const linuxBuilt = await linuxSvc.applyDesktopUpdate({ reason: "manual", relaunchIfRunning: false });
+  assert.equal(linuxBuilt.ok, true);
+  assert.equal(linuxBuilt.desktopApp.installed, true);
+  assert.equal(linuxBuilt.desktopApp.state, "up_to_date");
+});

@@ -38,6 +38,18 @@ executable = executable.replace('\\', '\\\\')
 desktop = applications / "com.guuguo.AgentControl.desktop"
 desktop.write_text('[Desktop Entry]\nType=Application\nName=Agent Control\nComment=本机与远程 Agent 控制台\nExec="' + executable + '"\nIcon=agent-control\nTerminal=false\nCategories=Development;Utility;\nStartupWMClass=com.guuguo.AgentControl\n')
 desktop.chmod(0o755)
+import json
+meta_dir = Path(os.environ.get("AGENT_CONTROL_APP_INSTALL_DIR") or (data / "agent-control"))
+meta_dir.mkdir(parents=True, exist_ok=True)
+meta_path = meta_dir / "desktop-meta.json"
+meta_path.write_text(json.dumps({
+    "version": os.environ.get("AGENT_CONTROL_APP_VERSION") or "",
+    "buildHash": os.environ.get("AGENT_CONTROL_BUILD_HASH") or "",
+    "repoRoot": str(Path(root).resolve()),
+    "appPath": str(desktop),
+    "launcherPath": str(launcher),
+    "platform": "linux",
+}, ensure_ascii=False, indent=2) + "\n")
 print("已安装桌面入口：" + str(desktop))
 print("启动：agent-control open（或在应用菜单搜索 Agent Control）")
 PY

@@ -187,4 +187,22 @@ test("Sprite Assistant supports scoped topic archive preview, confirm, and conte
   });
   assert.match(inheritHtml, /继承归档记忆/);
   assert.match(inheritHtml, /data-sprite-toggle-inherit/);
+
+  const reorgCmd = classifySpriteUserInput("把 web-ui 改名为 官网前端，然后移到内容工坊", {
+    overview: mockOverview,
+  });
+  assert.equal(reorgCmd.intent, "reorg_preview");
+  assert.equal(classifySpriteUserInput("确认", { hasPendingReorg: true }).intent, "confirm_reorg");
+  assert.equal(classifySpriteUserInput("取消", { hasPendingReorg: true }).intent, "cancel_reorg");
+
+  const reorgHtml = renderSpriteAssistantHtml({
+    open: true,
+    pendingReorg: {
+      summary: "重命名并调整房区",
+      operations: [{ type: "rename", label: "重命名产线：「web-ui」→「官网前端」<script>x</script>" }],
+    },
+  });
+  assert.doesNotMatch(reorgHtml, /<script>x<\/script>/);
+  assert.match(reorgHtml, /梦工厂布局调整方案/);
+  assert.match(reorgHtml, /确认调整/);
 });

@@ -20,6 +20,9 @@ export const DESKTOP_SOURCE_FILES = [
   "desktop/macos/Info.plist",
   "desktop/macos/build-app.sh",
   "desktop/macos/render-icon.swift",
+  "desktop/linux/agent-control.py",
+  "desktop/linux/install-app.sh",
+  "desktop/windows/install-app.ps1",
 ];
 export const DEFAULT_CHECK_INTERVAL_HOURS = 6;
 const MIN_CHECK_INTERVAL_HOURS = 1;
@@ -191,7 +194,158 @@ export async function readInstalledDesktopAppInfo({
   env = process.env,
 } = {}) {
   const expectedVersion = String(packageVersion || "0.0.0").trim();
-  if (normalizePlatform(platform) !== "darwin") {
+  const normPlatform = normalizePlatform(platform);
+
+  if (normPlatform === "linux") {
+    const homeDir = resolveUserHome({ env, platform: normPlatform });
+    const xdgData = env?.XDG_DATA_HOME ? resolve(env.XDG_DATA_HOME) : resolve(homeDir, ".local", "share");
+    const metaDir = resolve(installDir || env?.AGENT_CONTROL_APP_INSTALL_DIR || resolve(xdgData, "agent-control"));
+    const metaPath = resolve(metaDir, "desktop-meta.json");
+    const desktopFile = resolve(xdgData, "applications", "com.guuguo.AgentControl.desktop");
+    const expectedHash = await computeDesktopSourceHash(rootDir, expectedVersion);
+    const hasInstallScript = existsSync(resolve(rootDir, "desktop", "linux", "install-app.sh"));
+    const canBuild = hasInstallScript;
+    let meta = null;
+    if (existsSync(metaPath)) {
+      try {
+        meta = JSON.parse(await readFile(metaPath, "utf8"));
+      } catch {
+        meta = null;
+      }
+    }
+    const appPath = String(meta?.appPath || desktopFile);
+    const installed = Boolean(meta || existsSync(desktopFile));
+    if (!installed) {
+      return {
+        supported: true,
+        installed: false,
+        appPath,
+        installedVersion: "",
+        installedBuildNumber: "",
+        installedHash: "",
+        expectedVersion,
+        expectedHash,
+        repoRoot: "",
+        state: "not_installed",
+        needsUpdate: false,
+        canBuild,
+        reason: "尚未安装 Linux 桌面入口，可点击「构建桌面 App」安装（需 Python 3 + PyGObject + WebKitGTK 4.1）",
+      };
+    }
+    const installedVersion = String(meta?.version || "").trim();
+    const installedHash = String(meta?.buildHash || "").trim();
+    const repoRoot = String(meta?.repoRoot || "").trim();
+    const repoRootMismatch = Boolean(repoRoot && resolve(repoRoot) !== resolve(rootDir));
+    let reason = "";
+    let needsUpdate = false;
+    if (!installedHash) {
+      needsUpdate = true;
+      reason = "旧版 Linux 桌面入口尚未包含构建指纹，建议重建以启用版本跟踪";
+    } else if (installedVersion !== expectedVersion) {
+      needsUpdate = true;
+      reason = `桌面 App 版本（v${installedVersion || "未知"}）落后于当前服务版本（v${expectedVersion}）`;
+    } else if (installedHash !== expectedHash) {
+      needsUpdate = true;
+      reason = "Linux 桌面端源码或安装脚本已更新，需要重新同步桌面入口";
+    } else if (repoRootMismatch) {
+      needsUpdate = true;
+      reason = "桌面入口绑定的仓库路径与当前服务目录不一致";
+    }
+    return {
+      supported: true,
+      installed: true,
+      appPath,
+      installedVersion,
+      installedBuildNumber: "",
+      installedHash,
+      expectedVersion,
+      expectedHash,
+      repoRoot,
+      state: needsUpdate ? "outdated" : "up_to_date",
+      needsUpdate,
+      canBuild,
+      reason,
+    };
+  }
+
+  if (normPlatform === "win32") {
+    const homeDir = resolveUserHome({ env, platform: normPlatform });
+    const localBase = resolve(
+      installDir
+        || env?.AGENT_CONTROL_APP_INSTALL_DIR
+        || (env?.LOCALAPPDATA ? resolve(env.LOCALAPPDATA, "AgentControl") : resolve(homeDir, "AppData", "Local", "AgentControl")),
+    );
+    const metaPath = resolve(localBase, "desktop-meta.json");
+    const startMenuShortcut = env?.APPDATA
+      ? resolve(env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Agent Control.lnk")
+      : resolve(homeDir, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Agent Control.lnk");
+    const expectedHash = await computeDesktopSourceHash(rootDir, expectedVersion);
+    const hasInstallScript = existsSync(resolve(rootDir, "desktop", "windows", "install-app.ps1"));
+    const canBuild = hasInstallScript;
+    let meta = null;
+    if (existsSync(metaPath)) {
+      try {
+        meta = JSON.parse(await readFile(metaPath, "utf8"));
+      } catch {
+        meta = null;
+      }
+    }
+    const appPath = String(meta?.appPath || startMenuShortcut);
+    const installed = Boolean(meta || existsSync(startMenuShortcut));
+    if (!installed) {
+      return {
+        supported: true,
+        installed: false,
+        appPath,
+        installedVersion: "",
+        installedBuildNumber: "",
+        installedHash: "",
+        expectedVersion,
+        expectedHash,
+        repoRoot: "",
+        state: "not_installed",
+        needsUpdate: false,
+        canBuild,
+        reason: "尚未安装 Windows 桌面 App 快捷入口，可点击「构建桌面 App」创建桌面与开始菜单独立窗口入口",
+      };
+    }
+    const installedVersion = String(meta?.version || "").trim();
+    const installedHash = String(meta?.buildHash || "").trim();
+    const repoRoot = String(meta?.repoRoot || "").trim();
+    const repoRootMismatch = Boolean(repoRoot && resolve(repoRoot) !== resolve(rootDir));
+    let reason = "";
+    let needsUpdate = false;
+    if (!installedHash) {
+      needsUpdate = true;
+      reason = "旧版 Windows 桌面入口尚未包含构建指纹，建议重建以启用版本跟踪";
+    } else if (installedVersion !== expectedVersion) {
+      needsUpdate = true;
+      reason = `桌面 App 版本（v${installedVersion || "未知"}）落后于当前服务版本（v${expectedVersion}）`;
+    } else if (installedHash !== expectedHash) {
+      needsUpdate = true;
+      reason = "Windows 桌面启动脚本或配置已更新，需要重新构建桌面入口";
+    } else if (repoRootMismatch) {
+      needsUpdate = true;
+      reason = "桌面入口绑定的仓库路径与当前服务目录不一致";
+    }
+    return {
+      supported: true,
+      installed: true,
+      appPath,
+      installedVersion,
+      installedBuildNumber: "",
+      installedHash,
+      expectedVersion,
+      expectedHash,
+      repoRoot,
+      state: needsUpdate ? "outdated" : "up_to_date",
+      needsUpdate,
+      canBuild,
+      reason,
+    };
+  }
+
+  if (normPlatform !== "darwin") {
     return {
       supported: false,
       installed: false,
@@ -205,7 +359,7 @@ export async function readInstalledDesktopAppInfo({
       state: "unsupported",
       needsUpdate: false,
       canBuild: false,
-      reason: "仅 macOS 支持桌面壳子更新",
+      reason: "当前操作系统暂不支持桌面壳子更新",
     };
   }
 
@@ -859,11 +1013,50 @@ export class UpdateService {
   }
 
   async #defaultExecDesktopBuild({ installDir = "" } = {}) {
-    const buildScript = resolve(this.#rootDir, "desktop", "macos", "build-app.sh");
+    const normPlatform = normalizePlatform(this.#platform);
+    const expectedVersion = this.#repoInfo?.packageVersion || "0.0.0";
+    const expectedHash = await computeDesktopSourceHash(this.#rootDir, expectedVersion);
     const env = {
       ...this.#env,
       ...(installDir ? { AGENT_CONTROL_APP_INSTALL_DIR: installDir } : {}),
+      AGENT_CONTROL_APP_VERSION: expectedVersion,
+      AGENT_CONTROL_BUILD_HASH: expectedHash,
     };
+    if (normPlatform === "linux") {
+      const installScript = resolve(this.#rootDir, "desktop", "linux", "install-app.sh");
+      const prepared = prepareCrossPlatformSpawn("bash", [installScript], {
+        cwd: this.#rootDir,
+        env,
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+      }, { platform: this.#platform });
+      return execFileAsync(prepared.command, prepared.args, prepared.options);
+    }
+    if (normPlatform === "win32") {
+      const psScript = resolve(this.#rootDir, "desktop", "windows", "install-app.ps1");
+      const psArgs = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        psScript,
+        "-AppVersion",
+        expectedVersion,
+        "-BuildHash",
+        expectedHash,
+      ];
+      if (installDir) {
+        psArgs.push("-InstallDir", installDir);
+      }
+      const prepared = prepareCrossPlatformSpawn("powershell", psArgs, {
+        cwd: this.#rootDir,
+        env,
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+      }, { platform: this.#platform });
+      return execFileAsync(prepared.command, prepared.args, prepared.options);
+    }
+    const buildScript = resolve(this.#rootDir, "desktop", "macos", "build-app.sh");
     const prepared = prepareCrossPlatformSpawn("bash", [buildScript, "--install"], {
       cwd: this.#rootDir,
       env,
@@ -964,13 +1157,17 @@ export class UpdateService {
     if (this.#updating || this.#desktopUpdating) {
       throw Object.assign(new Error("正在执行更新，请稍候完成"), { status: 409 });
     }
-    if (normalizePlatform(this.#platform) !== "darwin") {
-      throw Object.assign(new Error("当前系统不是 macOS，不支持更新桌面 App 壳子"), { status: 400 });
+    const normPlatform = normalizePlatform(this.#platform);
+    if (!["darwin", "linux", "win32"].includes(normPlatform)) {
+      throw Object.assign(new Error("当前操作系统暂不支持更新桌面 App 壳子"), { status: 400 });
     }
     await this.#inspectRepo();
     const info = this.#repoInfo.desktopApp;
     if (!this.#hasCustomDesktopBuild && !info?.canBuild) {
-      throw Object.assign(new Error("未检测到 Xcode Command Line Tools (swiftc) 或桌面构建脚本，无法在本机重编 App"), {
+      const hint = normPlatform === "darwin"
+        ? "未检测到 Xcode Command Line Tools (swiftc) 或桌面构建脚本，无法在本机重编 App"
+        : "未检测到桌面构建脚本，无法在本机更新桌面 App";
+      throw Object.assign(new Error(hint), {
         status: 400,
       });
     }

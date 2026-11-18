@@ -840,3 +840,73 @@ test("Zero-preset fresh install auto-discovers topics from user's local workspac
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
 });
+
+test("planAndApplyBlueprintEdit supports deterministic & AI-assisted natural-language Dream Factory corrections", async () => {
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-mo-reorg-"));
+  try {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const threads = [
+      { id: "codex:default:r1", provider: "codex", cwd: "/Users/alice/dev/web-ui", title: "前端页面", updatedAt: nowSec - 100 },
+      { id: "codex:default:r2", provider: "codex", cwd: "/Users/alice/dev/api-core", title: "后端接口", updatedAt: nowSec - 200 },
+      { id: "codex:default:r3", provider: "codex", cwd: "/Users/alice/dev/junk-demo", title: "旧测试", updatedAt: nowSec - 300 },
+    ];
+    const hub = createMockHub(threads);
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      projectValuePath: join(dir, "none.json"),
+      collectGitImpl: async () => null,
+      runAiImpl: async () => JSON.stringify({
+        summary: "把 web-ui 与 api-core 合并并改名为全栈主线，同时移除 junk-demo",
+        operations: [
+          { type: "merge", sourceTopicId: "web-ui", targetTopicId: "api-core", newName: "全栈主线" },
+          { type: "remove", topicId: "junk-demo" },
+        ],
+      }),
+    });
+
+    // Trigger auto-discovery
+    await service.getOverview({ trigger: "view" });
+
+    // 1. Deterministic rename + move preview & apply
+    const detPreview = await service.planAndApplyBlueprintEdit({
+      instruction: "把 web-ui 改名为 官网前端，把 web-ui 移到 发布与增长部",
+      confirmOnly: true,
+    });
+    assert.equal(detPreview.pendingConfirmation, true);
+    assert.equal(detPreview.aiUsed, false);
+    assert.equal(detPreview.operations.length, 2);
+
+    const detApplied = await service.planAndApplyBlueprintEdit({
+      instruction: detPreview.instruction,
+      operations: detPreview.operations,
+      confirmOnly: false,
+    });
+    assert.equal(detApplied.appliedCount, 2);
+    let topics = detApplied.overview.domains.flatMap((d) => d.topics);
+    const renamed = topics.find((t) => t.id === "web-ui");
+    assert.equal(renamed.name, "官网前端");
+    assert.equal(renamed.domainId, "global-pub");
+
+    // 2. AI fallback for complex multi-step reorganization
+    const aiPreview = await service.planAndApplyBlueprintEdit({
+      instruction: "帮我把前后端合在一起叫全栈主线，废掉那个旧测试",
+      confirmOnly: true,
+    });
+    assert.equal(aiPreview.aiUsed, true);
+    assert.equal(aiPreview.operations.length, 2);
+
+    const aiApplied = await service.planAndApplyBlueprintEdit({
+      operations: aiPreview.operations,
+      confirmOnly: false,
+    });
+    assert.equal(aiApplied.appliedCount, 2);
+    topics = aiApplied.overview.domains.flatMap((d) => d.topics);
+    assert.equal(topics.length, 1);
+    assert.equal(topics[0].name, "全栈主线");
+    assert.equal(topics[0].cwdPrefixes.includes("/Users/alice/dev/web-ui"), true);
+    assert.equal(topics[0].cwdPrefixes.includes("/Users/alice/dev/api-core"), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});
