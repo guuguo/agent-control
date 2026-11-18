@@ -2171,7 +2171,8 @@ export class ProviderHub {
           }),
         };
       });
-      rawTurns = [...(forkParent.prefixTurns || []), ...cleanedRealTurns];
+      // 继承历史只属于最早一页，不能在尾部刷新或每次翻页时重复返回。
+      rawTurns = result.nextCursor ? cleanedRealTurns : [...(forkParent.prefixTurns || []), ...cleanedRealTurns];
     }
     const nativeQueuedTurns = Array.isArray(result.nativeQueuedTurns)
       ? result.nativeQueuedTurns
