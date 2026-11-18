@@ -90,7 +90,10 @@ with tempfile.TemporaryDirectory(prefix="agent-control-linux-desktop-") as tmp:
         title = web.evaluate_javascript_finish(result).to_string()
         step = state["step"]
         if step == 0:
-            assert title == "/", title
+            assert title == "/", (title, app.web.get_uri(), app.notice_label.get_text())
+            app.show_notice("提示可见性验收")
+            assert app.notice.get_visible() and app.notice_label.get_visible()
+            app.notice.hide()
             assert not app.back.get_sensitive()
             width, height = app.window.get_size()
             screenshot = Gdk.pixbuf_get_from_window(app.window.get_window(), 0, 0, width, height)

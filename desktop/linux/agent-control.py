@@ -62,6 +62,7 @@ class AgentControl(Gtk.Application):
         self.notice.set_no_show_all(True)
         self.notice_label = Gtk.Label(label="", wrap=True)
         self.notice.get_content_area().add(self.notice_label)
+        self.notice.get_content_area().show_all()
         self.notice.connect("response", lambda *_: self.notice.hide())
         box.pack_start(self.notice, False, False, 0)
         box.pack_start(self.web, True, True, 0)
@@ -94,7 +95,7 @@ class AgentControl(Gtk.Application):
 
     def show_notice(self, message):
         self.notice_label.set_text(message)
-        self.notice.show_all()
+        self.notice.show()
 
     def reload(self):
         if self.web.get_uri():
