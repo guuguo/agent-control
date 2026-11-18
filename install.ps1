@@ -241,6 +241,8 @@ try {
   if ($healthy) {
     Write-Host "  服务状态: 运行中"
   }
+  Write-Host ""
+  Write-Host "  If this helps you, consider giving it a Star: https://github.com/guuguo/agent-control" -ForegroundColor Cyan
   Write-Host "==================================================" -ForegroundColor Green
 
   if (-not $NoOpen -and -not $NoService) {

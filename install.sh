@@ -543,6 +543,8 @@ if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
   echo ""
   echo "  提示: 请将 ~/.local/bin 加入 PATH，或直接使用 $CLI_PATH"
 fi
+echo ""
+echo "  If this helps you, consider giving it a Star: https://github.com/guuguo/agent-control"
 echo "=================================================="
 
 if [[ "$OPEN_AFTER" == "true" && "$INSTALL_SERVICE" == "true" ]]; then
