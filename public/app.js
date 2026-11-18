@@ -2657,6 +2657,7 @@ function buildDispatchAgentContext() {
 function ensureTycoon3DMounted(boardEl) {
   let viewportEl = $("tycoon3dViewport");
   let hudEl = $("tycoonHudLayer");
+  let spriteMountEl = $("spriteAssistantMount");
   if (!viewportEl || !hudEl || !boardEl.contains(viewportEl)) {
     tycoon3dInstance?.dispose?.();
     tycoon3dInstance = null;
@@ -2664,9 +2665,11 @@ function ensureTycoon3DMounted(boardEl) {
     boardEl.innerHTML = `
       <div id="tycoon3dViewport" class="tycoon3d-viewport"></div>
       <div id="tycoonHudLayer" class="tycoon-hud-layer"></div>
+      <div id="spriteAssistantMount" class="sprite-assistant-mount is-3d"></div>
     `;
     viewportEl = $("tycoon3dViewport");
     hudEl = $("tycoonHudLayer");
+    spriteMountEl = $("spriteAssistantMount");
     tycoon3dInstance = createTycoon3DWorld(viewportEl, {
       onSelectTopic: (topicId) => {
         state.tycoonSelectedTopicId = topicId;
@@ -2695,8 +2698,13 @@ function ensureTycoon3DMounted(boardEl) {
         }
       },
     });
+  } else if (!spriteMountEl || !boardEl.contains(spriteMountEl)) {
+    spriteMountEl = document.createElement("div");
+    spriteMountEl.id = "spriteAssistantMount";
+    spriteMountEl.className = "sprite-assistant-mount is-3d";
+    boardEl.appendChild(spriteMountEl);
   }
-  return { viewportEl, hudEl };
+  return { viewportEl, hudEl, spriteMountEl };
 }
 
 function ensureOverview2DMounted(boardEl) {
@@ -2716,8 +2724,11 @@ function renderProjectBoard() {
   syncImmersiveDeckBodyClass();
   if (!shouldShowBoard) {
     tycoon3dInstance?.pause?.();
+    if (state.sprite.recording || state.sprite.handsFree) {
+      void stopSpriteMic({ submit: false, stopHandsFree: true });
+    }
+    stopSpriteSpeech();
     boardEl.hidden = true;
-    renderSpriteAssistantMount();
     renderBatchActionBars();
     return;
   }
@@ -2786,6 +2797,10 @@ function renderProjectBoard() {
       tycoon3dInstance.dispose();
       tycoon3dInstance = null;
     }
+    if (state.sprite.recording || state.sprite.handsFree) {
+      void stopSpriteMic({ submit: false, stopHandsFree: true });
+    }
+    stopSpriteSpeech();
     if (!state.missionOverview && !state.missionOverviewLoading) {
       void loadMissionOverview({ trigger: "open" });
     }
@@ -2820,13 +2835,15 @@ function renderProjectBoard() {
     if (savedSparkVal && $("moSparkInput")) {
       $("moSparkInput").value = savedSparkVal;
     }
-    syncSpriteWithOverview(state.missionOverview);
-    renderSpriteAssistantMount();
   } else {
     if (tycoon3dInstance) {
       tycoon3dInstance.dispose();
       tycoon3dInstance = null;
     }
+    if (state.sprite.recording || state.sprite.handsFree) {
+      void stopSpriteMic({ submit: false, stopHandsFree: true });
+    }
+    stopSpriteSpeech();
     const nextBoardHtml = renderProjectBoardHtml({
       groups,
       allGroups,
@@ -7600,6 +7617,7 @@ async function speakSpriteText(text = "") {
 
 function renderSpriteAssistantMount() {
   const mount = $("spriteAssistantMount");
+  const is3d = Boolean(isBoardViewActive() && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd);
   const hasPendingCard = Boolean(
     state.sprite.pendingPreview
     || state.sprite.pendingArchive
@@ -7608,36 +7626,25 @@ function renderSpriteAssistantMount() {
   const badgeCount = state.sprite.unreadCount + (hasPendingCard ? 1 : 0);
   const effMood = hasPendingCard ? "coin" : state.sprite.mood;
   tycoon3dInstance?.syncSpriteState?.({ badgeCount: state.sprite.open ? 0 : badgeCount, mood: effMood });
-  if (!mount) return;
-
-  const onBoard = isBoardViewActive();
-  const is3d = Boolean(onBoard && state.boardViewMode === "tycoon3d" && !state.scopedProjectCwd);
-  const isChat = !onBoard;
-  const hasInspector = Boolean(
-    is3d
-    && (state.tycoonInspectorMode === "unassigned"
-      || state.tycoonInspectorMode === "incubator"
-      || state.tycoonSelectedTopicId),
-  );
-  const isChatIdle = Boolean(
-    isChat
-    && !state.sprite.open
-    && !state.sprite.recording
-    && !state.sprite.handsFree
-    && !state.sprite.toastBubble?.text,
-  );
-  mount.classList.toggle("is-3d", is3d);
-  mount.classList.toggle("is-2d", onBoard && !is3d);
-  mount.classList.toggle("is-chat", isChat);
-  mount.classList.toggle("is-chat-idle", isChatIdle);
-  mount.classList.toggle("has-inspector", hasInspector);
-
-  const launchBtn = $("voiceModeBtn");
-  if (launchBtn) {
-    const voiceHot = Boolean(state.sprite.open || state.sprite.handsFree || state.sprite.recording);
-    launchBtn.classList.toggle("is-active", voiceHot);
-    launchBtn.setAttribute("aria-pressed", voiceHot ? "true" : "false");
+  if (!mount || !is3d) {
+    if (mount) {
+      mount.hidden = true;
+      mount._acLastStableHtml = "";
+      mount._acLastHtml = "";
+      mount.innerHTML = "";
+    }
+    return;
   }
+  mount.hidden = false;
+
+  const hasInspector = Boolean(
+    state.tycoonInspectorMode === "unassigned"
+    || state.tycoonInspectorMode === "incubator"
+    || state.tycoonSelectedTopicId,
+  );
+  mount.classList.add("is-3d");
+  mount.classList.remove("is-2d", "is-chat", "is-chat-idle");
+  mount.classList.toggle("has-inspector", hasInspector);
 
   // Sync live input draft before re-rendering so typing is never lost on background SSE ticks
   const liveInput = $("spriteCommandInput");
@@ -8390,9 +8397,20 @@ async function startSpriteMic({ handsFree = false } = {}) {
     stopSpriteSpeech();
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前浏览器不支持麦克风权限，请直接输入文字指令。" });
+    pushSpriteMessage({ role: "sprite", tone: "urgent", text: "当前环境未开放麦克风权限，可在桌面客户端系统设置中授权麦克风，或直接打字发送。" });
     return;
   }
+  // Show immediate visual feedback in Sprite voice bar while awaiting getUserMedia permission/stream
+  state.sprite.recording = true;
+  state.sprite.recordElapsedSec = 0;
+  state.sprite.speechActive = false;
+  if (handsFree && !state.sprite.handsFree) {
+    state.sprite.prevTtsPref = state.sprite.ttsEnabled;
+    state.sprite.ttsEnabled = true;
+    state.sprite.handsFree = true;
+  }
+  renderSpriteAssistantMount();
+
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) throw new Error("不支持 AudioContext");
@@ -8406,6 +8424,14 @@ async function startSpriteMic({ handsFree = false } = {}) {
         channelCount: 1,
       },
     });
+    if (!state.sprite.recording) {
+      // User cancelled while getUserMedia was pending
+      for (const track of stream.getTracks()) {
+        try { track.stop(); } catch {}
+      }
+      try { void ctx.close?.(); } catch {}
+      return;
+    }
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(2048, 1, 1);
     const silentGain = ctx.createGain();
@@ -8428,12 +8454,6 @@ async function startSpriteMic({ handsFree = false } = {}) {
     state.sprite.mic.bargeInFrames = 0;
     state.sprite.recordElapsedSec = 0;
     state.sprite.speechActive = false;
-
-    if (handsFree && !state.sprite.handsFree) {
-      state.sprite.prevTtsPref = state.sprite.ttsEnabled;
-      state.sprite.ttsEnabled = true;
-      state.sprite.handsFree = true;
-    }
 
     processor.onaudioprocess = (ev) => {
       if (!state.sprite.recording) return;
@@ -10638,20 +10658,37 @@ async function toggleComposerDictation() {
   }
 }
 
-async function openVoiceModal() {
+function enterTycoon3DAndSummonSprite({ startVoice = false } = {}) {
   setTopbarMenuOpen(false);
   setComposerConfigOpen(false);
   const legacyModal = $("voiceCopilotModal");
   if (legacyModal?.open) {
     try { legacyModal.close(); } catch {}
   }
-  if (!state.missionOverview && !state.missionOverviewLoading) {
-    void loadMissionOverview({ trigger: "open" });
+  if (state.scopedProjectCwd) {
+    state.scopedProjectCwd = "";
+  }
+  if (state.boardViewMode !== "tycoon3d") {
+    setBoardViewMode("tycoon3d");
+  }
+  if (!isBoardViewActive()) {
+    openProjectBoardView();
+  } else {
+    if (!state.missionOverview && !state.missionOverviewLoading) {
+      void loadMissionOverview({ trigger: "open" });
+    }
+    renderProjectBoard();
   }
   toggleSpriteAssistant({ open: true });
-  if (!state.sprite.recording) {
-    await startSpriteMic({ handsFree: false });
+  if (startVoice && !state.sprite.recording) {
+    void startSpriteMic({ handsFree: false });
+  } else {
+    requestAnimationFrame(() => $("spriteCommandInput")?.focus());
   }
+}
+
+async function openVoiceModal() {
+  enterTycoon3DAndSummonSprite({ startVoice: true });
 }
 
 function hangupVoiceCall({ closeModal = true } = {}) {
@@ -11181,16 +11218,7 @@ function bindEvents() {
   $("boardToggleBtn").addEventListener("click", () => openProjectBoardView());
 
   $("voiceModeBtn").addEventListener("click", () => {
-    setTopbarMenuOpen(false);
-    setComposerConfigOpen(false);
-    if (!state.missionOverview && !state.missionOverviewLoading) {
-      void loadMissionOverview({ trigger: "open" });
-    }
-    const nextOpen = !state.sprite.open;
-    toggleSpriteAssistant({ open: nextOpen });
-    if (nextOpen) {
-      requestAnimationFrame(() => $("spriteCommandInput")?.focus());
-    }
+    enterTycoon3DAndSummonSprite({ startVoice: true });
   });
 
   $("activeProfileBadge")?.addEventListener("click", () => {
