@@ -82,8 +82,13 @@ with tempfile.TemporaryDirectory(prefix="agent-control-linux-desktop-") as tmp:
     def loaded(_web, event):
         if event != WebKit2.LoadEvent.FINISHED:
             return
+        # load-finished 时 title 属性通知可能尚未到达，直接读取已加载的 DOM。
+        app.web.evaluate_javascript("document.title", -1, None, None, None, page_ready, None)
+
+    @guarded
+    def page_ready(web, result, _data):
+        title = web.evaluate_javascript_finish(result).to_string()
         step = state["step"]
-        title = app.web.get_title()
         if step == 0:
             assert title == "/", title
             assert not app.back.get_sensitive()
