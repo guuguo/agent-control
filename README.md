@@ -88,6 +88,8 @@ Requires **Node.js 22+** and **Git** (the installer prompts you if either is mis
 curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 ```
 
+Linux uses the browser UI and a systemd user service. See the [Linux guide](docs/linux.md) for headless servers, SSH access, containers and WSL.
+
 **Windows (PowerShell):**
 ```powershell
 (irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex

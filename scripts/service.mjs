@@ -7,6 +7,7 @@ import {
   normalizePlatform,
   resolvePlatformDataDir,
   resolveUserHome,
+  splitPathEnv,
 } from "../src/platform.mjs";
 import { isProcessAlive } from "../src/runtime-lease.mjs";
 
@@ -94,10 +95,19 @@ export function renderSystemdUnit({
   serverEntry = SERVER_ENTRY,
   port = "43310",
   dataDir = resolvePlatformDataDir({ platform: "linux" }),
+  homeDir = resolveUserHome(process.env, "linux"),
+  env = process.env,
   nodeVersion = process.versions.node,
 } = {}) {
   const logDir = join(dataDir, "logs");
   const execArgs = resolveServerNodeArgs(serverEntry, nodeVersion).map(systemdQuote).join(" ");
+  const pathValue = [...new Set([
+    dirname(nodeBin),
+    join(homeDir, ".local", "bin"),
+    join(homeDir, ".npm-global", "bin"),
+    ...splitPathEnv(env, "linux"),
+    "/usr/local/bin", "/usr/bin", "/bin",
+  ])].join(":");
   return `[Unit]
 Description=Agent Control Local Console
 After=network.target
@@ -108,6 +118,7 @@ WorkingDirectory=${systemdQuote(rootDir)}
 ExecStart=${systemdQuote(nodeBin)} ${execArgs}
 Environment=${systemdQuote(`PORT=${port}`)}
 Environment=${systemdQuote(`AGENT_CONTROL_DATA_DIR=${dataDir}`)}
+Environment=${systemdQuote(`PATH=${pathValue}`)}
 Restart=always
 RestartSec=3
 StandardOutput=append:${join(logDir, "stdout.log")}

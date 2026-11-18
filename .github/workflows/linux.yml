@@ -1,0 +1,47 @@
+name: Linux Compatibility
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "tests/**"
+      - "install.sh"
+      - "uninstall.sh"
+      - "package*.json"
+      - ".github/workflows/linux.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        node: [22, 24]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Check syntax and Linux installers
+        run: |
+          npm run check
+          bash -n install.sh uninstall.sh scripts/local-control.sh
+      - name: Linux paths, service, updates and zero-token CLI protocols
+        run: >-
+          node --test --test-concurrency=1
+          tests/linux-service.test.mjs tests/platform.test.mjs
+          tests/service-restart.test.mjs tests/update-service.test.mjs
+          tests/hub-server.test.mjs tests/codex-provider.test.mjs
+          tests/claude-provider.test.mjs tests/antigravity-provider.test.mjs
+          tests/grok-provider.test.mjs tests/qoder-provider.test.mjs

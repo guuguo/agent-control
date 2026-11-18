@@ -50,6 +50,8 @@
 curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 ```
 
+Linux 使用浏览器界面和 systemd 用户服务；无桌面、SSH、容器及 WSL 的运行方式见 [Linux 安装与运行](docs/linux.md)。
+
 **Windows**（打开 **PowerShell** 粘贴回车）：
 
 ```powershell
