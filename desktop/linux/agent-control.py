@@ -11,6 +11,7 @@ from urllib.request import urlopen
 try:
     import gi
     gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
     gi.require_version("WebKit2", "4.1")
     from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2
 except (ImportError, ValueError) as error:
@@ -50,6 +51,7 @@ class AgentControl(Gtk.Application):
         context.connect("download-started", self.download_started)
         self.web = WebKit2.WebView.new_with_context(context)
         self.web.connect("decide-policy", self.decide_policy)
+        self.web.connect("permission-request", self.permission_request)
         self.web.get_back_forward_list().connect("changed", lambda *_: self.back.set_sensitive(self.web.can_go_back()))
         self.web.connect("load-changed", self.load_changed)
         self.web.connect("load-failed", self.load_failed)
@@ -146,6 +148,18 @@ class AgentControl(Gtk.Application):
     def download_started(self, _context, download):
         download.connect("decide-destination", self.download_destination)
         download.connect("failed", lambda _download, error: self.show_notice("下载未完成：" + error.message) if not error.matches(WebKit2.download_error_quark(), WebKit2.DownloadError.CANCELLED_BY_USER) else None)
+
+    def permission_request(self, _web, request):
+        # 语音输入需要原生授权入口；不静默允许麦克风或摄像头。
+        if not isinstance(request, WebKit2.UserMediaPermissionRequest):
+            return False
+        devices = "麦克风和摄像头" if request.props.is_for_video_device else "麦克风"
+        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.YES_NO, text=f"允许当前控制台使用{devices}吗？")
+        dialog.format_secondary_text(self.web.get_uri() or self.url)
+        response = dialog.run()
+        dialog.destroy()
+        (request.allow if response == Gtk.ResponseType.YES else request.deny)()
+        return True
 
     def download_destination(self, download, filename):
         chooser = Gtk.FileChooserDialog(title="保存文件", parent=self.window, action=Gtk.FileChooserAction.SAVE)

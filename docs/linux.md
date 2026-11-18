@@ -14,7 +14,7 @@ sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1
 sudo dnf install python3-gobject gtk3 webkit2gtk4.1
 ```
 
-再执行下文的一键安装；已有 Agent Control 的用户更新源码后运行：
+再执行下文的一键安装，安装器会同时生成桌面入口与新版 CLI。旧版用户也需要重新执行一次安装器来刷新 CLI；安装后可随时补装或打开桌面窗口：
 
 ```bash
 agent-control desktop

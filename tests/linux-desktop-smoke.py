@@ -52,8 +52,9 @@ with tempfile.TemporaryDirectory(prefix="agent-control-linux-desktop-") as tmp:
     info = Gio.DesktopAppInfo.new_from_filename(str(entry))
     assert info is not None
     launcher = home / ".local/bin/agent-control-desktop"
-    assert info.get_executable() == str(launcher), info.get_executable()
-    subprocess.run([str(launcher), "--check"], env=env, check=True)
+    _, command = GLib.shell_parse_argv(info.get_commandline())
+    assert command == [str(launcher)], command
+    subprocess.run([*command, "--check"], env=env, check=True)
     assert (Path(env["XDG_DATA_HOME"]) / "icons/hicolor/scalable/apps/agent-control.svg").exists()
     print("PASS: 桌面入口、带空格路径与启动器", flush=True)
 
