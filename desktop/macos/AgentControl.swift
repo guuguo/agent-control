@@ -4,7 +4,13 @@ import WebKit
 
 private let defaultPort = "43310"
 private let launchAgentLabel = "com.guuguo.agent-control"
-private let windowBgColor = NSColor(srgbRed: 8 / 255.0, green: 11 / 255.0, blue: 16 / 255.0, alpha: 1.0)
+private let windowBgColor = NSColor(name: nil) { appearance in
+  let match = appearance.bestMatch(from: [.darkAqua, .aqua])
+  if match == .darkAqua {
+    return NSColor(srgbRed: 8 / 255.0, green: 11 / 255.0, blue: 16 / 255.0, alpha: 1.0)
+  }
+  return NSColor(srgbRed: 244 / 255.0, green: 246 / 255.0, blue: 250 / 255.0, alpha: 1.0)
+}
 
 private let localFileContextMenuScript = #"""
 (() => {
@@ -53,7 +59,7 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
   private var downloadDestinations = [ObjectIdentifier: URL]()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    NSApp.appearance = NSAppearance(named: .darkAqua)
+    NSApp.appearance = nil
     configureTargets()
     buildMenuBar()
     buildWindow()
@@ -178,11 +184,13 @@ final class AgentControlAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
     backButton.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: "返回")
     backButton.imagePosition = .imageLeading
     backButton.toolTip = "返回上一页（⌘[）"
+    backButton.isHidden = true
     accessory.view.addSubview(backButton)
     window.addTitlebarAccessoryViewController(accessory)
 
     navigationObservation = webView.observe(\.canGoBack, options: [.initial, .new]) { [weak self] view, _ in
       self?.backButton.isEnabled = view.canGoBack
+      self?.backButton.isHidden = !view.canGoBack
     }
   }
 
