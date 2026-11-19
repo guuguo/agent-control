@@ -20,8 +20,8 @@
   </tr>
 </table>
 
-<details>
-<summary>展开更多特性界面（免提语音总控 · 手机扫码隧道 · 一键更新与桌面壳子同步）</summary>
+<details open>
+<summary><strong>更多核心界面（免提语音总控 · 手机扫码隧道 · 一键更新与桌面壳子同步）</strong></summary>
 
 <table>
   <tr>
