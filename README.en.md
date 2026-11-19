@@ -1,10 +1,10 @@
-[简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
+[简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [繁體中文](README.zh-TW.md)
 
 <h1 align="center">Agent Control</h1>
 
 <p align="center">
-  <strong>Self-hosted desktop &amp; mobile remote control console for Codex, Claude Code, Antigravity, and Grok.</strong><br />
-  Monitor live progress, approve tool permissions, track multi-account quotas, and queue follow-ups from any browser.
+  <strong>Self-hosted desktop &amp; mobile remote control console for Codex, Claude Code, Antigravity, Grok, and Qoder.</strong><br />
+  Monitor live progress in a 2D board or 3D Dream Factory view, approve tool permissions by tap or voice, track multi-account quotas, and queue follow-ups from any browser.
 </p>
 
 <p align="center">
@@ -15,14 +15,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-f59e0b?style=flat-square" alt="AGPL-3.0" /></a>
 </p>
 
-> **Supported Agents**: OpenAI Codex (multi-account quota separation) · Anthropic Claude Code · Google Antigravity · Grok  
-> **Platforms**: macOS (native `Agent Control.app`) · Linux (GTK/WebKitGTK desktop) · Windows (PowerShell)<br>
-> **Architecture**: Read-only upstream indexing · Local HTTP/SSE server (`127.0.0.1:43310`) · Zero external database dependency  
+> **Supported Agents**: OpenAI Codex (multi-account quota separation) · Anthropic Claude Code · Google Antigravity · Grok · Qoder CLI  
+> **Desktop & Service**: macOS (native `Agent Control.app`) · Linux (GTK/WebKitGTK window + `systemd` user service) · Windows (standalone app window + CLI)<br>
+> **Architecture**: Strictly read-only upstream indexing · Local HTTP/SSE server (`127.0.0.1:43310`) · Zero external database dependency  
 > **Remote Access**: `$0` Cloudflare Quick Tunnel (default) · `$0` Tailscale Funnel · `$0` Named Tunnel · Self-hosted Docker / Sealos Relay
 
 > [!IMPORTANT]
 > **Security & Privacy Guarantee (Read Before Installing)**
-> - **Strictly Read-Only Upstream Indexing**: Reads `~/.codex`, `~/.claude`, and `~/.gemini` histories in read-only mode. Custom titles, tags, and archives are stored separately in Agent Control's own data directory—your upstream databases and configs are **never** modified.
+> - **Strictly Read-Only Upstream Indexing**: Reads `~/.codex`, `~/.claude`, and `~/.gemini` histories in read-only mode. Custom titles, tags, pins, and archives live separately in Agent Control's own data directory—your upstream databases and configs are **never** modified.
 > - **Zero Cloud Prompt Storage**: Your code, prompts, and conversation histories never touch a third-party cloud database. Remote access routes directly through your chosen tunnel or self-hosted relay, protected by one-time pairing codes and HTTP-only session cookies.
 > - **No Credential Scraping**: Multi-profile discovery only inspects explicit environment variables, public LaunchAgent paths, and display metadata (email/label)—never tokens or API keys.
 
@@ -30,27 +30,33 @@
 
 ## 🔄 Why Agent Control?
 
-| Workflow | Multi-Engine Support | Multi-Account Codex Quotas | Setup Effort | Desktop Consolidation |
+| Workflow | Multi-Engine Support | Multi-Account Codex Quotas | Remote & Voice Control | Setup & Desktop Experience |
 | --- | :---: | :---: | :---: | :---: |
-| Multiple IDE / Terminal Windows | ❌ Separate apps | ❌ Guess by terminal | High memory usage | ❌ |
-| Single-Engine Bot / Web Bridges | ❌ Usually Codex or Claude only | ❌ | Manual Tailscale / Bot setup | ❌ |
-| **Agent Control** | ✅ **Codex + Claude + Antigravity + Grok** | ✅ **Auto-detected & labeled** | ✅ **One-line install, 5s QR** | ✅ **Lightweight native macOS app & web UI** |
+| Multiple IDE / Terminal Windows | ❌ Separate apps | ❌ Guess by terminal | ❌ Stuck at desk | High memory usage |
+| Single-Engine Bot / Web Bridges | ❌ Usually Codex or Claude only | ❌ | ⚠️ Manual bot / Tailscale setup | ❌ Web-only or headless |
+| **Agent Control** | ✅ **Codex + Claude + Antigravity + Grok + Qoder** | ✅ **Auto-detected & labeled** | ✅ **5s QR mobile UI + driving voice approvals** | ✅ **3D Dream Factory + macOS / Linux / Windows apps** |
 
 ---
 
-## 📸 Screenshots
+## 📸 Screenshots & Core Capabilities
 
-### 1. Desktop Console · Multi-Engine & Multi-Account Hub
-Consolidate every running and historical session by project workspace, switch models/reasoning levels, and monitor per-account Codex quotas side by side.
+### 1. 3D Dream Factory · Live Workspace Overview & Natural-Language Reorg
+Watch every project and running coding agent on a real-time 3D isometric floor plan—see who is actively coding, idle, or waiting on permission at a glance, click any station to inspect or send follow-ups, and reorganize the room layout with natural language.
+<p align="center">
+  <img src="docs/tutorial/10-dream-factory-3d.png" alt="Agent Control 3D Dream Factory Control Room" width="760" />
+</p>
+
+### 2. Desktop Console · Multi-Engine, Multi-Account & Execution Stats
+Consolidate active and historical sessions by project workspace, pin key threads, switch models or reasoning effort (or hand off a thread to another agent), track per-account Codex quotas, and view real-time median / P90 latency, TTFT, and protocol token speed under **Agent Live Monitor**.
 <p align="center">
   <img src="docs/tutorial/01-desktop-console-en.png" alt="Agent Control Desktop Console" width="760" />
 </p>
 
-### 2. Mobile Browser · Live Monitor, Approvals & Queued Follow-Ups
-Leave your desk without losing control—inspect code diffs, approve or deny tool calls, interrupt runaway turns, and queue your next prompt from your phone.
+### 3. Mobile Browser · Live Monitor, Approvals & Queued Follow-Ups
+Leave your desk without losing control—inspect code diffs, approve or deny tool calls, interrupt runaway turns, manage `/goal` auto-continue runs, and queue your next prompt from your phone.
 <table>
   <tr>
-    <td align="center" width="50%"><strong>Project Board &amp; 4-Agent Live Status</strong></td>
+    <td align="center" width="50%"><strong>Project Board &amp; Multi-Agent Status</strong></td>
     <td align="center" width="50%"><strong>Rich Markdown, Diffs &amp; Turn Queue</strong></td>
   </tr>
   <tr>
@@ -59,14 +65,14 @@ Leave your desk without losing control—inspect code diffs, approve or deny too
   </tr>
 </table>
 
-<details>
-<summary>Expand more features (Hands-Free Voice Copilot · QR Remote Tunnel · One-Click Auto-Update)</summary>
+<details open>
+<summary><strong>More Core Features (Hands-Free Driving Voice Copilot · QR Remote Tunnel · Cross-Platform Auto-Update)</strong></summary>
 
 <table>
   <tr>
-    <td align="center" width="33%"><strong>Hands-Free Voice Copilot</strong></td>
-    <td align="center" width="33%"><strong>Zero-Config QR Tunnel</strong></td>
-    <td align="center" width="33%"><strong>Version Check &amp; App Sync</strong></td>
+    <td align="center" width="33%"><strong>🚗 Hands-Free Driving Voice Copilot</strong></td>
+    <td align="center" width="33%"><strong>📱 5-Second Zero-Config QR Tunnel</strong></td>
+    <td align="center" width="33%"><strong>🔄 One-Click &amp; Idle Auto-Update</strong></td>
   </tr>
   <tr>
     <td align="center"><img src="docs/tutorial/08-voice-copilot-modal.png" alt="Hands-Free Voice Copilot Modal" width="260" /></td>
@@ -75,29 +81,41 @@ Leave your desk without losing control—inspect code diffs, approve or deny too
   </tr>
 </table>
 
+- **Hands-Free Voice Copilot (`Call`)**: Keeps the screen awake, detects speech boundaries with VAD + barge-in interruption, alerts you aloud when a background task finishes or needs permission, and lets you verbally approve or reject tool calls. Uses selectable low-latency routing models (**Claude Sonnet (low)**, **GPT-6.1 Terra (low)**, **Antigravity Hydrogen / Flash**, **Grok**)—no Gemini lock-in—with local `mlx-whisper` + `edge-tts` / `say` on macOS (plus browser STT fallback and server-generated audio playback).
+- **Execution Statistics (`execution-stats.json`)**: Summarizes successful turns over `24h`, `7d`, `30d`, or `All` by agent, model, and reasoning effort (median & P90 duration, first-token latency, protocol token averages, and tool counts, up to 5,000 turns). Prompt and response contents are never logged into stats.
+- **Desktop App Sync & Restart**: Checks upstream commits automatically or on demand, performs smooth idle restarts when nothing is running, and rebuilds/syncs native desktop wrappers on **macOS, Windows, and Linux** by source fingerprint.
+
 </details>
 
 ---
 
-## ⚡ 30-Second Quick Start
+## ⚡ Quick Start (One-Line Install or Manual Clone)
 
-Requires **Node.js 22+** and **Git** (the installer prompts you if either is missing).
+Requires **Node.js 22+** (Node 22.13+ or 24+ recommended on Linux) and **Git**.
 
-**macOS / Linux:**
+**macOS / Linux (one-line installer):**
 ```bash
 curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
 ```
 
-Linux supports a native GTK/WebKitGTK window and a systemd user service. See the [Linux guide](docs/linux.md) for desktop dependencies, headless servers, SSH access, containers and WSL.
+Linux supports a native GTK/WebKitGTK desktop window and a `systemd --user` service. See the [Linux installation guide](docs/linux.md) for desktop packages, headless servers, SSH port forwarding, containers, and WSL.
 
 **Windows (PowerShell):**
 ```powershell
 (irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
-1. **Open**: Launches `http://127.0.0.1:43310` automatically (and installs **Agent Control.app** in `/Applications` on macOS).
+**Prefer inspecting and running manually without curl-pipe?**
+```bash
+git clone https://github.com/guuguo/agent-control.git
+cd agent-control
+npm install
+npm start
+```
+
+1. **Open**: Launches `http://127.0.0.1:43310` automatically (and installs **Agent Control.app** in `/Applications` on macOS, or native desktop wrappers on Windows and Linux).
 2. **Switch UI Language**: Auto-detects browser language (`English`, `简体中文`, `繁體中文`, `日本語`, `한국어`), or switch anytime from the top-right **More** menu.
-3. **Connect Your Phone**: Click **Remote** in the top bar to generate a QR code and pair instantly.
+3. **Connect Your Phone**: Click **Remote** in the top bar to generate a QR code and pair in ~5 seconds.
 
 ---
 
@@ -115,19 +133,22 @@ Linux supports a native GTK/WebKitGTK window and a systemd user service. See the
 
 ---
 
-## 📂 Project Structure & Local Development
+## 📂 Project Structure & Zero-Token Local Development
 
 - `src/server.mjs` — HTTP/SSE server (`127.0.0.1:43310`) and API routes
 - `src/provider-hub.mjs` — Unified session aggregation, conflict-isolated approvals, turn queue, and `/goal` auto-continue controller
-- `src/providers/` — Adapters & multi-profile discovery for Codex, Claude Code, Antigravity, and Grok
+- `src/providers/` — Read-only adapters & multi-profile discovery for Codex, Claude Code, Antigravity, Grok, and Qoder CLI
 - `src/remote-bridge.mjs` & `relay/relay-server.mjs` — Outbound WebSocket tunnel & self-hosted public relay
-- `public/` — Zero-build ESM web UI (`public/i18n.js` for 5-language support)
+- `public/` — Zero-build ESM web UI (`public/i18n.js` for 5 languages + Three.js 3D Dream Factory)
+- `desktop/` — Native app wrappers and installers for macOS (`WKWebView`), Linux (`GTK/WebKitGTK`), and Windows
 - `tests/` — Zero-token mock-CLI end-to-end test suite
 
 ```bash
 npm run check
 npm test
 ```
+
+All automated tests run against mock CLIs and consume **zero real LLM tokens**.
 
 ---
 
@@ -144,6 +165,10 @@ curl -fsSL https://hub.guuguo.top/uninstall/agent-control.sh | bash
 ```
 
 ---
+
+## Acknowledgements
+
+- Thanks to the [LINUX DO](https://linux.do/) community for feedback, bug reports, and feature ideas.
 
 ## License
 
