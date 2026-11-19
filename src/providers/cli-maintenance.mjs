@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import {
   execFileCrossPlatform,
   normalizePlatform,
@@ -96,15 +97,79 @@ export function hasSignedInProfile(profiles = [], provider) {
   );
 }
 
-export function resolveHomebrewCask(executablePath) {
+export function resolveHomebrewCask(executablePath, { realpathImpl = fs.realpathSync } = {}) {
   if (!executablePath) return "";
+  let target = String(executablePath);
   try {
-    const resolved = fs.realpathSync(executablePath);
-    const match = resolved.match(/\/Caskroom\/([^/]+)\//);
-    return match ? match[1] : "";
+    target = realpathImpl(executablePath) || target;
   } catch {
-    return "";
+    // Fall back to executablePath as-is when symlink cannot be resolved on disk.
   }
+  const match = target.match(/\/Caskroom\/([^/]+)\//);
+  return match ? match[1] : "";
+}
+
+export function detectCliInstallSource(executablePath, { realpathImpl = fs.realpathSync } = {}) {
+  if (!executablePath) {
+    return { source: "", caskName: "", formulaName: "", realPath: "" };
+  }
+  let realPath = String(executablePath);
+  try {
+    realPath = realpathImpl(executablePath) || realPath;
+  } catch {
+    // Fall back to raw executablePath when realpath fails.
+  }
+
+  const caskMatch = realPath.match(/\/Caskroom\/([^/]+)\//);
+  if (caskMatch) {
+    return {
+      source: "homebrew-cask",
+      caskName: caskMatch[1],
+      formulaName: "",
+      realPath,
+    };
+  }
+
+  const cellarMatch = realPath.match(/\/Cellar\/([^/]+)\//);
+  if (cellarMatch && !/[\\/]node_modules[\\/]/i.test(realPath)) {
+    return {
+      source: "homebrew-formula",
+      caskName: "",
+      formulaName: cellarMatch[1],
+      realPath,
+    };
+  }
+
+  if (/[\\/]node_modules[\\/]/i.test(realPath)) {
+    return {
+      source: "npm",
+      caskName: "",
+      formulaName: "",
+      realPath,
+    };
+  }
+
+  return {
+    source: "standalone",
+    caskName: "",
+    formulaName: "",
+    realPath,
+  };
+}
+
+export function resolveSiblingTool(executablePath, toolName, { existsSyncImpl = fs.existsSync } = {}) {
+  if (!executablePath || !toolName) return "";
+  try {
+    const dir = path.dirname(String(executablePath));
+    if (!dir || dir === ".") return "";
+    const candidate = path.join(dir, toolName);
+    if (existsSyncImpl(candidate)) {
+      return candidate;
+    }
+  } catch {
+    // Ignore invalid paths.
+  }
+  return "";
 }
 
 export class CliMaintenanceManager {
@@ -112,6 +177,8 @@ export class CliMaintenanceManager {
   #home;
   #platform;
   #resolveExecutable;
+  #realpathImpl;
+  #existsSyncImpl;
   #execImpl;
   #cooldownMs;
   #state = new Map();
@@ -123,6 +190,8 @@ export class CliMaintenanceManager {
     home = os.homedir(),
     platform = process.platform,
     resolveExecutableImpl = resolveExecutableCrossPlatform,
+    realpathImpl = fs.realpathSync,
+    existsSyncImpl = fs.existsSync,
     execImpl = null,
     cooldownMs = DEFAULT_COOLDOWN_MS,
     onUpdated = null,
@@ -131,6 +200,8 @@ export class CliMaintenanceManager {
     this.#home = home;
     this.#platform = platform;
     this.#resolveExecutable = resolveExecutableImpl;
+    this.#realpathImpl = typeof realpathImpl === "function" ? realpathImpl : fs.realpathSync;
+    this.#existsSyncImpl = typeof existsSyncImpl === "function" ? existsSyncImpl : fs.existsSync;
     this.#execImpl = typeof execImpl === "function"
       ? execImpl
       : (cmd, args, opts) => execFileCrossPlatform(cmd, args, opts, { platform: this.#platform });
@@ -150,6 +221,16 @@ export class CliMaintenanceManager {
       });
       const prev = this.#state.get(provider) || {};
       const cliInstalled = Boolean(executable);
+      const installInfo = cliInstalled
+        ? detectCliInstallSource(executable, { realpathImpl: this.#realpathImpl })
+        : { source: "", caskName: "", formulaName: "", realPath: "" };
+      let manualHint = spec.manualHint;
+      if (installInfo.source === "homebrew-cask" && installInfo.caskName) {
+        manualHint = `请执行 brew upgrade --cask ${installInfo.caskName}`;
+      } else if (installInfo.source === "homebrew-formula" && installInfo.formulaName) {
+        manualHint = `请执行 brew upgrade ${installInfo.formulaName}`;
+      }
+
       let status = "idle";
       if (this.#inFlight.has(provider)) {
         status = "installing";
@@ -174,6 +255,7 @@ export class CliMaintenanceManager {
         hasAuth,
         cliInstalled,
         executable,
+        installSource: cliInstalled ? installInfo.source : "",
         installedVersion,
         latestVersion,
         updateAvailable,
@@ -185,7 +267,7 @@ export class CliMaintenanceManager {
         lastCheckedAt: prev.lastCheckedAt || 0,
         lastUpdateCheckAt: prev.lastUpdateCheckAt || 0,
         lastAttemptAt: prev.lastAttemptAt || 0,
-        manualHint: spec.manualHint,
+        manualHint,
       };
     }
     return out;
@@ -224,11 +306,7 @@ export class CliMaintenanceManager {
       let installCmd = "";
       let installArgs = [];
       if (spec.npmPackage) {
-        installCmd = this.#resolveExecutable({
-          binaryName: "npm",
-          env: this.#env,
-          platform: this.#platform,
-        }) || (isWin ? "npm.cmd" : "npm");
+        installCmd = this.#resolveNpmBin();
         installArgs = ["install", "-g", spec.npmPackage, "--no-audit", "--no-fund"];
       } else if (spec.scriptInstaller) {
         const entry = isWin ? spec.scriptInstaller.win32 : spec.scriptInstaller.unix;
@@ -304,6 +382,77 @@ export class CliMaintenanceManager {
     }) || (isWin ? "npm.cmd" : "npm");
   }
 
+  #resolveBrewBin(executablePath = "") {
+    const sibling = resolveSiblingTool(executablePath, "brew", { existsSyncImpl: this.#existsSyncImpl });
+    if (sibling) return sibling;
+    return this.#resolveExecutable({
+      binaryName: "brew",
+      env: this.#env,
+      platform: this.#platform,
+    }) || "brew";
+  }
+
+  #resolveMatchingNpmBin(executablePath = "") {
+    const isWin = normalizePlatform(this.#platform) === "win32";
+    const toolName = isWin ? "npm.cmd" : "npm";
+    const sibling = resolveSiblingTool(executablePath, toolName, { existsSyncImpl: this.#existsSyncImpl });
+    if (sibling) return sibling;
+    return this.#resolveNpmBin();
+  }
+
+  async #fetchLatestVersionForSource(spec, installInfo, executablePath, { env = this.#env } = {}) {
+    if (installInfo?.source === "homebrew-cask" && installInfo.caskName) {
+      const brewBin = this.#resolveBrewBin(executablePath);
+      const res = await this.#execImpl(
+        brewBin,
+        ["info", "--cask", "--json=v2", installInfo.caskName],
+        {
+          env,
+          timeout: 20_000,
+          windowsHide: true,
+          shell: false,
+        },
+      ).catch(() => null);
+      if (!res?.stdout) return "";
+      try {
+        const parsed = JSON.parse(res.stdout);
+        return extractSemver(parsed?.casks?.[0]?.version || "");
+      } catch {
+        return "";
+      }
+    }
+
+    if (installInfo?.source === "homebrew-formula" && installInfo.formulaName) {
+      const brewBin = this.#resolveBrewBin(executablePath);
+      const res = await this.#execImpl(
+        brewBin,
+        ["info", "--json=v2", installInfo.formulaName],
+        {
+          env,
+          timeout: 20_000,
+          windowsHide: true,
+          shell: false,
+        },
+      ).catch(() => null);
+      if (!res?.stdout) return "";
+      try {
+        const parsed = JSON.parse(res.stdout);
+        return extractSemver(parsed?.formulae?.[0]?.versions?.stable || "");
+      } catch {
+        return "";
+      }
+    }
+
+    const npmBin = this.#resolveMatchingNpmBin(executablePath);
+    const latestRes = await this.#execImpl(npmBin, ["view", spec.npmPackage, "version"], {
+      env,
+      timeout: 15_000,
+      windowsHide: true,
+      shell: false,
+    }).catch(() => null);
+    return extractSemver(latestRes?.stdout || latestRes || "");
+  }
+
   async readInstalledVersion(provider) {
     const executable = resolveRealCliExecutable(provider, {
       env: this.#env,
@@ -332,7 +481,6 @@ export class CliMaintenanceManager {
 
   async checkUpdates(profiles = [], { force = false, checkIntervalMs = DEFAULT_UPDATE_CHECK_INTERVAL_MS } = {}) {
     const snapshot = this.inspect(profiles);
-    const npmBin = this.#resolveNpmBin();
     const now = Date.now();
     await Promise.all(Object.values(snapshot).map(async (item) => {
       const spec = CLI_SPECS[item.provider];
@@ -341,16 +489,12 @@ export class CliMaintenanceManager {
       if (!force && prev.lastUpdateCheckAt && (now - prev.lastUpdateCheckAt) < checkIntervalMs) {
         return;
       }
-      const [installedVersion, latestRes] = await Promise.all([
+      const installInfo = detectCliInstallSource(item.executable, { realpathImpl: this.#realpathImpl });
+      const [installedVersion, fetchedLatest] = await Promise.all([
         this.readInstalledVersion(item.provider),
-        this.#execImpl(npmBin, ["view", spec.npmPackage, "version"], {
-          env: this.#env,
-          timeout: 15_000,
-          windowsHide: true,
-          shell: false,
-        }).catch(() => null),
+        this.#fetchLatestVersionForSource(spec, installInfo, item.executable),
       ]);
-      const latestVersion = extractSemver(latestRes?.stdout || latestRes || "") || prev.latestVersion || "";
+      const latestVersion = fetchedLatest || prev.latestVersion || "";
       const nextPrev = this.#state.get(item.provider) || {};
       this.#state.set(item.provider, {
         ...nextPrev,
@@ -385,20 +529,33 @@ export class CliMaintenanceManager {
     }
 
     const run = (async () => {
-      const caskName = resolveHomebrewCask(existing);
-      const upgradeCmd = caskName
-        ? (this.#resolveExecutable({ binaryName: "brew", env: this.#env, platform: this.#platform }) || "brew")
-        : this.#resolveNpmBin();
-      const upgradeArgs = caskName
-        ? ["upgrade", "--cask", caskName]
-        : ["install", "-g", `${spec.npmPackage}@latest`, "--no-audit", "--no-fund"];
+      const installInfo = detectCliInstallSource(existing, { realpathImpl: this.#realpathImpl });
+      const isHomebrew = installInfo.source === "homebrew-cask" || installInfo.source === "homebrew-formula";
+      let upgradeCmd = "";
+      let upgradeArgs = [];
+      let upgradeEnv = this.#env;
+
+      if (installInfo.source === "homebrew-cask" && installInfo.caskName) {
+        upgradeCmd = this.#resolveBrewBin(existing);
+        upgradeArgs = ["upgrade", "--cask", installInfo.caskName];
+        upgradeEnv = { HOMEBREW_AUTO_UPDATE_SECS: "60", ...this.#env };
+      } else if (installInfo.source === "homebrew-formula" && installInfo.formulaName) {
+        upgradeCmd = this.#resolveBrewBin(existing);
+        upgradeArgs = ["upgrade", installInfo.formulaName];
+        upgradeEnv = { HOMEBREW_AUTO_UPDATE_SECS: "60", ...this.#env };
+      } else {
+        upgradeCmd = this.#resolveMatchingNpmBin(existing);
+        upgradeArgs = ["install", "-g", `${spec.npmPackage}@latest`, "--no-audit", "--no-fund"];
+      }
+
       const beforeVersion = await this.readInstalledVersion(provider);
+      const expectedLatest = prev.latestVersion || "";
       try {
         await this.#execImpl(
           upgradeCmd,
           upgradeArgs,
           {
-            env: this.#env,
+            env: upgradeEnv,
             timeout: 180_000,
             windowsHide: true,
             shell: false,
@@ -411,11 +568,70 @@ export class CliMaintenanceManager {
           platform: this.#platform,
           resolveImpl: this.#resolveExecutable,
         });
+
+        const expectedUpgrade = Boolean(beforeVersion && expectedLatest && compareSemver(expectedLatest, beforeVersion) > 0);
+        const versionAdvanced = Boolean(afterVersion && (!beforeVersion || compareSemver(afterVersion, beforeVersion) > 0));
+
+        if (expectedUpgrade && !versionAdvanced) {
+          if (isHomebrew) {
+            const sourceLatest = await this.#fetchLatestVersionForSource(spec, installInfo, resolvedAfter || existing, { env: upgradeEnv });
+            if (sourceLatest && afterVersion && compareSemver(sourceLatest, afterVersion) <= 0) {
+              const sourceLabel = installInfo.source === "homebrew-cask" ? `Homebrew Cask (${installInfo.caskName})` : `Homebrew (${installInfo.formulaName})`;
+              const message = `${sourceLabel} 当前最新即为 v${afterVersion}，尚未同步更高版本`;
+              const prevState = this.#state.get(provider) || {};
+              this.#state.set(provider, {
+                ...prevState,
+                installedVersion: afterVersion,
+                latestVersion: sourceLatest,
+                lastCheckedAt: Date.now(),
+                lastAttemptAt: Date.now(),
+                lastUpdateCheckAt: Date.now(),
+                lastUpgradeError: message,
+              });
+              return {
+                provider,
+                ok: false,
+                upgraded: false,
+                beforeVersion,
+                version: afterVersion,
+                executable: resolvedAfter || existing,
+                message,
+              };
+            }
+          }
+
+          const currentVerLabel = afterVersion ? `v${afterVersion}` : "旧版本";
+          const message = isHomebrew
+            ? `已执行 ${upgradeCmd}，但当前版本仍为 ${currentVerLabel}，请检查本机包管理器状态`
+            : `已执行更新命令，但当前生效路径（${resolvedAfter || existing}）仍为 ${currentVerLabel}，可能存在多份安装路径遮蔽（如 Homebrew 与 nvm 并存）`;
+          const prevState = this.#state.get(provider) || {};
+          this.#state.set(provider, {
+            ...prevState,
+            ...(afterVersion ? { installedVersion: afterVersion } : {}),
+            lastCheckedAt: Date.now(),
+            lastAttemptAt: Date.now(),
+            lastUpdateCheckAt: Date.now(),
+            lastUpgradeError: message,
+          });
+          return {
+            provider,
+            ok: false,
+            upgraded: false,
+            beforeVersion,
+            version: afterVersion,
+            executable: resolvedAfter || existing,
+            message,
+          };
+        }
+
         const prevState = this.#state.get(provider) || {};
+        const nextLatest = (expectedLatest && afterVersion && compareSemver(afterVersion, expectedLatest) >= 0)
+          ? afterVersion
+          : (afterVersion || prevState.latestVersion || "");
         this.#state.set(provider, {
           ...prevState,
           installedVersion: afterVersion || prevState.installedVersion || "",
-          latestVersion: afterVersion || prevState.latestVersion || "",
+          latestVersion: nextLatest,
           lastCheckedAt: Date.now(),
           lastAttemptAt: Date.now(),
           lastUpdateCheckAt: Date.now(),
@@ -433,11 +649,11 @@ export class CliMaintenanceManager {
         return {
           provider,
           ok: true,
-          upgraded: Boolean(afterVersion && afterVersion !== beforeVersion),
+          upgraded: versionAdvanced,
           beforeVersion,
           version: afterVersion,
           executable: resolvedAfter,
-          message: afterVersion ? `${spec.label} 已更新到 ${afterVersion}` : `${spec.label} 更新完成`,
+          message: afterVersion ? `${spec.label} 已更新到 v${afterVersion}` : `${spec.label} 更新完成`,
         };
       } catch (err) {
         const message = String(err?.stderr || err?.message || err || "升级失败").trim().slice(0, 400);
