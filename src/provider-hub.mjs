@@ -1,4 +1,5 @@
 import { open, realpath, stat } from "node:fs/promises";
+import { MemoryVault, formatMemoryBriefForPrompt, resolveVaultPath } from "./memory-vault.mjs";
 import os from "node:os";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import {
@@ -2254,6 +2255,22 @@ export class ProviderHub {
     };
   }
 
+  // One-line shared-memory pointer for new sessions in a known project (explicit topic wins over cwd match); skipped for slash commands or when no vault is configured.
+  async #memoryPointer({ cwd, text, topic }) {
+    const cleanCwd = String(cwd || "").trim();
+    if ((!cleanCwd && !topic) || /^\//.test(String(text || "").trim())) return "";
+    try {
+      const root = await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir });
+      if (!root) return "";
+      const vault = new MemoryVault(root);
+      const scope = await vault.resolveTopic({ topic, cwd: cleanCwd });
+      if (!scope) return "";
+      return formatMemoryBriefForPrompt(await vault.pointer({ scope }));
+    } catch {
+      return "";
+    }
+  }
+
   async startThread({
     provider = "codex",
     profileId = "default",
@@ -2265,6 +2282,8 @@ export class ProviderHub {
     permissionMode = "workspace",
     runMode = "normal",
     goalMode = false,
+    memoryBrief = true,
+    memoryTopic = "",
   } = {}) {
     const impl = this.getProvider(provider);
     const cleanPerm = normalizePermissionMode(permissionMode);
@@ -2272,10 +2291,11 @@ export class ProviderHub {
 
     let res;
     try {
+      const brief = memoryBrief ? await this.#memoryPointer({ cwd, text, topic: memoryTopic }) : "";
       res = await impl.startThread({
         profileId,
         cwd,
-        text,
+        text: brief ? `${text}\n\n---\n${brief}` : text,
         images,
         model,
         effort,

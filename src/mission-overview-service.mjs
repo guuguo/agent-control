@@ -2305,6 +2305,7 @@ export class MissionOverviewService {
           profileId: route.profileId,
           cwd: route.cwd,
           text: injectedText,
+          memoryTopic: route.topicId,
           permissionMode: "turbo",
           ...(route.model ? { model: route.model } : {}),
           ...(route.effort ? { effort: route.effort } : {}),
