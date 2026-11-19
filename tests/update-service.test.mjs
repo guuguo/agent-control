@@ -12,11 +12,14 @@ import {
 } from "../scripts/bump-version.mjs";
 import {
   computeDesktopSourceHash,
+  computePendingReleaseNotes,
   DESKTOP_APP_NAME,
   parsePlistStrings,
   parsePorcelainDirtyFiles,
+  parseReleaseNotes,
   readInstalledDesktopAppInfo,
   sanitizeRemoteUrl,
+  summarizeCommitsAsReleaseEntry,
   UpdateService,
 } from "../src/update-service.mjs";
 
@@ -265,6 +268,12 @@ test("bump-version scripts sync package.json, UI version, and CHANGELOG cleanly"
   assert.match(appJs, /icons\.js\?v=20261116ag/);
   const log = await readFile(resolve(tempRoot, "CHANGELOG.md"), "utf8");
   assert.match(log, /^# 更新日志 \(CHANGELOG\)\s+## v0\.2\.0 \(2026-11-16\)/);
+  const releaseNotes = await readFile(resolve(tempRoot, "RELEASE_NOTES.md"), "utf8");
+  assert.match(releaseNotes, /## v0\.2\.0 \(2026-11-16\)/);
+  assert.match(releaseNotes, /### 优化/);
+  const releaseNotesEn = await readFile(resolve(tempRoot, "RELEASE_NOTES.en.md"), "utf8");
+  assert.match(releaseNotesEn, /## v0\.2\.0 \(2026-11-16\)/);
+  assert.match(releaseNotesEn, /### Improved/);
 });
 
 test("UpdateService detects desktop shell drift, builds via /api/update/desktop, and syncs on applyUpdate", async (t) => {
@@ -507,4 +516,291 @@ test("readInstalledDesktopAppInfo and applyDesktopUpdate support Windows and Lin
   assert.equal(linuxBuilt.ok, true);
   assert.equal(linuxBuilt.desktopApp.installed, true);
   assert.equal(linuxBuilt.desktopApp.state, "up_to_date");
+});
+
+test("parseReleaseNotes and computePendingReleaseNotes handle user-friendly notes and fallbacks cleanly", () => {
+  const sampleMd = [
+    "# Agent Control 更新说明",
+    "",
+    "> 头部提示文本应被忽略",
+    "",
+    "## v0.2.3 (2026-11-19) — 图表直出与解归档",
+    "",
+    "UI 资源版本：`20261119relnotes`",
+    "",
+    "一句话总结：支持直接在对话中看流程图，也能一键解归档旧会话。",
+    "",
+    "### 新增",
+    "",
+    "- **Mermaid 流程图直接渲染**：对话里的流程图直接画出图形。",
+    "- 【修复】**速率校准**：解决部分历史会话不显示吐字速度的问题 (abc1234)",
+    "",
+    "### 优化",
+    "",
+    "- **执行统计更直观**：第一眼看清谁最快。",
+    "",
+    "## v0.2.2 (2026-11-16) — 语音更轻快",
+    "",
+    "- 升级语音轻量模型",
+  ].join("\n");
+
+  const parsed = parseReleaseNotes(sampleMd);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].version, "0.2.3");
+  assert.equal(parsed[0].date, "2026-11-19");
+  assert.equal(parsed[0].title, "图表直出与解归档");
+  assert.equal(parsed[0].summary, "支持直接在对话中看流程图，也能一键解归档旧会话。");
+  assert.equal(parsed[0].items.length, 3);
+  assert.deepEqual(parsed[0].items[0], {
+    category: "new",
+    categoryLabel: "新增",
+    title: "Mermaid 流程图直接渲染",
+    detail: "对话里的流程图直接画出图形。",
+    text: "Mermaid 流程图直接渲染：对话里的流程图直接画出图形。",
+  });
+  assert.equal(parsed[0].items[1].category, "fix");
+  assert.equal(parsed[0].items[1].categoryLabel, "修复");
+  assert.doesNotMatch(parsed[0].items[1].text, /abc1234/);
+  assert.equal(parsed[0].items[2].category, "improve");
+
+  // Scenario 1: New remote version v0.2.4 added on top
+  const remoteNewVer = parseReleaseNotes(`# H\n\n## v0.2.4 (2026-11-20) — 全新能力\n\n### 新增\n- 支持批量导出\n\n${sampleMd}`);
+  const s1 = computePendingReleaseNotes({
+    localNotes: parsed,
+    remoteNotes: remoteNewVer,
+    localSource: "release_notes",
+    remoteSource: "release_notes",
+    pendingCommits: [{ sha: "1111111", timestamp: 1700000000, subject: "feat: export" }],
+    localVersion: "0.2.3",
+    remoteVersion: "0.2.4",
+  });
+  assert.equal(s1.pendingSource, "release_notes");
+  assert.equal(s1.pending.length, 1);
+  assert.equal(s1.pending[0].version, "0.2.4");
+
+  // Scenario 2: Same version v0.2.3 updated in place with new items
+  const remoteInPlace = parseReleaseNotes(sampleMd.replace("- **执行统计更直观**：第一眼看清谁最快。", "- **执行统计更直观**：第一眼看清谁最快。\n- **新增桌面提醒**：发现更新后角标更醒目。"));
+  const s2 = computePendingReleaseNotes({
+    localNotes: parsed,
+    remoteNotes: remoteInPlace,
+    localSource: "release_notes",
+    remoteSource: "release_notes",
+    pendingCommits: [{ sha: "2222222", timestamp: 1700000000, subject: "feat: desktop badge" }],
+    localVersion: "0.2.3",
+    remoteVersion: "0.2.3",
+  });
+  assert.equal(s2.pendingSource, "release_notes");
+  assert.equal(s2.pending.length, 1);
+  assert.deepEqual(s2.pending[0].items.map((i) => i.title), ["新增桌面提醒"]);
+
+  // Scenario 3: Legacy installation without RELEASE_NOTES.md upgrades to version that introduces it -> only top/newer entries
+  const s3 = computePendingReleaseNotes({
+    localNotes: [{ id: "v0.2.0", heading: "v0.2.0 (2026-11-16)", version: "0.2.0", date: "2026-11-16", title: "old", summary: "", items: [] }],
+    remoteNotes: parsed,
+    localSource: "changelog",
+    remoteSource: "release_notes",
+    pendingCommits: [{ sha: "3333333", timestamp: 1700000000, subject: "docs: add release notes" }],
+    localVersion: "0.2.0",
+    remoteVersion: "0.2.3",
+  });
+  assert.equal(s3.pendingSource, "release_notes");
+  assert.equal(s3.pending.length, 2); // 0.2.3 and 0.2.2 are strictly > 0.2.0
+
+  // Scenario 4: Code pushed without editing RELEASE_NOTES.md -> commits fallback
+  const s4 = computePendingReleaseNotes({
+    localNotes: parsed,
+    remoteNotes: parsed,
+    localSource: "release_notes",
+    remoteSource: "release_notes",
+    pendingCommits: [
+      { sha: "4444444", timestamp: 1700000500, subject: "chore: bump version" },
+      { sha: "5555555", timestamp: 1700000400, subject: "fix(ui): 修复窄屏下弹窗横向溢出" },
+      { sha: "6666666", timestamp: 1700000300, subject: "feat: 新增快捷键切换深浅主题" },
+    ],
+    localVersion: "0.2.3",
+    remoteVersion: "0.2.3",
+  });
+  assert.equal(s4.pendingSource, "commits_fallback");
+  assert.equal(s4.pending.length, 1);
+  assert.equal(s4.pending[0].items.length, 2);
+  assert.equal(s4.pending[0].items[0].category, "fix");
+  assert.equal(s4.pending[0].items[0].text, "修复窄屏下弹窗横向溢出");
+  assert.equal(s4.pending[0].items[1].category, "new");
+
+  // Direct commit summarizer sanity check
+  const summarized = summarizeCommitsAsReleaseEntry([{ sha: "abc", timestamp: 0, subject: "perf: 提升首屏加载速度" }]);
+  assert.equal(summarized.items[0].category, "improve");
+  assert.equal(summarized.items[0].text, "提升首屏加载速度");
+});
+
+test("UpdateService reads local and remote RELEASE_NOTES.md across checkForUpdates and applyUpdate", async (t) => {
+  const { authorDir, appDir, dataDir } = await setupLocalGitRemoteFixture(t);
+
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.md"),
+    "# Agent Control 更新说明\n\n## v0.1.0 (2026-11-16) — 初始版本\n\n### 新增\n- **基础面板**：支持远程对话。\n",
+    "utf8",
+  );
+  gitSync(authorDir, ["add", "RELEASE_NOTES.md"]);
+  gitSync(authorDir, ["commit", "-m", "docs: add initial release notes"]);
+  gitSync(authorDir, ["push", "origin", "main"]);
+  gitSync(appDir, ["pull", "--ff-only", "origin", "main"]);
+
+  let restarted = false;
+  const service = new UpdateService({
+    rootDir: appDir,
+    dataDir,
+    initialDelayMs: 60_000,
+    restartDelayMs: 10,
+    execNpm: async () => ({ stdout: "", stderr: "" }),
+    restartService: () => {
+      restarted = true;
+    },
+  });
+  t.after(() => service.close());
+
+  const initial = await service.load();
+  assert.equal(initial.releaseNotes.file, "RELEASE_NOTES.md");
+  assert.equal(initial.releaseNotes.current?.version, "0.1.0");
+  assert.equal(initial.releaseNotes.current?.title, "初始版本");
+  assert.deepEqual(initial.releaseNotes.pending, []);
+  assert.equal(initial.releaseNotes.pendingSource, "none");
+
+  // Author bumps to v0.1.1 with rich release notes
+  await writeFile(resolve(authorDir, "package.json"), JSON.stringify({ name: "agent-control", version: "0.1.1" }, null, 2), "utf8");
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.md"),
+    [
+      "# Agent Control 更新说明",
+      "",
+      "## v0.1.1 (2026-11-19) — 对话更顺滑",
+      "",
+      "一句话总结：加入图表渲染与人话版更新日志。",
+      "",
+      "### 新增",
+      "- **流程图预览**：支持对话内直接查看流程图。",
+      "",
+      "## v0.1.0 (2026-11-16) — 初始版本",
+      "",
+      "### 新增",
+      "- **基础面板**：支持远程对话。",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  gitSync(authorDir, ["add", "package.json", "RELEASE_NOTES.md"]);
+  gitSync(authorDir, ["commit", "-m", "chore: release v0.1.1"]);
+  gitSync(authorDir, ["push", "origin", "main"]);
+
+  const checked = await service.checkForUpdates({ silent: false });
+  assert.equal(checked.hasUpdate, true);
+  assert.equal(checked.releaseNotes.pendingSource, "release_notes");
+  assert.equal(checked.releaseNotes.pending.length, 1);
+  assert.equal(checked.releaseNotes.pending[0].version, "0.1.1");
+  assert.equal(checked.releaseNotes.pending[0].summary, "加入图表渲染与人话版更新日志。");
+  assert.equal(checked.releaseNotes.pending[0].items[0].title, "流程图预览");
+
+  const applied = await service.applyUpdate({ reason: "manual" });
+  assert.equal(applied.ok, true);
+  assert.equal(applied.status.releaseNotes.current?.version, "0.1.1");
+  assert.equal(applied.status.releaseNotes.pending.length, 0);
+  assert.equal(applied.status.releaseNotes.recent.length, 2);
+
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(restarted, true);
+});
+
+test("parseReleaseNotes and UpdateService support bilingual RELEASE_NOTES.en.md seamlessly", async (t) => {
+  const sampleEn = [
+    "# Agent Control Release Notes",
+    "",
+    "> Ignore header note",
+    "",
+    "## v0.2.3 (2026-11-19) — Diagrams & Unarchive",
+    "",
+    "Summary: Render Mermaid flowcharts inline and unarchive Codex threads.",
+    "",
+    "### Added",
+    "",
+    "- **Inline Mermaid Diagrams**: Automatically draw vector flowcharts.",
+    "- [Fixed] **Speed Calibration**: Ignore replayed historical bursts (dead123)",
+    "",
+    "### Improved",
+    "",
+    "- **Clearer Stats**: Show tok/s directly.",
+  ].join("\n");
+
+  const parsedEn = parseReleaseNotes(sampleEn, { locale: "en" });
+  assert.equal(parsedEn.length, 1);
+  assert.equal(parsedEn[0].version, "0.2.3");
+  assert.equal(parsedEn[0].title, "Diagrams & Unarchive");
+  assert.equal(parsedEn[0].summary, "Render Mermaid flowcharts inline and unarchive Codex threads.");
+  assert.deepEqual(parsedEn[0].items[0], {
+    category: "new",
+    categoryLabel: "New",
+    title: "Inline Mermaid Diagrams",
+    detail: "Automatically draw vector flowcharts.",
+    text: "Inline Mermaid Diagrams: Automatically draw vector flowcharts.",
+  });
+  assert.equal(parsedEn[0].items[1].category, "fix");
+  assert.equal(parsedEn[0].items[1].categoryLabel, "Fixed");
+  assert.doesNotMatch(parsedEn[0].items[1].text, /dead123/);
+
+  const { authorDir, appDir, dataDir } = await setupLocalGitRemoteFixture(t);
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.md"),
+    "# Agent Control 更新说明\n\n## v0.1.0 (2026-11-16) — 初始版本\n\n### 新增\n- **基础面板**：支持远程对话。\n",
+    "utf8",
+  );
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.en.md"),
+    "# Agent Control Release Notes\n\n## v0.1.0 (2026-11-16) — Initial Release\n\n### Added\n- **Core Console**: Manage remote sessions.\n",
+    "utf8",
+  );
+  gitSync(authorDir, ["add", "RELEASE_NOTES.md", "RELEASE_NOTES.en.md"]);
+  gitSync(authorDir, ["commit", "-m", "docs: add bilingual release notes"]);
+  gitSync(authorDir, ["push", "origin", "main"]);
+  gitSync(appDir, ["pull", "--ff-only", "origin", "main"]);
+
+  const svc = new UpdateService({
+    rootDir: appDir,
+    dataDir,
+    initialDelayMs: 60_000,
+    restartDelayMs: 10,
+    execNpm: async () => ({ stdout: "", stderr: "" }),
+    restartService: () => {},
+  });
+  t.after(() => svc.close());
+
+  const initial = await svc.load();
+  assert.equal(initial.releaseNotes.current?.title, "初始版本");
+  assert.equal(initial.releaseNotes.locales?.en?.file, "RELEASE_NOTES.en.md");
+  assert.equal(initial.releaseNotes.locales?.en?.current?.title, "Initial Release");
+
+  await writeFile(resolve(authorDir, "package.json"), JSON.stringify({ name: "agent-control", version: "0.1.1" }, null, 2), "utf8");
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.md"),
+    "# Agent Control 更新说明\n\n## v0.1.1 (2026-11-19) — 中文亮点\n\n### 新增\n- **中文项**：新功能。\n\n## v0.1.0 (2026-11-16) — 初始版本\n\n### 新增\n- **基础面板**：支持远程对话。\n",
+    "utf8",
+  );
+  await writeFile(
+    resolve(authorDir, "RELEASE_NOTES.en.md"),
+    "# Agent Control Release Notes\n\n## v0.1.1 (2026-11-19) — English Highlights\n\nSummary: Plain-English update notes.\n\n### Added\n- **English Item**: Fresh feature.\n\n## v0.1.0 (2026-11-16) — Initial Release\n\n### Added\n- **Core Console**: Manage remote sessions.\n",
+    "utf8",
+  );
+  gitSync(authorDir, ["add", "package.json", "RELEASE_NOTES.md", "RELEASE_NOTES.en.md"]);
+  gitSync(authorDir, ["commit", "-m", "chore: release v0.1.1"]);
+  gitSync(authorDir, ["push", "origin", "main"]);
+
+  const checked = await svc.checkForUpdates({ silent: false });
+  assert.equal(checked.hasUpdate, true);
+  assert.equal(checked.releaseNotes.pending[0].title, "中文亮点");
+  assert.equal(checked.releaseNotes.locales?.en?.pendingSource, "release_notes");
+  assert.equal(checked.releaseNotes.locales?.en?.pending?.[0]?.title, "English Highlights");
+  assert.equal(checked.releaseNotes.locales?.en?.pending?.[0]?.summary, "Plain-English update notes.");
+
+  const applied = await svc.applyUpdate({ reason: "manual" });
+  assert.equal(applied.ok, true);
+  assert.equal(applied.status.releaseNotes.locales?.en?.current?.version, "0.1.1");
+  assert.equal(applied.status.releaseNotes.locales?.en?.pending?.length, 0);
 });

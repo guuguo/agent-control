@@ -1,0 +1,67 @@
+# Agent Control Release Notes
+
+> Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
+
+## v0.2.3 (2026-11-19) — Inline Mermaid Diagrams, Unarchive & Clearer Execution Stats
+
+Summary: Render Mermaid flowcharts inline in chat, unarchive archived Codex sessions in one click, read human-friendly model speed stats, and view dedicated user-facing release notes.
+
+### Added
+
+- **Auto-Compact AGY Context Before Sending**: When an Antigravity session's context has grown about 60K tokens since its last compaction (adjustable or off in Settings), it is compacted automatically right before your next message is sent, with nothing lost or re-queued, which saves a lot of weekly quota.
+- **Inline Mermaid Diagram Rendering**: Flowcharts, sequence diagrams, and state diagrams in replies automatically render as crisp vector diagrams with fullscreen zoom and source-code toggle.
+- **One-Click Codex Unarchive**: Unarchive an archived Codex thread directly from the composer banner or error bar without switching back to the native CLI.
+- **Scheduled Task Auto-Unarchive Fallback**: Managed scheduled tasks automatically unarchive an archived target thread—or fall back to a fresh session when needed—so overnight automations keep running.
+- **Dedicated User-Facing Release Notes**: The update modal highlights clear Added, Improved, and Fixed takeaways for end users while keeping raw git commits collapsible on demand.
+
+### Improved
+
+- **Plain-Language Execution Stats**: Summary cards surface fastest time-to-first-token, output speed (tok/s), fastest completion, and top model directly instead of obscure percentages.
+- **Full Model Badge Labels**: Fixed truncation for long model names (Neon, 3.8 Flash, GPT-6.2-ASTRA) and custom multi-account labels inside status badges.
+- **3D Dream Factory & Cross-Platform Desktops**: Supports natural-language Dream Factory layout reorg, system-matching light/dark desktop window themes, and smoother Windows / Linux installation and self-updates.
+- **Daylight Contrast & Mobile Ergonomics**: Refined light-theme contrast, mobile long-press session menus, forked thread merging, and large history loading.
+
+### Fixed
+
+- **Token Speed Calibration**: Fixed legacy stats caches stuck on "No speed data" and filtered inflated throughput spikes caused by replayed historical messages.
+- **Per-Thread `/goal` State Isolation**: Fixed switching between threads sharing stale `/goal` auto-continue composer state.
+
+## v0.2.2 (2026-11-16) — Faster Voice Copilot Models & Stability Improvements
+
+Summary: Sped up lightweight voice routing models, accelerated huge session loads, and added an in-modal Restart Service button.
+
+### Added
+
+- **In-Modal Service Restart**: Restart the managed background service directly from the update modal with clear inline error diagnostics if restart fails.
+- **Cross-Agent Handoff & Qoder CLI**: Resume existing sessions with a different agent, pick models/reasoning levels freely, and manage local Qoder CLI sessions.
+
+### Improved
+
+- **Lower-Latency Voice Copilot**: Switched lightweight voice routing to Claude Sonnet / GPT-6.1 Terra low-reasoning modes to shorten back-and-forth pauses.
+- **Large History Performance**: Significantly faster loading and pagination for multi-thousand-line transcripts.
+
+### Fixed
+
+- **Windows Self-Update & Path Compatibility**: Stopped self-updates from terminating the restart helper (`taskkill /T`) and fixed installs under usernames or paths containing spaces or non-ASCII characters.
+
+## v0.2.0 (2026-11-16) — Auto-Update Panel & Unified Multi-Agent Monitor
+
+Summary: Added cross-device update checks, idle auto-restart, fingerprint-tracked desktop app sync, and upgraded the 4-agent live monitor.
+
+### Added
+
+- **One-Click & Idle Auto-Update**: Check for remote updates from desktop or phone and automatically pull + restart cleanly when the working tree is clean and no turns are running.
+- **Desktop Shell Sync**: Tracks native desktop wrapper version and source fingerprint so server updates automatically rebuild and sync the desktop app when needed.
+
+### Improved
+
+- **Multi-Agent HUD & Account Aliases**: Upgraded live status, queue counters, and automatic multi-account labels across Codex, Claude Code, Antigravity, and Grok.
+
+## v0.1.0 (2026-11-16) — Initial Public Release
+
+Summary: Introduced the unified local multi-agent console, zero-config QR mobile relay, and native macOS desktop shell.
+
+### Added
+
+- **Unified Multi-Agent Management**: Consolidated Codex, Claude Code, and Antigravity sessions with live streaming, interruption, turn queuing, and remote follow-ups.
+- **QR Mobile Pairing & Desktop App**: Built-in Cloudflare Quick Tunnel QR pairing, self-hosted relay support, and a native macOS `Agent Control.app` wrapper.

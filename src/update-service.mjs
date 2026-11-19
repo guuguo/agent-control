@@ -14,6 +14,9 @@ const execFileAsync = promisify(execFile);
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_APP_ROOT = resolve(MODULE_DIR, "..");
+export const RELEASE_NOTES_FILENAME = "RELEASE_NOTES.md";
+export const RELEASE_NOTES_EN_FILENAME = "RELEASE_NOTES.en.md";
+export const CHANGELOG_FILENAME = "CHANGELOG.md";
 export const DESKTOP_APP_NAME = "Agent Control.app";
 export const DESKTOP_SOURCE_FILES = [
   "desktop/macos/AgentControl.swift",
@@ -62,6 +65,399 @@ export function parsePorcelainDirtyFiles(stdout = "", maxItems = 8) {
     dirtyCount: files.length,
     dirtySample: files.slice(0, Math.max(1, maxItems)),
   };
+}
+
+function isEnglishReleaseLocale(locale = "zh") {
+  const clean = String(locale || "").trim().toLowerCase();
+  return Boolean(clean && !clean.startsWith("zh"));
+}
+
+function normalizeReleaseCategory(rawHeading = "", locale = "zh") {
+  const text = String(rawHeading || "").trim();
+  const isEn = isEnglishReleaseLocale(locale);
+  if (/(新增|新功能|功能|亮点|features?|added?)/i.test(text)) {
+    return { category: "new", categoryLabel: isEn ? "New" : "新增" };
+  }
+  if (/(优化|改进|体验|升级|性能|improv|enhanc|optimiz)/i.test(text)) {
+    return { category: "improve", categoryLabel: isEn ? "Improved" : "优化" };
+  }
+  if (/(修复|修正|问题|bug|fix)/i.test(text)) {
+    return { category: "fix", categoryLabel: isEn ? "Fixed" : "修复" };
+  }
+  return { category: "note", categoryLabel: isEn ? "Note" : "说明" };
+}
+
+function compareSemverParts(a = "", b = "") {
+  const pa = String(a || "").trim().replace(/^v/i, "").split(".").map((n) => Number(n));
+  const pb = String(b || "").trim().replace(/^v/i, "").split(".").map((n) => Number(n));
+  if (pa.length !== 3 || pb.length !== 3 || pa.some(Number.isNaN) || pb.some(Number.isNaN)) {
+    return 0;
+  }
+  for (let i = 0; i < 3; i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] > pb[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+function stripTrailingGitSha(text = "") {
+  return String(text || "").replace(/\s*\([0-9a-f]{7,40}\)\s*$/i, "").trim();
+}
+
+function stripMarkdownBoldMarkers(text = "") {
+  return String(text || "").replace(/\*\*(.+?)\*\*/g, "$1").trim();
+}
+
+function parseReleaseHeading(rawHeading = "", locale = "zh") {
+  const heading = String(rawHeading || "").trim();
+  const versionMatch = heading.match(/\bv?(\d+\.\d+\.\d+)\b/i);
+  const dateMatch = heading.match(/(\d{4}-\d{2}-\d{2})/);
+  const version = versionMatch?.[1] || "";
+  const date = dateMatch?.[1] || "";
+  const isEn = isEnglishReleaseLocale(locale);
+
+  let title = "";
+  const sepMatch = heading.match(/(?:—|--|\s-\s|：)\s*(.+)$/);
+  if (sepMatch?.[1]) {
+    title = sepMatch[1].trim();
+  } else {
+    title = heading
+      .replace(/\bv?\d+\.\d+\.\d+\b/i, "")
+      .replace(/\(\s*\d{4}-\d{2}-\d{2}\s*\)/, "")
+      .replace(/\d{4}-\d{2}-\d{2}/, "")
+      .replace(/^[\s—\-:：]+|[\s—\-:：]+$/g, "")
+      .trim();
+  }
+
+  return {
+    id: version ? `v${version}` : heading,
+    heading,
+    version,
+    date,
+    title: title || (version ? (isEn ? `v${version} Release` : `v${version} 版本更新`) : heading),
+  };
+}
+
+function parseReleaseListItem(rawText = "", defaultCat = { category: "note", categoryLabel: "说明" }, locale = "zh") {
+  let clean = stripTrailingGitSha(String(rawText || "").trim());
+  if (!clean) return null;
+  const isEn = isEnglishReleaseLocale(locale);
+
+  let cat = { ...defaultCat };
+  const prefixMatch = clean.match(/^(?:【([^】]{1,10})】|\[([^\]]{1,10})\])\s*(.+)$/);
+  if (prefixMatch) {
+    const tagText = (prefixMatch[1] || prefixMatch[2] || "").trim();
+    if (tagText) {
+      cat = normalizeReleaseCategory(tagText, locale);
+      clean = prefixMatch[3].trim();
+    }
+  }
+
+  let title = "";
+  let detail = "";
+  const boldSplit = clean.match(/^\*\*(.+?)\*\*\s*(?:[:：—-]+\s*(.*)|$)/);
+  if (boldSplit) {
+    title = stripMarkdownBoldMarkers(boldSplit[1]);
+    detail = stripMarkdownBoldMarkers(boldSplit[2] || "");
+  } else {
+    detail = stripMarkdownBoldMarkers(clean);
+  }
+
+  const text = title && detail
+    ? `${title}${isEn ? ": " : "："}${detail}`
+    : (title || detail);
+  if (!text) return null;
+
+  return {
+    category: cat.category,
+    categoryLabel: cat.categoryLabel,
+    title,
+    detail,
+    text,
+  };
+}
+
+export function parseReleaseNotes(markdown = "", { maxEntries = 6, maxItemsPerEntry = 12, locale = "zh" } = {}) {
+  const source = String(markdown || "");
+  if (!source.trim()) return [];
+  const defaultNoteCat = { category: "note", categoryLabel: isEnglishReleaseLocale(locale) ? "Note" : "说明" };
+
+  const lines = source.split(/\r?\n/);
+  const entries = [];
+  let current = null;
+  let currentCat = { ...defaultNoteCat };
+  let summaryLines = [];
+  let summaryDone = false;
+
+  const flushCurrent = () => {
+    if (!current) return;
+    if (!current.summary && summaryLines.length > 0) {
+      current.summary = stripMarkdownBoldMarkers(summaryLines.join(" "))
+        .replace(/^(?:一句话总结|更新摘要|版本摘要|摘要|summary|tl;dr|overview)\s*[:：]\s*/i, "")
+        .trim();
+    }
+    if (current.items.length > 0 || current.summary || current.title) {
+      entries.push(current);
+    }
+    current = null;
+    summaryLines = [];
+    summaryDone = false;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const h2 = line.match(/^##\s+(.+)$/);
+    if (h2) {
+      flushCurrent();
+      if (entries.length >= maxEntries) break;
+      const meta = parseReleaseHeading(h2[1], locale);
+      current = {
+        ...meta,
+        summary: "",
+        items: [],
+      };
+      currentCat = { ...defaultNoteCat };
+      summaryLines = [];
+      summaryDone = false;
+      continue;
+    }
+
+    if (!current) continue;
+    if (entries.length >= maxEntries) continue;
+
+    const h3 = line.match(/^###+\s+(.+)$/);
+    if (h3) {
+      summaryDone = true;
+      currentCat = normalizeReleaseCategory(h3[1], locale);
+      continue;
+    }
+
+    if (!line) {
+      if (summaryLines.length > 0) summaryDone = true;
+      continue;
+    }
+
+    if (/^(?:>|<!--|---+|\*\*\*+$|UI\s*资源版本\s*[:：])/i.test(line)) {
+      continue;
+    }
+
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      summaryDone = true;
+      if (current.items.length < maxItemsPerEntry) {
+        const parsedItem = parseReleaseListItem(bullet[1], currentCat, locale);
+        if (parsedItem) {
+          current.items.push(parsedItem);
+        }
+      }
+      continue;
+    }
+
+    if (!summaryDone && current.items.length === 0) {
+      summaryLines.push(line);
+    }
+  }
+
+  flushCurrent();
+  return entries.slice(0, maxEntries);
+}
+
+function classifyCommitSubject(rawSubject = "", locale = "zh") {
+  const subject = String(rawSubject || "").trim();
+  const isEn = isEnglishReleaseLocale(locale);
+  const prefixMatch = subject.match(/^(feat|fix|perf|refactor|style|ui|docs|chore|ci|build|test)(?:\(([^)]*)\))?!?:\s*(.+)$/i);
+  const commitType = (prefixMatch?.[1] || "").toLowerCase();
+  const cleanText = stripTrailingGitSha((prefixMatch?.[3] || subject).trim());
+
+  if (commitType === "feat" || /^(?:新增|增加|支持|接入|上线|add(?:ed)?|support)/i.test(cleanText)) {
+    return { category: "new", categoryLabel: isEn ? "New" : "新增", text: cleanText };
+  }
+  if (commitType === "fix" || /^(?:修复|修正|解决|fix(?:ed)?|resolve)/i.test(cleanText)) {
+    return { category: "fix", categoryLabel: isEn ? "Fixed" : "修复", text: cleanText };
+  }
+  if (["perf", "refactor", "style", "ui"].includes(commitType) || /^(?:优化|改进|完善|升级|精简|调整|improv|enhanc|optimiz)/i.test(cleanText)) {
+    return { category: "improve", categoryLabel: isEn ? "Improved" : "优化", text: cleanText };
+  }
+  return { category: "note", categoryLabel: isEn ? "Maintenance" : "维护", text: cleanText };
+}
+
+export function summarizeCommitsAsReleaseEntry(pendingCommits = [], { remoteVersion = "", title = "", locale = "zh" } = {}) {
+  const rawList = Array.isArray(pendingCommits) ? pendingCommits : [];
+  if (rawList.length === 0) return null;
+  const isEn = isEnglishReleaseLocale(locale);
+
+  const isBumpCommit = (s) => /^(?:chore(?:\([^)]*\))?:\s*)?(?:bump(?:\s+version)?|release)\b|^版本发布(?:\s|$)/i.test(String(s || "").trim());
+  const nonBump = rawList.filter((c) => !isBumpCommit(c?.subject));
+  const chosen = (nonBump.length > 0 ? nonBump : rawList).slice(0, 8);
+
+  const items = chosen
+    .map((commit) => {
+      const classified = classifyCommitSubject(commit?.subject || "", locale);
+      if (!classified.text) return null;
+      return {
+        category: classified.category,
+        categoryLabel: classified.categoryLabel,
+        title: "",
+        detail: classified.text,
+        text: classified.text,
+      };
+    })
+    .filter(Boolean);
+
+  if (items.length === 0) return null;
+  const newestTs = Number(chosen[0]?.timestamp) || 0;
+  const dateStr = newestTs > 0 ? new Date(newestTs * 1000).toISOString().slice(0, 10) : "";
+  const defaultTitle = isEn
+    ? (remoteVersion ? `v${remoteVersion} Changes` : "Latest Code Updates")
+    : (remoteVersion ? `v${remoteVersion} 更新内容` : "最新代码更新");
+
+  return {
+    id: remoteVersion ? `v${remoteVersion}` : "commits-fallback",
+    heading: title || defaultTitle,
+    version: String(remoteVersion || "").trim(),
+    date: dateStr,
+    title: title || defaultTitle,
+    summary: "",
+    items,
+  };
+}
+
+function normalizeReleaseItemKey(item) {
+  return String(item?.text || item?.detail || item?.title || "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+export function computePendingReleaseNotes({
+  localNotes = [],
+  remoteNotes = [],
+  localSource = "none",
+  remoteSource = "none",
+  pendingCommits = [],
+  localVersion = "",
+  remoteVersion = "",
+  locale = "zh",
+} = {}) {
+  const localList = Array.isArray(localNotes) ? localNotes : [];
+  const remoteList = Array.isArray(remoteNotes) ? remoteNotes : [];
+  const commits = Array.isArray(pendingCommits) ? pendingCommits : [];
+
+  if (remoteList.length === 0 && commits.length === 0) {
+    return { pending: [], pendingSource: "none" };
+  }
+
+  // Case 1: Legacy installation lacks RELEASE_NOTES.md while remote introduces it.
+  // Never dump the entire historical changelog — surface only newer versions (or top 1 entry).
+  if (remoteSource === "release_notes" && localSource !== "release_notes" && remoteList.length > 0) {
+    const newerEntries = localVersion
+      ? remoteList.filter((entry) => entry.version && compareSemverParts(entry.version, localVersion) > 0)
+      : [];
+    const selected = (newerEntries.length > 0 ? newerEntries : [remoteList[0]]).slice(0, 3);
+    return { pending: selected, pendingSource: "release_notes" };
+  }
+
+  if (remoteList.length > 0) {
+    const localKeys = new Set(
+      localList.map((entry) => entry.version || entry.heading).filter(Boolean),
+    );
+    const newEntries = [];
+    for (const entry of remoteList) {
+      const key = entry.version || entry.heading;
+      if (key && localKeys.has(key)) break;
+      newEntries.push(entry);
+      if (newEntries.length >= 4) break;
+    }
+    if (newEntries.length > 0) {
+      return {
+        pending: newEntries,
+        pendingSource: remoteSource === "changelog" ? "changelog" : "release_notes",
+      };
+    }
+
+    // Case 2: Same top version updated in-place on remote (mid-version push on main).
+    const remoteTop = remoteList[0];
+    const localTop = localList.find((e) => (
+      (remoteTop.version && e.version === remoteTop.version)
+      || (remoteTop.heading && e.heading === remoteTop.heading)
+    )) || localList[0];
+
+    if (remoteTop && localTop) {
+      const localItemKeys = new Set((localTop.items || []).map(normalizeReleaseItemKey).filter(Boolean));
+      const addedItems = (remoteTop.items || []).filter((item) => {
+        const key = normalizeReleaseItemKey(item);
+        return key && !localItemKeys.has(key);
+      });
+      if (addedItems.length > 0) {
+        return {
+          pending: [{
+            ...remoteTop,
+            items: addedItems.slice(0, 12),
+          }],
+          pendingSource: remoteSource === "changelog" ? "changelog" : "release_notes",
+        };
+      }
+      if (
+        remoteTop.date !== localTop.date
+        || remoteTop.title !== localTop.title
+        || remoteTop.summary !== localTop.summary
+      ) {
+        return {
+          pending: [remoteTop],
+          pendingSource: remoteSource === "changelog" ? "changelog" : "release_notes",
+        };
+      }
+    }
+  }
+
+  if (commits.length > 0) {
+    const fallbackEntry = summarizeCommitsAsReleaseEntry(commits, { remoteVersion, locale });
+    if (fallbackEntry) {
+      return {
+        pending: [fallbackEntry],
+        pendingSource: "commits_fallback",
+      };
+    }
+  }
+
+  return { pending: [], pendingSource: "none" };
+}
+
+async function readLocalReleaseNotes(rootDir) {
+  for (const candidate of [
+    { file: RELEASE_NOTES_FILENAME, source: "release_notes" },
+    { file: CHANGELOG_FILENAME, source: "changelog" },
+  ]) {
+    try {
+      const raw = await readFile(resolve(rootDir, candidate.file), "utf8");
+      const entries = parseReleaseNotes(raw);
+      if (entries.length > 0) {
+        return {
+          file: candidate.file,
+          source: candidate.source,
+          entries,
+        };
+      }
+    } catch {
+      // Try next release notes file.
+    }
+  }
+  return { file: "", source: "none", entries: [] };
+}
+
+async function readLocalReleaseNotesEn(rootDir) {
+  try {
+    const raw = await readFile(resolve(rootDir, RELEASE_NOTES_EN_FILENAME), "utf8");
+    const entries = parseReleaseNotes(raw, { locale: "en" });
+    if (entries.length > 0) {
+      return {
+        file: RELEASE_NOTES_EN_FILENAME,
+        source: "release_notes",
+        entries,
+      };
+    }
+  } catch {
+    // Missing RELEASE_NOTES.en.md falls back cleanly to RELEASE_NOTES.md or commit summary.
+  }
+  return { file: "", source: "none", entries: [] };
 }
 
 function clampCheckIntervalHours(value, fallback = DEFAULT_CHECK_INTERVAL_HOURS) {
@@ -517,6 +913,12 @@ export class UpdateService {
     dirtySample: [],
     managedService: false,
     serviceKind: "",
+    localReleaseNotesFile: "",
+    localReleaseNotesSource: "none",
+    localReleaseNotes: [],
+    localReleaseNotesEnFile: "",
+    localReleaseNotesEnSource: "none",
+    localReleaseNotesEn: [],
     hasDesktopApp: false,
     desktopApp: {
       supported: false,
@@ -543,6 +945,12 @@ export class UpdateService {
     behindCount: 0,
     aheadCount: 0,
     pendingCommits: [],
+    remoteReleaseNotesFile: "",
+    remoteReleaseNotesSource: "none",
+    remoteReleaseNotes: [],
+    remoteReleaseNotesEnFile: "",
+    remoteReleaseNotesEnSource: "none",
+    remoteReleaseNotesEn: [],
   };
   #checking = false;
   #updating = false;
@@ -632,10 +1040,14 @@ export class UpdateService {
   }
 
   async #inspectRepo() {
-    const meta = await readLocalMeta(this.#rootDir, this.#platform, {
-      desktopInstallDir: this.#desktopInstallDir,
-      env: this.#env,
-    });
+    const [meta, localRelease, localReleaseEn] = await Promise.all([
+      readLocalMeta(this.#rootDir, this.#platform, {
+        desktopInstallDir: this.#desktopInstallDir,
+        env: this.#env,
+      }),
+      readLocalReleaseNotes(this.#rootDir),
+      readLocalReleaseNotesEn(this.#rootDir),
+    ]);
     const service = detectManagedService({
       platform: this.#platform,
       env: this.#env,
@@ -656,6 +1068,12 @@ export class UpdateService {
       dirtySample: [],
       managedService: service.managed,
       serviceKind: service.kind,
+      localReleaseNotesFile: localRelease.file,
+      localReleaseNotesSource: localRelease.source,
+      localReleaseNotes: localRelease.entries,
+      localReleaseNotesEnFile: localReleaseEn.file,
+      localReleaseNotesEnSource: localReleaseEn.source,
+      localReleaseNotesEn: localReleaseEn.entries,
     };
 
     try {
@@ -718,9 +1136,75 @@ export class UpdateService {
       && !this.#repoInfo.dirty
       && !this.#updating,
     );
+    const {
+      localReleaseNotesFile,
+      localReleaseNotesSource,
+      localReleaseNotes,
+      localReleaseNotesEnFile,
+      localReleaseNotesEnSource,
+      localReleaseNotesEn,
+      ...publicRepoInfo
+    } = this.#repoInfo;
+    const {
+      remoteReleaseNotesFile,
+      remoteReleaseNotesSource,
+      remoteReleaseNotes,
+      remoteReleaseNotesEnFile,
+      remoteReleaseNotesEnSource,
+      remoteReleaseNotesEn,
+      ...publicRemoteInfo
+    } = this.#remoteInfo;
+    const localNotes = Array.isArray(localReleaseNotes) ? localReleaseNotes : [];
+    const remoteNotes = Array.isArray(remoteReleaseNotes) ? remoteReleaseNotes : [];
+    const localEnNotes = Array.isArray(localReleaseNotesEn) ? localReleaseNotesEn : [];
+    const remoteEnNotes = Array.isArray(remoteReleaseNotesEn) ? remoteReleaseNotesEn : [];
+    const pendingResult = (hasUpdate && this.#remoteInfo.behindCount > 0)
+      ? computePendingReleaseNotes({
+        localNotes,
+        remoteNotes,
+        localSource: localReleaseNotesSource,
+        remoteSource: remoteReleaseNotesSource,
+        pendingCommits: this.#remoteInfo.pendingCommits,
+        localVersion: this.#repoInfo.packageVersion,
+        remoteVersion: this.#remoteInfo.remoteVersion,
+      })
+      : { pending: [], pendingSource: "none" };
+    const pendingEnResult = (hasUpdate && this.#remoteInfo.behindCount > 0)
+      ? computePendingReleaseNotes({
+        localNotes: localEnNotes,
+        remoteNotes: remoteEnNotes,
+        localSource: localReleaseNotesEnSource,
+        remoteSource: remoteReleaseNotesEnSource,
+        pendingCommits: this.#remoteInfo.pendingCommits,
+        localVersion: this.#repoInfo.packageVersion,
+        remoteVersion: this.#remoteInfo.remoteVersion,
+        locale: "en",
+      })
+      : { pending: [], pendingSource: "none" };
+
+    const zhBucket = {
+      file: localReleaseNotesFile || remoteReleaseNotesFile || "",
+      current: localNotes[0] || null,
+      recent: localNotes.slice(0, 4),
+      remote: remoteNotes[0] || null,
+      pending: pendingResult.pending,
+      pendingSource: pendingResult.pendingSource,
+    };
+    const hasEnBucket = localEnNotes.length > 0 || remoteEnNotes.length > 0 || pendingEnResult.pending.length > 0;
+    const enBucket = hasEnBucket
+      ? {
+        file: localReleaseNotesEnFile || remoteReleaseNotesEnFile || "",
+        current: localEnNotes[0] || null,
+        recent: localEnNotes.slice(0, 4),
+        remote: remoteEnNotes[0] || null,
+        pending: pendingEnResult.pending,
+        pendingSource: pendingEnResult.pendingSource,
+      }
+      : null;
+
     return {
-      ...this.#repoInfo,
-      ...this.#remoteInfo,
+      ...publicRepoInfo,
+      ...publicRemoteInfo,
       ...this.#config,
       ...this.#persisted,
       updateState,
@@ -735,6 +1219,10 @@ export class UpdateService {
       phaseMessage: this.#phaseMessage,
       restartPending: this.#restartPending,
       desktopRebuildSuggested: this.#desktopRebuildSuggested,
+      releaseNotes: {
+        ...zhBucket,
+        ...(enBucket ? { locales: { en: enBucket } } : {}),
+      },
     };
   }
 
@@ -787,11 +1275,14 @@ export class UpdateService {
     const remoteSha = shaRes?.stdout?.trim() || "";
     if (!remoteSha) return;
 
-    const [remoteLogRes, aheadBehindRes, commitsRes, remotePkgRes] = await Promise.all([
+    const [remoteLogRes, aheadBehindRes, commitsRes, remotePkgRes, remoteNotesRes, remoteNotesEnRes, remoteChangelogRes] = await Promise.all([
       this.#git(["log", "-1", "--format=%h%n%ct%n%s", remoteRef], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
       this.#git(["rev-list", "--left-right", "--count", `HEAD...${remoteRef}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "0 0" })),
       this.#git(["log", "--format=%h%x09%ct%x09%s", "-n", "10", `HEAD..${remoteRef}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
       this.#git(["show", `${remoteRef}:package.json`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
+      this.#git(["show", `${remoteRef}:${RELEASE_NOTES_FILENAME}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
+      this.#git(["show", `${remoteRef}:${RELEASE_NOTES_EN_FILENAME}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
+      this.#git(["show", `${remoteRef}:${CHANGELOG_FILENAME}`], { timeoutMs: 5_000 }).catch(() => ({ stdout: "" })),
     ]);
 
     const [shortSha = "", tsStr = "0", subject = ""] = remoteLogRes.stdout.split(/\r?\n/);
@@ -821,6 +1312,33 @@ export class UpdateService {
       // Ignore invalid remote package.json.
     }
 
+    let remoteReleaseNotesFile = "";
+    let remoteReleaseNotesSource = "none";
+    let remoteReleaseNotes = [];
+    const parsedRemoteNotes = parseReleaseNotes(remoteNotesRes.stdout);
+    if (parsedRemoteNotes.length > 0) {
+      remoteReleaseNotesFile = RELEASE_NOTES_FILENAME;
+      remoteReleaseNotesSource = "release_notes";
+      remoteReleaseNotes = parsedRemoteNotes;
+    } else {
+      const parsedRemoteChangelog = parseReleaseNotes(remoteChangelogRes.stdout);
+      if (parsedRemoteChangelog.length > 0) {
+        remoteReleaseNotesFile = CHANGELOG_FILENAME;
+        remoteReleaseNotesSource = "changelog";
+        remoteReleaseNotes = parsedRemoteChangelog;
+      }
+    }
+
+    let remoteReleaseNotesEnFile = "";
+    let remoteReleaseNotesEnSource = "none";
+    let remoteReleaseNotesEn = [];
+    const parsedRemoteNotesEn = parseReleaseNotes(remoteNotesEnRes.stdout, { locale: "en" });
+    if (parsedRemoteNotesEn.length > 0) {
+      remoteReleaseNotesEnFile = RELEASE_NOTES_EN_FILENAME;
+      remoteReleaseNotesEnSource = "release_notes";
+      remoteReleaseNotesEn = parsedRemoteNotesEn;
+    }
+
     this.#remoteInfo = {
       remoteSha,
       remoteShortSha: shortSha.trim() || remoteSha.slice(0, 7),
@@ -830,6 +1348,12 @@ export class UpdateService {
       behindCount,
       aheadCount,
       pendingCommits,
+      remoteReleaseNotesFile,
+      remoteReleaseNotesSource,
+      remoteReleaseNotes,
+      remoteReleaseNotesEnFile,
+      remoteReleaseNotesEnSource,
+      remoteReleaseNotesEn,
     };
   }
 

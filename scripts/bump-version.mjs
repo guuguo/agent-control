@@ -75,12 +75,85 @@ function collectRecentCommitSubjects(rootDir, maxCount = 12) {
   }
 }
 
-export function runBumpVersion(target = "patch", { rootDir = ROOT_DIR, dryRun = false, date = new Date() } = {}) {
+export function buildReleaseNotesSection({
+  newVersion,
+  dateStr,
+  commitLines = "",
+  title = "",
+  summary = "",
+  locale = "zh",
+} = {}) {
+  const isEn = String(locale || "").toLowerCase().startsWith("en");
+  const lines = String(commitLines || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^-\s*/, "").replace(/\s*\([0-9a-f]{7,40}\)\s*$/i, "").trim())
+    .filter(Boolean);
+
+  const buckets = { new: [], improve: [], fix: [], note: [] };
+  for (const raw of lines) {
+    if (/^(?:chore(?:\([^)]*\))?:\s*)?(?:bump(?:\s+version)?|release)\b|^版本发布(?:\s|$)/i.test(raw)) continue;
+    const match = raw.match(/^(feat|fix|perf|refactor|style|ui|docs|chore|ci|build|test)(?:\([^)]*\))?!?:\s*(.+)$/i);
+    const kind = (match?.[1] || "").toLowerCase();
+    const text = (match?.[2] || raw).trim();
+    if (!text) continue;
+    if (kind === "feat" || /^(?:新增|增加|支持|接入|上线|add(?:ed)?|support)/i.test(text)) {
+      buckets.new.push(`- ${text}`);
+    } else if (kind === "fix" || /^(?:修复|修正|解决|fix(?:ed)?|resolve)/i.test(text)) {
+      buckets.fix.push(`- ${text}`);
+    } else if (["perf", "refactor", "style", "ui"].includes(kind) || /^(?:优化|改进|完善|升级|精简|调整|improv|enhanc|optimiz)/i.test(text)) {
+      buckets.improve.push(`- ${text}`);
+    } else {
+      buckets.note.push(`- ${text}`);
+    }
+  }
+
+  const resolvedTitle = String(title || "").trim() || (isEn ? `v${newVersion} Release` : `v${newVersion} 版本更新`);
+  const summaryLine = isEn
+    ? (() => {
+      const s = String(summary || "").trim() || "Please summarize the key user-facing highlights of this release.";
+      return /^summary\s*:/i.test(s) ? s : `Summary: ${s}`;
+    })()
+    : (() => {
+      const s = String(summary || "").trim() || "请补充面向用户的本版本核心更新亮点。";
+      return s.startsWith("一句话总结") ? s : `一句话总结：${s}`;
+    })();
+  const blocks = [`## v${newVersion} (${dateStr}) — ${resolvedTitle}`, "", summaryLine];
+
+  const appendBucket = (heading, items) => {
+    if (items.length === 0) return;
+    blocks.push("", `### ${heading}`, "", ...items);
+  };
+  if (isEn) {
+    appendBucket("Added", buckets.new);
+    appendBucket("Improved", buckets.improve);
+    appendBucket("Fixed", buckets.fix);
+    appendBucket("Notes", buckets.note);
+  } else {
+    appendBucket("新增", buckets.new);
+    appendBucket("优化", buckets.improve);
+    appendBucket("修复", buckets.fix);
+    appendBucket("说明", buckets.note);
+  }
+
+  if (buckets.new.length === 0 && buckets.improve.length === 0 && buckets.fix.length === 0 && buckets.note.length === 0) {
+    if (isEn) {
+      blocks.push("", "### Improved", "", `- Release v${newVersion} (please replace with plain-English user-facing notes)`);
+    } else {
+      blocks.push("", "### 优化", "", `- 版本发布 v${newVersion}（请补充通俗易懂的中文更新说明）`);
+    }
+  }
+
+  return `${blocks.join("\n")}\n`;
+}
+
+export function runBumpVersion(target = "patch", { rootDir = ROOT_DIR, dryRun = false, date = new Date(), title = "", summary = "" } = {}) {
   const pkgPath = resolve(rootDir, "package.json");
   const lockPath = resolve(rootDir, "package-lock.json");
   const indexPath = resolve(rootDir, "public", "index.html");
   const appJsPath = resolve(rootDir, "public", "app.js");
   const changelogPath = resolve(rootDir, "CHANGELOG.md");
+  const releaseNotesPath = resolve(rootDir, "RELEASE_NOTES.md");
+  const releaseNotesEnPath = resolve(rootDir, "RELEASE_NOTES.en.md");
 
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const oldVersion = String(pkg.version || "0.1.0");
@@ -128,6 +201,45 @@ export function runBumpVersion(target = "patch", { rootDir = ROOT_DIR, dryRun = 
         : `# 更新日志 (CHANGELOG)\n\n${section}\n${existingLog}`;
       writeFileSync(changelogPath, updatedLog, "utf8");
     }
+
+    const releaseSection = buildReleaseNotesSection({
+      newVersion,
+      dateStr,
+      commitLines: recentNotes,
+      title,
+      summary,
+    });
+    const defaultReleaseHeader = "# Agent Control 更新说明\n\n> 本文件面向最终用户，用简明中文记录每个版本最核心的功能变化、体验优化与问题修复。\n\n";
+    const existingReleaseNotes = existsSync(releaseNotesPath)
+      ? readFileSync(releaseNotesPath, "utf8")
+      : defaultReleaseHeader;
+    if (!existingReleaseNotes.includes(`## v${newVersion} (`)) {
+      const firstH2 = existingReleaseNotes.search(/^##\s+/m);
+      const updatedReleaseNotes = firstH2 >= 0
+        ? `${existingReleaseNotes.slice(0, firstH2)}${releaseSection}\n${existingReleaseNotes.slice(firstH2)}`
+        : `${existingReleaseNotes.replace(/\s*$/, "\n\n")}${releaseSection}`;
+      writeFileSync(releaseNotesPath, updatedReleaseNotes, "utf8");
+    }
+
+    const releaseSectionEn = buildReleaseNotesSection({
+      newVersion,
+      dateStr,
+      commitLines: recentNotes,
+      title,
+      summary,
+      locale: "en",
+    });
+    const defaultReleaseHeaderEn = "# Agent Control Release Notes\n\n> Plain-language English release notes for end users covering key additions, improvements, and fixes in each version.\n\n";
+    const existingReleaseNotesEn = existsSync(releaseNotesEnPath)
+      ? readFileSync(releaseNotesEnPath, "utf8")
+      : defaultReleaseHeaderEn;
+    if (!existingReleaseNotesEn.includes(`## v${newVersion} (`)) {
+      const firstH2En = existingReleaseNotesEn.search(/^##\s+/m);
+      const updatedReleaseNotesEn = firstH2En >= 0
+        ? `${existingReleaseNotesEn.slice(0, firstH2En)}${releaseSectionEn}\n${existingReleaseNotesEn.slice(firstH2En)}`
+        : `${existingReleaseNotesEn.replace(/\s*$/, "\n\n")}${releaseSectionEn}`;
+      writeFileSync(releaseNotesEnPath, updatedReleaseNotesEn, "utf8");
+    }
   }
 
   return {
@@ -143,9 +255,18 @@ const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLTo
 if (isMain) {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
+  const titleArg = args.find((a) => a.startsWith("--title="));
+  const summaryArg = args.find((a) => a.startsWith("--summary="));
   const target = args.find((a) => !a.startsWith("-")) || "patch";
-  const res = runBumpVersion(target, { dryRun });
+  const res = runBumpVersion(target, {
+    dryRun,
+    title: titleArg ? titleArg.slice("--title=".length) : "",
+    summary: summaryArg ? summaryArg.slice("--summary=".length) : "",
+  });
   process.stdout.write(
     `${dryRun ? "[Dry Run] " : ""}版本已更新: v${res.oldVersion} -> v${res.newVersion} (UI: ${res.oldUiVersion} -> ${res.newUiVersion})\n`,
   );
+  if (!dryRun) {
+    process.stdout.write("提示：请同步完善 RELEASE_NOTES.md 与 RELEASE_NOTES.en.md 顶部章节的用户向中英文更新说明后再提交发布。\n");
+  }
 }
