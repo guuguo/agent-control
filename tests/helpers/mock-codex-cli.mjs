@@ -239,6 +239,16 @@ rl.on("line", (line) => {
       return;
     }
     const thread = ensureThread(params.threadId, params);
+    if (thread.archived) {
+      send({
+        id,
+        error: {
+          code: -32000,
+          message: `session ${params.threadId} is archived. Run \`codex unarchive ${params.threadId}\` to unarchive it first.`,
+        },
+      });
+      return;
+    }
     loadedThreads.add(params.threadId);
     send({ id, result: { thread } });
     return;
@@ -320,6 +330,11 @@ rl.on("line", (line) => {
   }
 
   if (method === "thread/unarchive") {
+    const unsupportedFile = resolve(process.env.CODEX_HOME || "", ".mock-unarchive-unsupported");
+    if (existsSync(unsupportedFile)) {
+      send({ id, error: { code: -32601, message: "Method not found" } });
+      return;
+    }
     const t = threads.get(params.threadId);
     if (t) t.archived = false;
     send({ id, result: { ok: true } });

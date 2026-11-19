@@ -25,6 +25,24 @@ const WEEKDAY_LABELS = Object.freeze({
   FR: "周五",
   SA: "周六",
 });
+const ARCHIVED_THREAD_ERROR_RE = /\bis archived\b|codex unarchive\b|已在 Codex 中归档|先解除归档/i;
+
+function isArchivedThreadError(error) {
+  if (!error) return false;
+  if (String(error?.code || "") === "thread_archived") return true;
+  return ARCHIVED_THREAD_ERROR_RE.test(String(error?.message || error || ""));
+}
+
+function extractRawThreadId(compositeOrRawId = "", provider = "", profileId = "") {
+  const id = String(compositeOrRawId || "").trim();
+  if (!id) return "";
+  const prefix = `${provider}:${profileId}:`;
+  if (provider && profileId && id.startsWith(prefix)) {
+    return id.slice(prefix.length);
+  }
+  const parts = id.split(":");
+  return parts.length >= 3 ? parts.slice(2).join(":") : id;
+}
 
 function toEpochMs(raw) {
   const n = Number(raw);
@@ -497,6 +515,7 @@ export class AutomationScheduler {
 
       return {
         ...task,
+        targetThreadId: ov.targetThreadId || task.targetThreadId || "",
         managed,
         running: this.#inFlightKeys.has(task.taskKey),
         scheduleLabel: formatRruleHuman(task.rrule),
@@ -629,6 +648,9 @@ export class AutomationScheduler {
     const prevOv = this.#state.overrides[task.taskKey] || {};
     try {
       let threadId = "";
+      let fallbackCwd = "";
+      let unarchivedTarget = false;
+      let fallbackNewThread = false;
       const promptText = task.kind === "heartbeat" && task.provider === "codex" && task.targetThreadId
         ? `<heartbeat>\n  <automation_id>${task.id}</automation_id>\n  <current_time_iso>${new Date(nowMs).toISOString()}</current_time_iso>\n  <instructions>\n${task.prompt}\n  </instructions>\n</heartbeat>`
         : task.prompt;
@@ -636,23 +658,60 @@ export class AutomationScheduler {
       if (task.targetThreadId) {
         const compositeId = `${task.provider}:${task.profileId}:${task.targetThreadId}`;
         const existing = await this.#hub.readThread?.(compositeId, { limit: 2 }).catch(() => null);
+        fallbackCwd = existing?.thread?.cwd || "";
         if (existing?.thread?.live) {
           return { ok: false, skipped: true, reason: "target_thread_busy" };
         }
         if (existing?.thread) {
-          const res = await this.#hub.sendTurn({
+          let unarchiveAttempted = false;
+          const tryUnarchive = async () => {
+            unarchiveAttempted = true;
+            if (typeof this.#hub.archiveThread !== "function") return false;
+            try {
+              await this.#hub.archiveThread(compositeId, false);
+              unarchivedTarget = true;
+              return true;
+            } catch {
+              return false;
+            }
+          };
+          const sendToTarget = () => this.#hub.sendTurn({
             threadId: compositeId,
             text: promptText,
             ...(task.model ? { model: task.model } : {}),
             ...(task.reasoningEffort ? { effort: task.reasoningEffort } : {}),
             permissionMode: "turbo",
           });
-          threadId = res?.thread?.id || compositeId;
+
+          let canSendToTarget = true;
+          if (existing.thread.archived) {
+            canSendToTarget = await tryUnarchive();
+          }
+          if (canSendToTarget) {
+            try {
+              const res = await sendToTarget();
+              threadId = res?.thread?.id || compositeId;
+            } catch (sendErr) {
+              if (!isArchivedThreadError(sendErr)) throw sendErr;
+              if (!unarchiveAttempted && await tryUnarchive()) {
+                try {
+                  const retryRes = await sendToTarget();
+                  threadId = retryRes?.thread?.id || compositeId;
+                } catch (retryErr) {
+                  if (!isArchivedThreadError(retryErr)) throw retryErr;
+                }
+              }
+            }
+          }
         }
       }
 
       if (!threadId) {
-        const rawCwd = task.cwds?.find((p) => p && existsSync(p)) || task.cwds?.[0] || os.homedir();
+        fallbackNewThread = Boolean(task.targetThreadId);
+        const rawCwd = task.cwds?.find((p) => p && existsSync(p))
+          || (fallbackCwd && existsSync(fallbackCwd) ? fallbackCwd : "")
+          || task.cwds?.[0]
+          || os.homedir();
         const resolvedCwd = existsSync(rawCwd) ? rawCwd : os.homedir();
         const res = await this.#hub.startThread({
           provider: task.provider || "codex",
@@ -666,8 +725,12 @@ export class AutomationScheduler {
         threadId = res?.thread?.id || "";
       }
 
+      const nextTargetRawId = fallbackNewThread && threadId
+        ? extractRawThreadId(threadId, task.provider || "codex", task.profileId || "default")
+        : "";
       this.#state.overrides[task.taskKey] = {
         ...prevOv,
+        ...(nextTargetRawId ? { targetThreadId: nextTargetRawId } : {}),
         lastTriggeredAtMs: nowMs,
         lastStatus: "triggered",
         lastError: "",
@@ -680,11 +743,19 @@ export class AutomationScheduler {
         name: task.name,
         provider: task.provider,
         threadId,
+        unarchived: unarchivedTarget,
+        fallbackNewThread,
         reason,
         triggeredAtMs: nowMs,
       };
       this.#emit("automation_run", eventPayload);
-      return { ok: true, threadId, taskKey: task.taskKey };
+      return {
+        ok: true,
+        threadId,
+        taskKey: task.taskKey,
+        unarchived: unarchivedTarget,
+        fallbackNewThread,
+      };
     } catch (error) {
       this.#state.overrides[task.taskKey] = {
         ...prevOv,

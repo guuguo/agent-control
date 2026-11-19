@@ -31,9 +31,22 @@ const execFileAsync = promisify(execFile);
 
 const CODEX_ACTIVE_WRITER_RE = /already has an active writer|\bactive writer\b|thread is busy|already running|turn in progress/i;
 const CODEX_STEER_FALLBACK_RE = /thread not found|no active turn|turn.*not.*in progress|turn not found|expectedTurnId/i;
+const CODEX_ARCHIVED_RE = /\bis archived\b|codex unarchive\b/i;
+const CODEX_ALREADY_UNARCHIVED_RE = /\bnot archived\b|already unarchived|already active/i;
+const CODEX_ALREADY_ARCHIVED_RE = /already archived/i;
 
 function normalizeCodexTurnError(error, { steer = false, idleLock = false } = {}) {
   const msg = String(error?.message || error || "").trim();
+  if (CODEX_ARCHIVED_RE.test(msg)) {
+    return Object.assign(
+      new Error(`该会话已在 Codex 中归档，解除归档后即可继续发送（${msg}）`),
+      {
+        status: 409,
+        code: "thread_archived",
+        rawMessage: msg,
+      },
+    );
+  }
   if (CODEX_ACTIVE_WRITER_RE.test(msg)) {
     let text;
     if (idleLock) {
@@ -564,6 +577,7 @@ export class CodexProvider {
     const normalized = this.#normalizeThread(profile, {
       ...indexed,
       ...thread,
+      archived: Boolean(indexed?.archived ?? thread?.archived),
       cwd: indexed?.cwd || thread.cwd || "",
       firstUserText: thread.firstUserText || indexed?.firstUserText || "",
       lastUserText: thread.lastUserText || indexed?.lastUserText || "",
@@ -865,20 +879,56 @@ export class CodexProvider {
   }
 
   async archiveThread(profileId, rawId) {
+    const key = `${profileId}:${rawId}`;
+    this.#resumedThreads.delete(key);
     const client = await this.#getClient(profileId);
-    await client.request("thread/archive", { threadId: rawId }).catch((err) => {
-      if (err?.code === -32601) return null;
-      throw err;
-    });
+    try {
+      await client.request("thread/archive", { threadId: rawId });
+    } catch (err) {
+      if (err?.code !== -32601) throw err;
+      const profile = await this.#getProfile(profileId);
+      const env = { ...this.#env, CODEX_HOME: profile.home };
+      try {
+        await this.#execFileImpl(
+          appServerExecutable(env),
+          ["archive", rawId],
+          { env, shell: false, timeout: 15_000, maxBuffer: 64 * 1024 },
+        );
+      } catch (cliErr) {
+        const cliMsg = `${cliErr?.stderr || ""} ${cliErr?.stdout || ""} ${cliErr?.message || ""}`.trim();
+        if (!CODEX_ALREADY_ARCHIVED_RE.test(cliMsg)) throw cliErr;
+      }
+    }
+    this.#resumedThreads.delete(key);
     return { ok: true };
   }
 
   async unarchiveThread(profileId, rawId) {
+    const key = `${profileId}:${rawId}`;
+    this.#resumedThreads.delete(key);
     const client = await this.#getClient(profileId);
-    await client.request("thread/unarchive", { threadId: rawId }).catch((err) => {
-      if (err?.code === -32601) return null;
-      throw err;
-    });
+    try {
+      await client.request("thread/unarchive", { threadId: rawId });
+    } catch (rpcErr) {
+      const profile = await this.#getProfile(profileId);
+      const env = { ...this.#env, CODEX_HOME: profile.home };
+      try {
+        await this.#execFileImpl(
+          appServerExecutable(env),
+          ["unarchive", rawId],
+          { env, shell: false, timeout: 15_000, maxBuffer: 64 * 1024 },
+        );
+      } catch (cliErr) {
+        const cliMsg = `${cliErr?.stderr || ""} ${cliErr?.stdout || ""} ${cliErr?.message || ""}`.trim();
+        if (CODEX_ALREADY_UNARCHIVED_RE.test(cliMsg)) {
+          this.#resumedThreads.delete(key);
+          return { ok: true, alreadyUnarchived: true };
+        }
+        const detail = String(cliErr?.stderr || cliErr?.message || rpcErr?.message || "解除归档失败").trim();
+        throw Object.assign(new Error(detail), { status: 502, code: "unarchive_failed", cause: cliErr });
+      }
+    }
+    this.#resumedThreads.delete(key);
     return { ok: true };
   }
 

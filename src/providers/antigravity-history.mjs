@@ -1579,3 +1579,84 @@ export async function readAntigravityThreadHistory(appDataDir, rawId, {
     nextCursor: start > 0 ? `turn:${start}` : null,
   };
 }
+
+// Bytes-per-token fallback used only when a transcript carries no token usage fields.
+const AGY_TRANSCRIPT_BYTES_PER_TOKEN = 5.3;
+const MAX_CONTEXT_USAGE_CACHE = 64;
+const contextUsageCache = new Map();
+
+/**
+ * Estimate how much live context an Antigravity conversation has accumulated since
+ * its last native compaction (CHECKPOINT step). Uses the real `input_tokens +
+ * cache_read_tokens` of PLANNER_RESPONSE steps; the post-compaction baseline (system
+ * prompt + summary, typically ~45-50K) is subtracted so thresholds measure growth.
+ * Read-only: only parses the transcript.jsonl written by Antigravity itself.
+ */
+export async function readAntigravityContextUsage(appDataDir, rawId) {
+  const cleanId = String(rawId || "").trim();
+  if (!appDataDir || !cleanId) return null;
+  const path = resolve(appDataDir, "brain", cleanId, ".system_generated", "logs", "transcript.jsonl");
+  const st = await stat(path).catch(() => null);
+  if (!st?.isFile() || st.size <= 0) return null;
+  const cacheKey = `${appDataDir}|${cleanId}`;
+  const cached = contextUsageCache.get(cacheKey);
+  if (cached && cached.size === st.size && cached.mtimeMs === st.mtimeMs) return { ...cached.usage };
+  const raw = await readFile(path, "utf8").catch(() => "");
+  const usage = parseAntigravityContextUsage(raw);
+  if (contextUsageCache.size >= MAX_CONTEXT_USAGE_CACHE) {
+    contextUsageCache.delete(contextUsageCache.keys().next().value);
+  }
+  contextUsageCache.set(cacheKey, { size: st.size, mtimeMs: st.mtimeMs, usage });
+  return { ...usage };
+}
+
+export function parseAntigravityContextUsage(raw = "") {
+  let baselineTokens = 0;
+  let currentTokens = 0;
+  let bytesSinceCheckpoint = 0;
+  let stepsSinceCheckpoint = 0;
+  let checkpoints = 0;
+  for (const line of String(raw || "").split("\n")) {
+    if (!line) continue;
+    const isCheckpoint = line.includes("\"CHECKPOINT\"");
+    const isPlanner = line.includes("\"PLANNER_RESPONSE\"");
+    if (!isCheckpoint && !isPlanner) {
+      bytesSinceCheckpoint += line.length + 1;
+      continue;
+    }
+    let step;
+    try {
+      step = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (step?.type === "CHECKPOINT") {
+      checkpoints += 1;
+      baselineTokens = 0;
+      currentTokens = 0;
+      bytesSinceCheckpoint = 0;
+      stepsSinceCheckpoint = 0;
+      continue;
+    }
+    bytesSinceCheckpoint += line.length + 1;
+    if (step?.type !== "PLANNER_RESPONSE") continue;
+    stepsSinceCheckpoint += 1;
+    const ctx = (Number(step.input_tokens) || 0) + (Number(step.cache_read_tokens) || 0);
+    if (ctx <= 0) continue;
+    if (!baselineTokens) baselineTokens = ctx;
+    currentTokens = ctx;
+  }
+  const hasTokens = currentTokens > 0;
+  const growthTokens = hasTokens
+    ? Math.max(0, currentTokens - baselineTokens)
+    : Math.round(bytesSinceCheckpoint / AGY_TRANSCRIPT_BYTES_PER_TOKEN);
+  return {
+    source: hasTokens ? "tokens" : "bytes",
+    currentTokens,
+    baselineTokens,
+    growthTokens,
+    bytesSinceCheckpoint,
+    stepsSinceCheckpoint,
+    checkpoints,
+  };
+}

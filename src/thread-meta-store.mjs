@@ -41,11 +41,27 @@ async function writeJsonAtomic(filePath, payload) {
   await rename(tempPath, filePath);
 }
 
+export const DEFAULT_AGY_AUTO_COMPACT_TOKENS = 60_000;
+const AGY_AUTO_COMPACT_TOKENS_MIN = 20_000;
+const AGY_AUTO_COMPACT_TOKENS_MAX = 400_000;
+
+function normalizeSettings(raw = {}) {
+  const tokens = Math.round(Number(raw?.agyAutoCompactTokens));
+  return {
+    agentAutoTitle: raw?.agentAutoTitle !== false,
+    autoUpdateCli: raw?.autoUpdateCli !== false,
+    agyAutoCompact: raw?.agyAutoCompact !== false,
+    agyAutoCompactTokens: Number.isFinite(tokens) && tokens > 0
+      ? Math.min(AGY_AUTO_COMPACT_TOKENS_MAX, Math.max(AGY_AUTO_COMPACT_TOKENS_MIN, tokens))
+      : DEFAULT_AGY_AUTO_COMPACT_TOKENS,
+  };
+}
+
 export function createThreadMetaStore({
   filePath = threadMetaPath(),
   profileFilePath = resolve(dirname(filePath), "profile-health.json"),
 } = {}) {
-  let state = { version: 1, threads: {}, projects: {}, profiles: {}, settings: { agentAutoTitle: true, autoUpdateCli: true } };
+  let state = { version: 1, threads: {}, projects: {}, profiles: {}, settings: normalizeSettings() };
   let loaded = false;
   let writeChain = Promise.resolve();
   let persistScheduled = null;
@@ -107,6 +123,11 @@ export function createThreadMetaStore({
               if (cleanedEffort) nextItem.reasoningEffort = cleanedEffort;
               else delete nextItem.reasoningEffort;
             }
+            if (typeof nextItem.cwd === "string") {
+              const cleanedCwd = normalizeProjectCwd(nextItem.cwd);
+              if (cleanedCwd) nextItem.cwd = cleanedCwd;
+              else delete nextItem.cwd;
+            }
             threads[tid] = nextItem;
           }
         }
@@ -117,15 +138,12 @@ export function createThreadMetaStore({
           threads,
           projects,
           profiles: { ...legacyProfiles, ...fileProfiles },
-          settings: {
-            agentAutoTitle: rawSettings.agentAutoTitle !== false,
-            autoUpdateCli: rawSettings.autoUpdateCli !== false,
-          },
+          settings: normalizeSettings(rawSettings),
         };
       }
     } catch {
       const fileProfiles = await readProfilesFile();
-      state = { version: 1, threads: {}, projects: {}, profiles: fileProfiles, settings: { agentAutoTitle: true, autoUpdateCli: true } };
+      state = { version: 1, threads: {}, projects: {}, profiles: fileProfiles, settings: normalizeSettings() };
     }
   };
 
@@ -307,6 +325,10 @@ export function createThreadMetaStore({
       if (typeof patch.permissionMode === "string" && patch.permissionMode.trim()) {
         next.permissionMode = patch.permissionMode.trim();
       }
+      if (typeof patch.cwd === "string" && patch.cwd.trim()) {
+        const normCwd = normalizeProjectCwd(patch.cwd);
+        if (normCwd) next.cwd = normCwd;
+      }
       state.threads[compositeId] = next;
       await persist();
       return { ...state.threads[compositeId] };
@@ -372,28 +394,25 @@ export function createThreadMetaStore({
         titleSchemaVersion: Number(meta.titleSchemaVersion) || 0,
         archived: Boolean(meta.archived ?? thread.archived),
         pinned: Boolean(meta.pinned),
+        ...(meta.cwd ? { cwd: meta.cwd } : {}),
         ...(meta.model ? { model: meta.model } : {}),
         ...(meta.reasoningEffort ? { reasoningEffort: meta.reasoningEffort } : {}),
         ...(meta.permissionMode ? { permissionMode: meta.permissionMode } : {}),
       };
     },
     getSettings() {
-      return {
-        agentAutoTitle: state.settings?.agentAutoTitle !== false,
-        autoUpdateCli: state.settings?.autoUpdateCli !== false,
-      };
+      return normalizeSettings(state.settings);
     },
     async setSettings(patch = {}) {
       await ensureLoaded();
-      const prev = {
-        agentAutoTitle: state.settings?.agentAutoTitle !== false,
-        autoUpdateCli: state.settings?.autoUpdateCli !== false,
-      };
-      const next = {
+      const prev = normalizeSettings(state.settings);
+      const next = normalizeSettings({
         ...prev,
         ...(Object.hasOwn(patch, "agentAutoTitle") ? { agentAutoTitle: Boolean(patch.agentAutoTitle) } : {}),
         ...(Object.hasOwn(patch, "autoUpdateCli") ? { autoUpdateCli: Boolean(patch.autoUpdateCli) } : {}),
-      };
+        ...(Object.hasOwn(patch, "agyAutoCompact") ? { agyAutoCompact: Boolean(patch.agyAutoCompact) } : {}),
+        ...(Object.hasOwn(patch, "agyAutoCompactTokens") ? { agyAutoCompactTokens: patch.agyAutoCompactTokens } : {}),
+      });
       state.settings = next;
       await persist();
       return { ...next };

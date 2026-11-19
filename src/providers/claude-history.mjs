@@ -273,7 +273,9 @@ export class ClaudeSessionHistoryIndex {
         hasConversation = true;
         const blocks = extractUserBlocks(entry.message?.content);
         const rawText = blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-        if (!isNoiseUserText(rawText)) {
+        const isCompactEntry = Boolean(entry.isCompactSummary)
+          || /^\s*This session is being continued from a previous conversation that ran out of context\./i.test(rawText);
+        if (!isCompactEntry && !isNoiseUserText(rawText)) {
           const summaryText = stripPromptNoise(rawText);
           if (summaryText) {
             userTurnCount += 1;
@@ -572,7 +574,9 @@ export function parseClaudeJsonlTranscript(lines, { rawId = "", fallbackCwd = ""
         .filter((b) => b.type !== "text" || Boolean(b.text));
       if (!normalizedBlocks.length) continue;
 
-      const cleanUserText = stripPromptNoise(rawText);
+      const isCompactEntry = Boolean(entry.isCompactSummary)
+        || /^\s*This session is being continued from a previous conversation that ran out of context\./i.test(rawText);
+      const cleanUserText = isCompactEntry ? "" : stripPromptNoise(rawText);
       if (cleanUserText) {
         userTurnCount += 1;
         if (!firstUserText) firstUserText = cleanUserText;

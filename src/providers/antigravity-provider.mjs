@@ -17,6 +17,7 @@ import {
 import {
   extractPendingAskQuestionFromTurns,
   normalizeAntigravityAskQuestions,
+  readAntigravityContextUsage,
   readAntigravityIndexedThreadById,
   readAntigravityIndexedThreads,
   readAntigravityLiveActivity,
@@ -25,6 +26,9 @@ import {
   resolveAntigravityRootConversationId,
 } from "./antigravity-history.mjs";
 import { discoverAntigravityProfiles } from "./profile-discovery.mjs";
+
+export const DEFAULT_AGY_AUTO_COMPACT_TOKENS = 60_000;
+const AGY_AUTO_COMPACT_COOLDOWN_MS = 90_000;
 
 function buildAcpPromptBlocks(text, images = []) {
   const blocks = [];
@@ -57,6 +61,7 @@ export class AntigravityProvider {
   #sessionPermissionModes = new Map();
   #sessionClients = new Map();
   #resolvedAskKeys = new Set();
+  #autoCompactedAt = new Map();
   #onEvent;
   #onServerRequest;
 
@@ -193,6 +198,12 @@ export class AntigravityProvider {
         threadId: compositeId,
         title: update.title,
       });
+      return;
+    }
+
+    if (active?.compacting) {
+      // Auto-compaction output is internal; keep the user's turn clean.
+      active.updatedAt = Math.floor(Date.now() / 1000);
       return;
     }
 
@@ -790,6 +801,7 @@ export class AntigravityProvider {
     effort = "",
     permissionMode = "workspace",
     steer = false,
+    autoCompact = null,
   } = {}) {
     const profile = await this.#getProfile(profileId);
     const resolvedProfileId = profile.id;
@@ -847,6 +859,8 @@ export class AntigravityProvider {
       this.#preparingSessions.delete(prepKey);
     }
 
+    const compactPlan = await this.#planAutoCompact(profile, rawId, text, autoCompact, { steer });
+
     const turnId = `agy-turn-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const startedAt = Math.floor(Date.now() / 1000);
     const activeEntry = {
@@ -858,8 +872,9 @@ export class AntigravityProvider {
       userText: String(text || ""),
       lastText: "",
       lastThought: "",
-      phase: "Antigravity 执行中",
+      phase: compactPlan ? `自动压缩上下文（已增长 ~${Math.round(compactPlan.growthTokens / 1000)}K）…` : "Antigravity 执行中",
       detail: "",
+      compacting: Boolean(compactPlan),
       toolTitles: new Map(),
       seq: 0,
       interrupted: false,
@@ -928,7 +943,28 @@ export class AntigravityProvider {
     };
 
     const promptBlocks = buildAcpPromptBlocks(text, images);
-    const promptPromise = client.sendPrompt(rawId, promptBlocks).then((res) => {
+    const runPrompt = async () => {
+      if (compactPlan) {
+        try {
+          await client.sendPrompt(rawId, [{ type: "text", text: "/compact" }]);
+        } catch (error) {
+          if (activeEntry.interrupted || error?.aborted) throw error;
+          // A failed compaction must not swallow the user's message; send it anyway.
+        } finally {
+          if (!activeEntry.interrupted) {
+            this.#autoCompactedAt.set(prepKey, Date.now());
+          }
+          activeEntry.compacting = false;
+          activeEntry.lastText = "";
+          activeEntry.lastThought = "";
+          activeEntry.phase = "Antigravity 执行中";
+          activeEntry.updatedAt = Math.floor(Date.now() / 1000);
+        }
+        if (activeEntry.interrupted) return { stopReason: "cancelled" };
+      }
+      return client.sendPrompt(rawId, promptBlocks);
+    };
+    const promptPromise = runPrompt().then((res) => {
       const stopReason = String(res?.stopReason || "end_turn");
       const status = activeEntry.interrupted || stopReason === "cancelled" ? "interrupted" : "completed";
       finalizePrompt({ status, stopReason, error: null });
@@ -946,6 +982,24 @@ export class AntigravityProvider {
     return {
       turn: { id: turnId, status: "inProgress", startedAt },
       thread: this.#normalizeThread(profile, indexed || { id: rawId, cwd: resolvedCwd }),
+      ...(compactPlan ? { autoCompact: compactPlan } : {}),
+    };
+  }
+
+  async #planAutoCompact(profile, rawId, text, autoCompact, { steer = false } = {}) {
+    if (steer || !autoCompact || autoCompact.enabled === false) return null;
+    if (/^\/(?:compact|clear|new|rewind|undo)(?:\s|$)/i.test(String(text || "").trim())) return null;
+    const key = `${profile.id}:${rawId}`;
+    const lastAt = this.#autoCompactedAt.get(key) || 0;
+    if (Date.now() - lastAt < AGY_AUTO_COMPACT_COOLDOWN_MS) return null;
+    const thresholdTokens = Number(autoCompact.thresholdTokens) || DEFAULT_AGY_AUTO_COMPACT_TOKENS;
+    const usage = await readAntigravityContextUsage(profile.home, rawId).catch(() => null);
+    if (!usage || usage.growthTokens < thresholdTokens) return null;
+    return {
+      thresholdTokens,
+      growthTokens: usage.growthTokens,
+      currentTokens: usage.currentTokens,
+      source: usage.source,
     };
   }
 

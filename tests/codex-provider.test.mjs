@@ -1178,3 +1178,132 @@ test("managed multi-instance lifecycle supports Cockpit Codex discovery, isolate
   const delJson = await delRes.json();
   assert.equal(delJson.profiles.some((p) => p.provider === "codex" && p.id === createdProfile.id), false);
 });
+
+test("archived Codex threads return thread_archived error on send, unarchive via /api/thread/unarchive, and fall back to codex unarchive CLI", async (t) => {
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-codex-unarchive-"));
+  const homeDir = resolve(root, "home");
+  const dataDir = resolve(root, "data");
+  const codexHome = resolve(homeDir, ".codex");
+  await Promise.all([
+    mkdir(dataDir, { recursive: true }),
+    mkdir(codexHome, { recursive: true }),
+  ]);
+
+  const env = {
+    ...process.env,
+    HOME: homeDir,
+    CODEX_HOME: codexHome,
+    CODEX_BIN: MOCK_CODEX_BIN,
+    AGENT_CONTROL_NO_HOST_OPEN: "1",
+    AGENT_CONTROL_AUTO_INSTALL_CLI: "0",
+  };
+  const codexProvider = new CodexProvider({ env, dataDir });
+  const srv = await createAgentControlServer({
+    port: 0,
+    env,
+    dataDir,
+    providers: [codexProvider],
+    disableRelay: true,
+    disableTunnel: true,
+    disableUpdateCheck: true,
+  });
+  await srv.start();
+  t.after(async () => {
+    await srv.close().catch(() => {});
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const baseUrl = srv.url;
+  const headers = { "Content-Type": "application/json" };
+
+  // 1. Start a Codex thread and archive it
+  const newRes = await fetch(`${baseUrl}/api/thread/new`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      provider: "codex",
+      profileId: "default",
+      cwd: root,
+      text: "准备归档并解除归档测试 [COMPLETE_NOW]",
+    }),
+  });
+  assert.equal(newRes.status, 200);
+  const newJson = await newRes.json();
+  const threadId = newJson.thread.id;
+  const pollUntil = async (fn) => {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const val = await fn();
+      if (val) return val;
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    throw new Error("等待异步条件超时");
+  };
+  await pollUntil(async () => {
+    const detail = await fetch(`${baseUrl}/api/thread?id=${encodeURIComponent(threadId)}`).then((r) => r.json());
+    const lastTurn = detail.thread?.turns?.[detail.thread.turns.length - 1];
+    return lastTurn?.status === "completed" ? detail : null;
+  });
+
+  const archiveRes = await fetch(`${baseUrl}/api/thread/archive`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, archived: true }),
+  });
+  assert.equal(archiveRes.status, 200);
+
+  // 2. Attempting to send a turn on archived thread fails with 409 thread_archived
+  const blockedRes = await fetch(`${baseUrl}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, text: "已归档后尝试继续发送" }),
+  });
+  assert.equal(blockedRes.status, 409);
+  const blockedJson = await blockedRes.json();
+  assert.equal(blockedJson.error?.code, "thread_archived");
+
+  // 3. Unarchiving via /api/thread/unarchive restores the thread and allows sending again
+  const unarchiveRes = await fetch(`${baseUrl}/api/thread/unarchive`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId }),
+  });
+  assert.equal(unarchiveRes.status, 200);
+  const unarchiveJson = await unarchiveRes.json();
+  assert.equal(unarchiveJson.ok, true);
+  assert.equal(unarchiveJson.archived, false);
+
+  const resumedRes = await fetch(`${baseUrl}/api/turn`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ threadId, text: "解除归档后恢复发送 [COMPLETE_NOW]" }),
+  });
+  assert.equal(resumedRes.status, 200);
+
+  // 4. CodexProvider.unarchiveThread falls back to `codex unarchive <rawId>` when RPC returns -32601,
+  // and treats already-unarchived CLI replies idempotently.
+  await writeFile(resolve(codexHome, ".mock-unarchive-unsupported"), "1");
+  const cliCalls = [];
+  const fallbackProvider = new CodexProvider({
+    env,
+    dataDir,
+    execFileImpl: async (bin, args, opts) => {
+      cliCalls.push({ bin, args, codexHome: opts?.env?.CODEX_HOME });
+      if (args[1] === "raw-already-active") {
+        throw Object.assign(new Error("Command failed"), { stderr: "Error: session raw-already-active is not archived" });
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await fallbackProvider.listProfiles();
+  const r1 = await fallbackProvider.unarchiveThread("default", "01900000-0000-7000-8000-000000000099");
+  assert.equal(r1.ok, true);
+  assert.equal(cliCalls[0].args[0], "unarchive");
+  assert.equal(cliCalls[0].args[1], "01900000-0000-7000-8000-000000000099");
+  assert.equal(cliCalls[0].codexHome, codexHome);
+
+  const r2 = await fallbackProvider.unarchiveThread("default", "raw-already-active");
+  assert.equal(r2.ok, true);
+  assert.equal(r2.alreadyUnarchived, true);
+  await fallbackProvider.close();
+});

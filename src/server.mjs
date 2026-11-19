@@ -1081,6 +1081,14 @@ export async function createAgentControlServer({
         return;
       }
 
+      if (pathname === "/api/thread/unarchive" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        context.threadId = body.threadId || "";
+        const result = await hub.archiveThread(body.threadId, false);
+        sendJson(response, 200, result, { requestId });
+        return;
+      }
+
       if (pathname === "/api/threads/archive" && request.method === "POST") {
         const body = await readJsonBody(request);
         const threadIds = Array.isArray(body.threadIds)

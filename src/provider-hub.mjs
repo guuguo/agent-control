@@ -2309,19 +2309,21 @@ export class ProviderHub {
     if (cleanText) {
       this.#lastTurnUserText.set(res.thread.id, cleanText);
     }
+    const explicitCwd = String(cwd || "").trim() ? (res.thread.cwd || cwd) : "";
+    await this.#metaStore.setThreadPrefs(res.thread.id, {
+      ...(explicitCwd ? { cwd: explicitCwd } : {}),
+      ...(model || res.thread.model ? { model: model || res.thread.model } : {}),
+      ...(effort ? { reasoningEffort: effort } : {}),
+      permissionMode: cleanPerm,
+    });
     this.#executionStats.context(res.thread.id, res.turn?.id || "", {
       model: model || res.thread.model || "", effort: effort || res.thread.reasoningEffort || "",
-      internal: isInternalVoiceCallThread({ cwd: res.thread.cwd || cwd, preview: cleanText }), goalMode: useGoal,
+      internal: isInternalVoiceCallThread({ cwd: explicitCwd || res.thread.cwd || cwd, preview: cleanText }), goalMode: useGoal,
     });
     const appliedStart = this.#metaStore.applyToThread({
       ...res.thread,
       firstUserText: res.thread.firstUserText || cleanText,
       lastUserText: res.thread.lastUserText || cleanText,
-    });
-    await this.#metaStore.setThreadPrefs(res.thread.id, {
-      ...(model || res.thread.model ? { model: model || res.thread.model } : {}),
-      ...(effort ? { reasoningEffort: effort } : {}),
-      permissionMode: cleanPerm,
     });
     const thread = this.#enrichThread(appliedStart);
     if (useGoal) {
@@ -2463,6 +2465,7 @@ export class ProviderHub {
         if (nativeRes?.thread?.id) {
           await this.#metaStore.setCustomName(nativeRes.thread.id, forkName);
           await this.#metaStore.setThreadPrefs(nativeRes.thread.id, {
+            ...(origThread.cwd ? { cwd: origThread.cwd } : {}),
             ...(origThread.model ? { model: origThread.model } : {}),
             ...(origThread.reasoningEffort ? { reasoningEffort: origThread.reasoningEffort } : {}),
             permissionMode: origThread.permissionMode || "workspace",
@@ -2494,6 +2497,7 @@ export class ProviderHub {
     });
     await this.#metaStore.setCustomName(forkEntry.id, forkName);
     await this.#metaStore.setThreadPrefs(forkEntry.id, {
+      ...(origThread.cwd ? { cwd: origThread.cwd } : {}),
       ...(forkEntry.model ? { model: forkEntry.model } : {}),
       ...(forkEntry.reasoningEffort ? { reasoningEffort: forkEntry.reasoningEffort } : {}),
       permissionMode: forkEntry.permissionMode || "workspace",
@@ -2561,6 +2565,7 @@ export class ProviderHub {
 
     const cleanText = String(text || "").trim();
     const cachedCtx = this.#threadCwdCache.get(threadId);
+    const effectiveCwd = String(cwd || "").trim() || savedPrefs?.cwd || cachedCtx?.cwd || "";
     await this.#metaStore.setThreadPrefs(threadId, {
       ...(effectiveModel ? { model: effectiveModel } : {}),
       ...(effectiveEffort ? { reasoningEffort: effectiveEffort } : {}),
@@ -2592,7 +2597,7 @@ export class ProviderHub {
       res = await provider.sendTurn({
         profileId: parsed.profileId,
         rawId: parsed.rawId,
-        cwd,
+        cwd: effectiveCwd,
         text,
         images,
         model: effectiveModel,
@@ -2601,6 +2606,7 @@ export class ProviderHub {
         steer,
         expectedTurnId,
         writerConflictPolicy,
+        ...(parsed.provider === "antigravity" ? { autoCompact: this.#agyAutoCompactOptions() } : {}),
       });
     } catch (error) {
       if (!isSystemResume && cleanText) {
@@ -2612,14 +2618,14 @@ export class ProviderHub {
     }
     if (!res.steered) this.#executionStats.context(threadId, res.turn?.id || "", {
       model: effectiveModel || res.thread?.model || "", effort: effectiveEffort || res.thread?.reasoningEffort || "",
-      internal: isInternalVoiceCallThread({ cwd: res.thread?.cwd || cwd || cachedCtx?.cwd, preview: cleanText }),
+      internal: isInternalVoiceCallThread({ cwd: res.thread?.cwd || effectiveCwd, preview: cleanText }),
       goalMode: useGoal || this.#goalController.get(threadId)?.active,
     });
     if (res.turn?.id) {
       this.#activeTurns.set(threadId, { turnId: res.turn.id, startedAt: Date.now() });
     }
     this.#inflightStore.markStarted(threadId, {
-      cwd: res.thread?.cwd || cwd || cachedCtx?.cwd || "",
+      cwd: res.thread?.cwd || effectiveCwd,
       model: effectiveModel,
       effort: effectiveEffort,
       permissionMode: cleanPerm,
@@ -2904,6 +2910,14 @@ export class ProviderHub {
     return this.#metaStore.getSettings();
   }
 
+  #agyAutoCompactOptions() {
+    const settings = this.#metaStore.getSettings?.() || {};
+    return {
+      enabled: settings.agyAutoCompact !== false,
+      thresholdTokens: settings.agyAutoCompactTokens,
+    };
+  }
+
   async setSettings(patch = {}) {
     const settings = await this.#metaStore.setSettings(patch);
     this.#broadcast("settings_updated", { settings });
@@ -2947,6 +2961,14 @@ export class ProviderHub {
     }
     const nextArchived = Boolean(archived);
     const cleanIds = parsedItems.map((item) => item.id);
+    const isSingleUnarchive = !nextArchived && parsedItems.length === 1;
+    if (isSingleUnarchive) {
+      const { id, parsed } = parsedItems[0];
+      if (!this.#forkStore.get(id)) {
+        const provider = this.getProvider(parsed.provider);
+        await provider.unarchiveThread?.(parsed.profileId, parsed.rawId);
+      }
+    }
     await this.#metaStore.setArchivedMany(cleanIds, nextArchived);
     for (const id of cleanIds) {
       await this.#forkStore.archive(id, nextArchived);
@@ -2967,10 +2989,12 @@ export class ProviderHub {
         }));
       }
     };
-    if (parsedItems.length <= 6) {
-      await syncNative();
-    } else {
-      void syncNative();
+    if (!isSingleUnarchive) {
+      if (parsedItems.length <= 6) {
+        await syncNative();
+      } else {
+        void syncNative();
+      }
     }
 
     if (cleanIds.length === 1) {

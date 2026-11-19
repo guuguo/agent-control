@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 import { mockVoiceCoordinatorResponse } from "./mock-voice-coordinator.mjs";
@@ -182,6 +182,25 @@ rl.on("line", async (line) => {
   if (method === "session/prompt") {
     const sessionId = params.sessionId;
     const text = (params.prompt || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    if (process.env.MOCK_AGY_PROMPT_LOG) {
+      appendFileSync(process.env.MOCK_AGY_PROMPT_LOG, `${JSON.stringify({ sessionId, text })}\n`);
+    }
+
+    if (text.trim() === "/compact") {
+      if (process.env.MOCK_AGY_FAIL_COMPACT === "1") {
+        send({ id, error: { code: -32001, message: "mock compact failed" } });
+        return;
+      }
+      send({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "COMPACT_SUMMARY_SHOULD_NOT_LEAK" } },
+        },
+      });
+      send({ id, result: { stopReason: "end_turn" } });
+      return;
+    }
 
     if (text.includes("[AC_VOICE_CALL]")) {
       if (process.env.MOCK_VOICE_COORDINATOR_RESPONSE) {

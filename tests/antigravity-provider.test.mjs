@@ -18,6 +18,7 @@ import {
   decodeAntigravityStepPayload,
   decodeWorkspaceUri,
   isAntigravityDiskLive,
+  parseAntigravityContextUsage,
   parseAntigravityTranscript,
   readAntigravityIndexedThreads,
   readAntigravityLiveActivity,
@@ -412,6 +413,177 @@ test("AntigravityProvider handles dual profiles, replay suppression, model/thoug
   await provider.interrupt({ profileId: "desktop", rawId: started.thread.rawId });
   const c3 = await waitFor(() => completions.length >= 5 && completions[4]);
   assert.equal(c3.status, "interrupted");
+});
+
+function plannerStep(stepIndex, ctxTokens) {
+  return JSON.stringify({
+    step_index: stepIndex,
+    source: "MODEL",
+    type: "PLANNER_RESPONSE",
+    status: "DONE",
+    input_tokens: 2_000,
+    cache_read_tokens: ctxTokens - 2_000,
+    output_tokens: 500,
+    content: "ok",
+  });
+}
+
+test("parseAntigravityContextUsage measures growth since the last native compaction", () => {
+  const fresh = parseAntigravityContextUsage([plannerStep(0, 30_000), plannerStep(1, 52_000)].join("\n"));
+  assert.equal(fresh.source, "tokens");
+  assert.equal(fresh.baselineTokens, 30_000);
+  assert.equal(fresh.growthTokens, 22_000);
+
+  const afterCheckpoint = parseAntigravityContextUsage([
+    plannerStep(0, 30_000),
+    plannerStep(1, 510_000),
+    JSON.stringify({ step_index: 2, source: "SYSTEM", type: "CHECKPOINT", input_tokens: 510_000, content: "# Resuming from a compaction" }),
+    plannerStep(3, 46_000),
+    plannerStep(4, 120_000),
+  ].join("\n"));
+  assert.equal(afterCheckpoint.checkpoints, 1);
+  assert.equal(afterCheckpoint.currentTokens, 120_000);
+  assert.equal(afterCheckpoint.growthTokens, 74_000);
+
+  const justCompacted = parseAntigravityContextUsage([
+    plannerStep(0, 400_000),
+    JSON.stringify({ step_index: 1, source: "SYSTEM", type: "CHECKPOINT", content: "summary" }),
+  ].join("\n"));
+  assert.equal(justCompacted.growthTokens, 0);
+
+  const noTokens = parseAntigravityContextUsage(JSON.stringify({ type: "GENERIC", content: "x".repeat(53_000) }));
+  assert.equal(noTokens.source, "bytes");
+  assert.ok(noTokens.growthTokens >= 9_900 && noTokens.growthTokens <= 10_100);
+});
+
+test("AntigravityProvider auto-compacts before sending once context growth crosses the threshold", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-compact-"));
+  const home = resolve(dir, "cli");
+  const rawId = "agy-seed-session-1";
+  const logsDir = resolve(home, "brain", rawId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  const promptLog = resolve(dir, "prompts.jsonl");
+  let provider = null;
+  t.after(async () => {
+    await provider?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${[plannerStep(0, 40_000), plannerStep(1, 110_000)].join("\n")}\n`);
+
+  const deltas = [];
+  const completions = [];
+  provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      AGY_BIN: MOCK_AGY_BIN,
+      MOCK_AGY_PROMPT_LOG: promptLog,
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "cli", label: "Antigravity CLI", home, profileType: "cli" },
+      ]),
+    },
+    onEvent: (evt) => {
+      if (evt.type === "stream_delta") deltas.push(evt);
+      if (evt.type === "turn_completed") completions.push(evt);
+    },
+  });
+  const readPrompts = async () => (await readFile(promptLog, "utf8").catch(() => ""))
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line).text);
+
+  // Disabled -> no compaction even though growth (70K) exceeds the threshold.
+  await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "关闭时直接发送",
+    autoCompact: { enabled: false, thresholdTokens: 60_000 },
+  });
+  await waitFor(() => completions.length >= 1);
+  assert.deepEqual(await readPrompts(), ["关闭时直接发送"]);
+
+  // Enabled -> /compact runs first, its output stays out of the user's turn.
+  const res = await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "压缩后继续",
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  assert.equal(res.autoCompact?.growthTokens, 70_000);
+  const done = await waitFor(() => completions.length >= 2 && completions[1]);
+  assert.equal(done.status, "completed");
+  assert.deepEqual((await readPrompts()).slice(1), ["/compact", "压缩后继续"]);
+  assert.ok(!String(done.lastAgentMessage || "").includes("COMPACT_SUMMARY_SHOULD_NOT_LEAK"));
+  assert.ok(!deltas.some((d) => String(d.delta || "").includes("COMPACT_SUMMARY_SHOULD_NOT_LEAK")));
+
+  // Cooldown: transcript has not been rewritten yet, but we must not compact again in a loop.
+  await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "冷却期内不重复压缩",
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  await waitFor(() => completions.length >= 3);
+  assert.deepEqual((await readPrompts()).slice(3), ["冷却期内不重复压缩"]);
+});
+
+test("AntigravityProvider skips auto-compact for steer/control commands and applies cooldown on failed compact", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-agy-compact-guard-"));
+  const home = resolve(dir, "cli");
+  const rawId = "agy-seed-session-1";
+  const logsDir = resolve(home, "brain", rawId, ".system_generated", "logs");
+  await mkdir(logsDir, { recursive: true });
+  const promptLog = resolve(dir, "prompts.jsonl");
+  let provider = null;
+  t.after(async () => {
+    await provider?.close().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(resolve(logsDir, "transcript.jsonl"), `${[plannerStep(0, 40_000), plannerStep(1, 130_000)].join("\n")}\n`);
+
+  const completions = [];
+  provider = new AntigravityProvider({
+    env: {
+      ...process.env,
+      AGY_BIN: MOCK_AGY_BIN,
+      MOCK_AGY_PROMPT_LOG: promptLog,
+      MOCK_AGY_FAIL_COMPACT: "1",
+      AGENT_CONTROL_AGY_APP_DATA_DIRS: JSON.stringify([
+        { id: "cli", label: "Antigravity CLI", home, profileType: "cli" },
+      ]),
+    },
+    onEvent: (evt) => {
+      if (evt.type === "turn_completed") completions.push(evt);
+    },
+  });
+  const readPrompts = async () => (await readFile(promptLog, "utf8").catch(() => ""))
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line).text);
+
+  // Control commands & steer must bypass pre-turn auto-compact even above threshold.
+  const clearRes = await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "/clear",
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  assert.equal(clearRes.autoCompact, undefined);
+  await waitFor(() => completions.length >= 1);
+
+  const steerRes = await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "中途纠正一下",
+    steer: true,
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  assert.equal(steerRes.autoCompact, undefined);
+  await waitFor(() => completions.length >= 2);
+  assert.deepEqual(await readPrompts(), ["/clear", "中途纠正一下"]);
+
+  // Normal prompt triggers /compact, /compact fails -> still sends user prompt & records cooldown.
+  const firstFailCompact = await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "失败压缩后继续发送",
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  assert.equal(firstFailCompact.autoCompact?.growthTokens, 90_000);
+  const done1 = await waitFor(() => completions.length >= 3 && completions[2]);
+  assert.equal(done1.status, "completed");
+
+  const nextInCooldown = await provider.sendTurn({
+    profileId: "cli", rawId, cwd: dir, text: "失败后冷却期内跳过压缩",
+    autoCompact: { enabled: true, thresholdTokens: 60_000 },
+  });
+  assert.equal(nextInCooldown.autoCompact, undefined);
+  const done2 = await waitFor(() => completions.length >= 4 && completions[3]);
+  assert.equal(done2.status, "completed");
+  assert.deepEqual((await readPrompts()).slice(2), ["/compact", "失败压缩后继续发送", "失败后冷却期内跳过压缩"]);
 });
 
 test("parseAntigravityTranscript folds GENERIC tool output onto tool items and suppresses plan-handoff/system noise", () => {
@@ -2220,4 +2392,121 @@ test("Antigravity ask_question parses questions, emits userInput request on read
   });
   assert.equal(res.ok, true);
   assert.equal(res.followUpText, "(Recommended) 近 7 天活跃优先");
+});
+
+test("ProviderHub pins explicit creation cwd against Antigravity multi-workspace DB drift across list, read, send, and reload", async (t) => {
+  const { threadMetaPath } = await import("../src/thread-meta-store.mjs");
+  const root = await mkdtemp(resolve(os.tmpdir(), "ac-pin-cwd-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const dataDir = resolve(root, "data");
+  const projectA = resolve(root, "project-a");
+  const driftedRepo = resolve(root, "zzz-other-repo");
+  const sentTurns = [];
+  const storedThreads = new Map();
+
+  const createMockAgyProvider = () => ({
+    id: "antigravity",
+    async listProfiles() {
+      return [{ id: "desktop", provider: "antigravity", label: "Antigravity", installed: true }];
+    },
+    async listThreads() {
+      return [...storedThreads.values()];
+    },
+    async startThread({ profileId = "desktop", cwd = "", text = "" } = {}) {
+      const rawId = `conv-${storedThreads.size + 1}`;
+      const actualCwd = cwd || driftedRepo;
+      // Simulate upstream Antigravity DB reporting multi-workspace sorted URI (driftedRepo) on subsequent reads
+      storedThreads.set(rawId, {
+        id: `antigravity:${profileId}:${rawId}`,
+        rawId,
+        provider: "antigravity",
+        profileId,
+        cwd: driftedRepo,
+        title: text || "新会话",
+        updatedAt: Math.floor(Date.now() / 1000),
+      });
+      return {
+        thread: {
+          id: `antigravity:${profileId}:${rawId}`,
+          rawId,
+          provider: "antigravity",
+          profileId,
+          cwd: actualCwd,
+          title: text || "新会话",
+          updatedAt: Math.floor(Date.now() / 1000),
+        },
+        turn: { id: "turn-1", status: "completed" },
+      };
+    },
+    async readThread(_profileId, rawId) {
+      const entry = storedThreads.get(rawId);
+      return {
+        thread: { ...entry, cwd: driftedRepo, turns: [] },
+        nextCursor: null,
+      };
+    },
+    async sendTurn({ profileId = "desktop", rawId, cwd = "", text = "" } = {}) {
+      sentTurns.push({ profileId, rawId, cwd, text });
+      const entry = storedThreads.get(rawId);
+      return {
+        turn: { id: "turn-2", status: "completed" },
+        thread: { ...entry, cwd: driftedRepo },
+      };
+    },
+  });
+
+  const hub1 = new ProviderHub({
+    dataDir,
+    providers: [createMockAgyProvider()],
+    enableQueueDrain: false,
+  });
+  await hub1.init();
+
+  // 1. Thread created under explicit project-a stays pinned to project-a
+  const createdPinned = await hub1.startThread({
+    provider: "antigravity",
+    profileId: "desktop",
+    cwd: projectA,
+    text: "客户问题分析",
+  });
+  assert.equal(createdPinned.thread.cwd, projectA);
+
+  // 2. Thread created with blank cwd does NOT get a pinned cwd override
+  const createdGlobal = await hub1.startThread({
+    provider: "antigravity",
+    profileId: "desktop",
+    cwd: "",
+    text: "全局默认会话",
+  });
+
+  const listed1 = await hub1.listThreads({ provider: "antigravity" });
+  const listedPinned = listed1.threads.find((th) => th.id === createdPinned.thread.id);
+  const listedGlobal = listed1.threads.find((th) => th.id === createdGlobal.thread.id);
+  assert.equal(listedPinned?.cwd, projectA);
+  assert.equal(listedGlobal?.cwd, driftedRepo);
+
+  const readRes = await hub1.readThread(createdPinned.thread.id);
+  assert.equal(readRes.thread.cwd, projectA);
+
+  await hub1.sendTurn({ threadId: createdPinned.thread.id, text: "follow up" });
+  assert.equal(sentTurns.length, 1);
+  assert.equal(sentTurns[0].cwd, projectA);
+
+  await hub1.close();
+
+  const metaRaw = JSON.parse(await readFile(threadMetaPath(dataDir), "utf8"));
+  assert.equal(metaRaw.threads[createdPinned.thread.id]?.cwd, projectA);
+  assert.equal(metaRaw.threads[createdGlobal.thread.id]?.cwd, undefined);
+
+  // 3. Reloading a fresh ProviderHub preserves pinned cwd from thread-meta.json
+  const hub2 = new ProviderHub({
+    dataDir,
+    providers: [createMockAgyProvider()],
+    enableQueueDrain: false,
+  });
+  await hub2.init();
+  const listed2 = await hub2.listThreads({ provider: "antigravity" });
+  assert.equal(listed2.threads.find((th) => th.id === createdPinned.thread.id)?.cwd, projectA);
+  await hub2.close();
 });

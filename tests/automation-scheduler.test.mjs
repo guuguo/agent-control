@@ -207,3 +207,186 @@ test("AutomationScheduler discovers Codex/Claude tasks, avoids duplicate runs wh
 
   scheduler.close();
 });
+
+test("AutomationScheduler auto-unarchives archived target sessions, falls back to new session in original cwd when unarchive fails, and rethrows non-archived errors", async (t) => {
+  const dir = await mkdtemp(resolve(os.tmpdir(), "ac-automations-unarchive-"));
+  const codexHome = resolve(dir, "codex-home");
+  const dataDir = resolve(dir, "data");
+  const projDir = resolve(dir, "maofan-proj");
+  await Promise.all([
+    mkdir(resolve(codexHome, "sqlite"), { recursive: true }),
+    mkdir(dataDir, { recursive: true }),
+    mkdir(projDir, { recursive: true }),
+  ]);
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const nowMs = Date.now();
+  const db = new DatabaseSync(resolve(codexHome, "sqlite", "codex.db"));
+  db.exec(`
+    CREATE TABLE automations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      cwds TEXT NOT NULL DEFAULT '[]',
+      rrule TEXT NOT NULL DEFAULT 'FREQ=DAILY;BYHOUR=3;BYMINUTE=0',
+      model TEXT,
+      reasoning_effort TEXT,
+      kind TEXT NOT NULL DEFAULT 'heartbeat',
+      target_thread_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.prepare(`
+    INSERT INTO automations (id, name, prompt, status, next_run_at, last_run_at, cwds, rrule, model, reasoning_effort, kind, target_thread_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "hb-archived",
+    "猫番缺书找源与评估",
+    "每天处理猫番高频无结果搜索的找源与评估",
+    "ACTIVE",
+    nowMs - 60_000,
+    nowMs - 86_400_000,
+    "[]",
+    "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+    "gpt-6.1-sol",
+    "medium",
+    "heartbeat",
+    "raw-hb-1",
+    nowMs - 86_400_000,
+    nowMs - 86_400_000,
+  );
+  db.close();
+
+  const threadState = new Map([
+    ["codex:default:raw-hb-1", { id: "codex:default:raw-hb-1", cwd: projDir, archived: true, live: false }],
+  ]);
+  const calls = { archive: [], send: [], start: [] };
+  let mode = "proactive-ok";
+
+  const hub = {
+    async listProvidersAndProfiles() {
+      return {
+        profiles: [
+          { provider: "codex", id: "default", label: "Codex 默认", home: codexHome, installed: true },
+        ],
+      };
+    },
+    async readThread(id) {
+      const th = threadState.get(id);
+      return th ? { thread: { ...th } } : null;
+    },
+    async archiveThread(id, archived) {
+      calls.archive.push({ id, archived });
+      if (mode === "unarchive-fail") {
+        throw Object.assign(new Error("native unarchive failed"), { status: 502, code: "unarchive_failed" });
+      }
+      const th = threadState.get(id);
+      if (th) th.archived = Boolean(archived);
+      return { ok: true, threadId: id, archived: Boolean(archived) };
+    },
+    async sendTurn(args) {
+      calls.send.push(args);
+      if (mode === "reactive-ok" && calls.archive.length === 0) {
+        throw Object.assign(
+          new Error(`session ${args.threadId} is archived. Run \`codex unarchive\` first.`),
+          { status: 409, code: "thread_archived" },
+        );
+      }
+      if (mode === "quota-error") {
+        throw Object.assign(new Error("429 usage_limit_reached"), { status: 429, code: "usage_limit_reached" });
+      }
+      const th = threadState.get(args.threadId);
+      if (th?.archived) {
+        throw Object.assign(new Error("still archived"), { status: 409, code: "thread_archived" });
+      }
+      return { thread: { id: args.threadId }, turn: { id: "turn-1" } };
+    },
+    async startThread(args) {
+      calls.start.push(args);
+      const newId = `codex:default:raw-hb-new-${calls.start.length}`;
+      threadState.set(newId, { id: newId, cwd: args.cwd, archived: false, live: false });
+      return { thread: { id: newId }, turn: { id: "turn-new-1" } };
+    },
+  };
+
+  const scheduler = new AutomationScheduler({ hub, dataDir });
+  await scheduler.load();
+
+  // 1) Proactive unarchive when readThread already sees archived: true
+  const res1 = await scheduler.runNow("codex:default:hb-archived", { nowMs });
+  assert.equal(res1.ok, true);
+  assert.equal(res1.threadId, "codex:default:raw-hb-1");
+  assert.equal(res1.unarchived, true);
+  assert.equal(res1.fallbackNewThread, false);
+  assert.deepEqual(calls.archive, [{ id: "codex:default:raw-hb-1", archived: false }]);
+  assert.equal(calls.send.length, 1);
+  assert.equal(calls.start.length, 0);
+
+  // 2) Reactive unarchive + single retry when readThread had stale archived: false
+  calls.archive.length = 0;
+  calls.send.length = 0;
+  calls.start.length = 0;
+  mode = "reactive-ok";
+  const res2 = await scheduler.runNow("codex:default:hb-archived", { nowMs: nowMs + 1_000 });
+  assert.equal(res2.ok, true);
+  assert.equal(res2.threadId, "codex:default:raw-hb-1");
+  assert.equal(res2.unarchived, true);
+  assert.equal(res2.fallbackNewThread, false);
+  assert.deepEqual(calls.archive, [{ id: "codex:default:raw-hb-1", archived: false }]);
+  assert.equal(calls.send.length, 2);
+  assert.equal(calls.start.length, 0);
+
+  // 3) Unrelated error (e.g. quota 429) must rethrow cleanly without unarchive or new thread fallback
+  calls.archive.length = 0;
+  calls.send.length = 0;
+  calls.start.length = 0;
+  mode = "quota-error";
+  await assert.rejects(
+    scheduler.runNow("codex:default:hb-archived", { nowMs: nowMs + 2_000 }),
+    /429 usage_limit_reached/,
+  );
+  assert.equal(calls.archive.length, 0);
+  assert.equal(calls.send.length, 1);
+  assert.equal(calls.start.length, 0);
+
+  // 4) When target is archived and unarchive fails, fall back to startThread preserving existing.thread.cwd,
+  // and bind subsequent runs to the new threadId.
+  calls.archive.length = 0;
+  calls.send.length = 0;
+  calls.start.length = 0;
+  mode = "unarchive-fail";
+  threadState.get("codex:default:raw-hb-1").archived = true;
+  const res4 = await scheduler.runNow("codex:default:hb-archived", { nowMs: nowMs + 3_000 });
+  assert.equal(res4.ok, true);
+  assert.equal(res4.unarchived, false);
+  assert.equal(res4.fallbackNewThread, true);
+  assert.equal(res4.threadId, "codex:default:raw-hb-new-1");
+  assert.equal(calls.archive.length, 1);
+  assert.equal(calls.send.length, 0);
+  assert.equal(calls.start.length, 1);
+  assert.equal(calls.start[0].cwd, projDir);
+  assert.match(calls.start[0].text, /<heartbeat>/);
+
+  // Next run after fallback should target raw-hb-new-1 directly (persisted even across scheduler reload)
+  const reloaded = new AutomationScheduler({ hub, dataDir });
+  await reloaded.load();
+  calls.archive.length = 0;
+  calls.send.length = 0;
+  calls.start.length = 0;
+  mode = "proactive-ok";
+  const res5 = await reloaded.runNow("codex:default:hb-archived", { nowMs: nowMs + 4_000 });
+  assert.equal(res5.ok, true);
+  assert.equal(res5.threadId, "codex:default:raw-hb-new-1");
+  assert.equal(res5.fallbackNewThread, false);
+  assert.equal(calls.archive.length, 0);
+  assert.equal(calls.send.length, 1);
+  assert.equal(calls.send[0].threadId, "codex:default:raw-hb-new-1");
+  assert.equal(calls.start.length, 0);
+
+  reloaded.close();
+  scheduler.close();
+});
