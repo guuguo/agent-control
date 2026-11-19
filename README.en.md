@@ -20,6 +20,11 @@
 > **Architecture**: Strictly read-only upstream indexing · Local HTTP/SSE server (`127.0.0.1:43310`) · Zero external database dependency  
 > **Remote Access**: `$0` Cloudflare Quick Tunnel (default) · `$0` Tailscale Funnel · `$0` Named Tunnel · Self-hosted Docker / Sealos Relay
 
+<p align="center">
+  <img src="docs/tutorial/00-demo-overview-en.gif" alt="Agent Control 14s animated overview: 3D Dream Factory, Multi-Account Console, 5s QR Mobile Control, and Driving Voice Approvals" width="760" /><br />
+  <sub>14s overview: 3D Dream Factory · Multi-Account Console · 5s QR Mobile Control · Hands-Free Driving Voice Approvals</sub>
+</p>
+
 > [!IMPORTANT]
 > **Security & Privacy Guarantee (Read Before Installing)**
 > - **Strictly Read-Only Upstream Indexing**: Reads `~/.codex`, `~/.claude`, and `~/.gemini` histories in read-only mode. Custom titles, tags, pins, and archives live separately in Agent Control's own data directory—your upstream databases and configs are **never** modified.

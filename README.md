@@ -6,6 +6,11 @@
 > 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
 
 <p align="center">
+  <img src="docs/tutorial/00-demo-overview.gif" alt="Agent Control 14 秒功能总览动图：3D 梦工厂、多账号控制台、5 秒扫码手机远程与免提语音审批" width="760" /><br />
+  <sub>14 秒总览：3D 梦工厂 · 多账号只读看板 · 5 秒扫码手机操控 · 开车免提语音审批</sub>
+</p>
+
+<p align="center">
   <img src="docs/tutorial/10-dream-factory-3d.png" alt="Agent Control 3D 梦工厂总控台" width="760" />
 </p>
 
