@@ -43,7 +43,7 @@ async function writeJsonAtomic(filePath, payload) {
 
 export const DEFAULT_AGY_AUTO_COMPACT_TOKENS = 60_000;
 const AGY_AUTO_COMPACT_TOKENS_MIN = 20_000;
-const AGY_AUTO_COMPACT_TOKENS_MAX = 400_000;
+const AGY_AUTO_COMPACT_TOKENS_MAX = 900_000;
 
 function normalizeSettings(raw = {}) {
   const tokens = Math.round(Number(raw?.agyAutoCompactTokens));
