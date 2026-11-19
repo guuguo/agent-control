@@ -100,14 +100,14 @@ Requires **Node.js 22+** (Node 22.13+ or 24+ recommended on Linux) and **Git**.
 
 **macOS / Linux (one-line installer):**
 ```bash
-curl -fsSL https://hub.guuguo.top/install/agent-control.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/install.sh | bash
 ```
 
 Linux supports a native GTK/WebKitGTK desktop window and a `systemd --user` service. See the [Linux installation guide](docs/linux.md) for desktop packages, headless servers, SSH port forwarding, containers, and WSL.
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://hub.guuguo.top/install/agent-control.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/install.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 **Prefer inspecting and running manually without curl-pipe?**
@@ -161,12 +161,12 @@ All automated tests run against mock CLIs and consume **zero real LLM tokens**.
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://hub.guuguo.top/uninstall/agent-control.sh | bash
+curl -fsSL https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-(irm https://hub.guuguo.top/uninstall/agent-control.ps1).TrimStart([char]0xFEFF) | iex
+(irm https://raw.githubusercontent.com/guuguo/agent-control/main/uninstall.ps1).TrimStart([char]0xFEFF) | iex
 ```
 
 ---
