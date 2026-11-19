@@ -9,13 +9,22 @@ import {
   renderProviderTabsSettingsHtml,
   visibleProviderFilter,
 } from "./provider-tabs.js?v=20261118tabs";
-import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261119human";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261119speed";
+import { hydrateMermaidBlocks, prepareMermaidSvgForPreview } from "./mermaid-renderer.js?v=20261119mermaidzoom";
+import {
+  buildReleaseVersionTabs,
+  renderReleaseHeadline,
+  renderReleaseNotesCardHtml,
+  resolveReleaseNotesBucket,
+} from "./release-notes.js?v=20261119updhub";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
   resolveComposerSubmission,
+  shouldAllowSendButtonClick,
+  shouldSubmitPromptOnEnter,
   submitComposerRequest,
-} from "./composer-mode.js?v=20261117qoder";
+} from "./composer-mode.js?v=20261119mobilequeue1";
 import {
   closeCustomSelectMenu,
   initComposerCustomSelects,
@@ -60,8 +69,8 @@ import {
   resolveVisibleTelemetryKeys,
   sortProfilesByAvailability,
   summarizeTelemetryMobileBadge,
-} from "./instance-switcher.js?v=20261118multi";
-import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity } from "./live-state.js?v=20261117qoder";
+} from "./instance-switcher.js?v=20261119tag";
+import { bindFollowIntent, humanizeLiveActivity, mergeLiveActivity, summarizeToolUseActivity } from "./live-state.js?v=20261120claude";
 import {
   cleanStreamingAgentText,
   dedupeAdjacentTurns,
@@ -77,7 +86,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261117filelinks";
+} from "./markdown.js?v=20261119mermaid";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -94,7 +103,7 @@ import {
   resolveProjectGroupCollapsed,
 } from "./project-board.js?v=20261118views";
 import { renderMissionOverviewHtml, renderTycoonHudHtml } from "./mission-overview.js?v=20261119preserve";
-import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261118ctx";
+import { createTycoon3DWorld } from "./tycoon-3d.js?v=20261119tycoonv6";
 import {
   buildSpriteOpeningBriefing,
   buildSpriteQueryReply,
@@ -128,8 +137,11 @@ import {
   enqueueVoiceBroadcastItem,
   estimateVoiceDurationMs,
   evaluateVoicePlaybackOutcome,
+  extractFinalAssistantMessageFromTurns,
+  extractReplyClosingSummaryForSpeech,
   formatCallDuration,
   humanizeVoiceDeliveryReason,
+  loadChatReplyTtsPref,
   loadVoiceConfig,
   mergePcm16ChunksWithGap,
   normalizeVoiceTtsPayload,
@@ -138,10 +150,12 @@ import {
   renderVoiceLiveProgressHtml,
   renderVoiceModelSelectOptionsHtml,
   renderVoiceUnheardBannerHtml,
+  resolveHoldTalkGestureState,
+  saveChatReplyTtsPref,
   saveVoiceConfig,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
-} from "./voice-copilot.js?v=20261118turntake";
+} from "./voice-copilot.js?v=20261119mobilevoice";
 
 const $ = (id) => document.getElementById(id);
 
@@ -522,6 +536,8 @@ const state = {
   searchText: "",
   sidebarSearchText: "",
   showArchived: false,
+  lastUnarchiveContext: null,
+  unarchivingThreadId: "",
   showAllProjects: false,
   expandedProjects: new Map(),
   expandedSidebarGroups: initialSidebarFold.expandedSidebarGroups,
@@ -667,6 +683,9 @@ const state = {
   updateChecking: false,
   updateApplying: false,
   desktopUpdating: false,
+  updateModalTab: "notes",
+  updateNotesVersionKey: "",
+  updateNotesCategory: "all",
   localApps: [],
   scopedProjectCwd: typeof location !== "undefined"
     ? normalizeProjectCwd(new URL(location.href).searchParams.get("project") || "")
@@ -744,12 +763,28 @@ const state = {
   dictation: {
     active: false,
     transcribing: false,
+    holdMode: false,
+    pointerDown: false,
+    pointerId: null,
+    startY: 0,
+    cancelArmed: false,
+    holdToken: 0,
     stream: null,
+    micStream: null,
     audioCtx: null,
     source: null,
     processor: null,
     chunks: [],
     maxTimer: null,
+  },
+  chatTts: {
+    enabled: loadChatReplyTtsPref().enabled,
+    speaking: false,
+    loading: false,
+    audioEl: null,
+    audioUnlocked: false,
+    playToken: 0,
+    lastSpokenKey: "",
   },
 };
 
@@ -827,12 +862,18 @@ function syncWorkspaceVisibility() {
   if (composer) composer.hidden = onBoard;
   if (onBoard) {
     setComposerConfigOpen(false);
+    stopChatReplySpeech();
+    if (state.dictation.active || state.dictation.pointerDown) {
+      state.dictation.pointerDown = false;
+      void stopComposerDictation({ submit: false });
+    }
     if ($("turnList")) $("turnList").hidden = true;
     if ($("streamingTurn")) $("streamingTurn").hidden = true;
     if ($("loadOlderWrap")) $("loadOlderWrap").hidden = true;
     if ($("pendingRequestsDock")) $("pendingRequestsDock").hidden = true;
     if ($("queuedTurnsBar")) $("queuedTurnsBar").hidden = true;
   }
+  renderChatTtsButton();
   renderBatchActionBars();
 }
 
@@ -1021,6 +1062,7 @@ function clearComposerStatus() {
     state.composerStatusTimer = null;
   }
   state.lastFailoverContext = null;
+  state.lastUnarchiveContext = null;
   const el = $("composerStatus");
   if (!el) return;
   el.hidden = true;
@@ -1028,7 +1070,7 @@ function clearComposerStatus() {
   el.innerHTML = "";
 }
 
-function setComposerStatus(kind, message, { autoClearMs = 0, failoverContext = null } = {}) {
+function setComposerStatus(kind, message, { autoClearMs = 0, failoverContext = null, unarchiveContext = null } = {}) {
   const el = $("composerStatus");
   if (!el) return;
   if (state.composerStatusTimer) {
@@ -1041,13 +1083,16 @@ function setComposerStatus(kind, message, { autoClearMs = 0, failoverContext = n
     return;
   }
   state.lastFailoverContext = kind === "error" ? failoverContext : null;
+  state.lastUnarchiveContext = kind === "error" ? unarchiveContext : null;
   const cls = ["composer-status"];
   if (kind === "error") cls.push("is-error");
   else if (kind === "success") cls.push("is-success");
   else cls.push("is-pending");
   el.className = cls.join(" ");
   let actionHtml = "";
-  if (kind === "error" && failoverContext?.altProfile) {
+  if (kind === "error" && unarchiveContext?.threadId) {
+    actionHtml = `<button type="button" class="status-unarchive-btn" data-unarchive-retry-trigger>解除归档并重发</button>`;
+  } else if (kind === "error" && failoverContext?.altProfile) {
     const altMeta = profileHealthVisualMeta(failoverContext.altProfile);
     const altLabel = failoverContext.altProfile.health?.alias
       || failoverContext.altProfile.label
@@ -1404,6 +1449,7 @@ function openTelemetryPopover(preferredAnchor = null) {
   }
   syncTelemetryPopoverAnchor(el, anchorEl);
   renderAgentTelemetryBar();
+  void refreshExecutionStats();
   if (!el || el.hidden || typeof el.animate !== "function") return;
   if (isMobile) {
     telemetryHeroAnim = el.animate([
@@ -2401,7 +2447,7 @@ function openThreadContextMenu(threadId, clientX = 0, clientY = 0) {
     <button type="button" class="thread-context-menu-item" data-menu-action="continue-agent">${iconSvg("refresh", { size: 14 })}<span>换 Agent 继续</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="rename">${iconSvg("edit", { size: 14 })}<span>重命名</span></button>
     <button type="button" class="thread-context-menu-item" data-menu-action="pin">${iconSvg("pin", { size: 14 })}<span>${thread.pinned ? "取消项目内置顶" : "在当前项目置顶"}</span></button>
-    <button type="button" class="thread-context-menu-item" data-menu-action="archive">${iconSvg("archive", { size: 14 })}<span>${thread.archived ? "取消归档" : "归档会话"}</span></button>
+    <button type="button" class="thread-context-menu-item" data-menu-action="archive">${iconSvg("archive", { size: 14 })}<span>${thread.archived ? "解除归档" : "归档会话"}</span></button>
   `;
   document.body.appendChild(menu);
   const rect = menu.getBoundingClientRect();
@@ -2784,6 +2830,7 @@ function renderProjectBoard() {
         dispatchPreview: state.dispatchPreview,
         lastDispatchReceipt: state.lastDispatchReceipt,
         dispatchAgent: buildDispatchAgentContext(),
+        recentCompletedByThread: state.recentCompletedByThread,
       });
       replaceHtmlPreservingUiState(hudEl, nextHudHtml);
     }
@@ -2829,6 +2876,7 @@ function renderProjectBoard() {
       dispatchPreview: state.dispatchPreview,
       lastDispatchReceipt: state.lastDispatchReceipt,
       dispatchAgent: buildDispatchAgentContext(),
+      recentCompletedByThread: state.recentCompletedByThread,
     });
     replaceHtmlPreservingUiState(deckMountEl, nextOverviewHtml);
     if (boardSnap?.rootTop > 0) boardEl.scrollTop = boardSnap.rootTop;
@@ -2855,6 +2903,7 @@ function renderProjectBoard() {
       selectionMode: state.batchSelect.active,
       selectedThreadIds: state.batchSelect.selectedIds,
       profiles: state.profiles,
+      recentCompletedByThread: state.recentCompletedByThread,
       allowOpenProjectWindow: !state.scopedProjectCwd,
     });
     replaceHtmlPreservingUiState(boardEl, nextBoardHtml);
@@ -3026,13 +3075,14 @@ function renderTopbarAndControls() {
     toggleImgBtn.textContent = isThreadImagesUnlocked(thread.id) ? "收起本会话预览图" : "加载本会话预览图";
   }
   archiveBtn.hidden = false;
-  archiveBtn.textContent = thread.archived ? "取消归档" : "归档";
+  archiveBtn.textContent = thread.archived ? "解除归档" : "归档";
 
   syncBoardAttentionDot();
   syncWorkspaceVisibility();
   renderLiveBanner();
   renderProjectTaskStrip();
   renderComposerControls();
+  renderComposerArchivedBanner();
 }
 
 function renderLiveBanner() {
@@ -3615,6 +3665,37 @@ function buildTurnRenderOptions(turns, idx) {
   };
 }
 
+const scheduledMermaidRoots = new Set();
+let mermaidHydrationRaf = 0;
+let mermaidHydrationForceTheme = false;
+
+function scheduleMermaidHydration(root = document, { forceThemeSync = false } = {}) {
+  const targetRoot = root || (typeof document !== "undefined" ? document : null);
+  if (!targetRoot) return;
+  if (forceThemeSync) mermaidHydrationForceTheme = true;
+  if (scheduledMermaidRoots.has(targetRoot) && mermaidHydrationRaf) return;
+  scheduledMermaidRoots.add(targetRoot);
+  if (mermaidHydrationRaf) return;
+  const flush = () => {
+    mermaidHydrationRaf = 0;
+    const roots = Array.from(scheduledMermaidRoots);
+    scheduledMermaidRoots.clear();
+    const forceTheme = mermaidHydrationForceTheme;
+    mermaidHydrationForceTheme = false;
+    for (const r of roots) {
+      if (typeof r?.querySelectorAll !== "function") continue;
+      if (r?.isConnected === false) continue;
+      void hydrateMermaidBlocks(r, { forceThemeSync: forceTheme }).catch(() => {});
+    }
+  };
+  if (typeof requestAnimationFrame === "function") {
+    mermaidHydrationRaf = requestAnimationFrame(flush);
+  } else {
+    mermaidHydrationRaf = 1;
+    queueMicrotask(flush);
+  }
+}
+
 function syncLiveTurnFrontier() {
   if (state.streamingText || !isActiveThreadRunning()) {
     renderStreamingTurn();
@@ -3664,6 +3745,7 @@ function syncLiveTurnFrontier() {
     restoreViewportAnchor(vp, anchor);
   }
   scheduleDeferredImagesObservation(vp);
+  scheduleMermaidHydration(vp);
 }
 
 function renderStreamingTurn({ preserveAnchor = true } = {}) {
@@ -3776,6 +3858,7 @@ function renderStreamingTurn({ preserveAnchor = true } = {}) {
     restoreViewportAnchor(vp, anchor);
   }
   scheduleDeferredImagesObservation(el);
+  scheduleMermaidHydration(el);
 }
 
 function renderActiveMessages() {
@@ -3821,6 +3904,7 @@ function renderActiveMessages() {
     restoreViewportAnchor(vp, anchor);
   }
   scheduleDeferredImagesObservation(vp);
+  scheduleMermaidHydration(vp);
 }
 
 function renderPendingRequests() {
@@ -3857,6 +3941,23 @@ function renderComposerEditBanner() {
     <span class="composer-edit-banner-label">正在编辑排队 #${pos}</span>
     <span class="composer-edit-banner-tip">保存后保留原排位</span>
     <button type="button" class="composer-edit-banner-cancel" data-cancel-queue-edit="1">取消编辑</button>
+  `;
+}
+
+function renderComposerArchivedBanner() {
+  const banner = $("composerArchivedBanner");
+  if (!banner) return;
+  const thread = state.activeThread;
+  if (!thread || !thread.archived || isBoardViewActive()) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+    return;
+  }
+  const busy = state.unarchivingThreadId === thread.id;
+  banner.hidden = false;
+  banner.innerHTML = `
+    <span class="composer-archived-banner-label">当前会话已归档，继续对话前需先解除归档</span>
+    <button type="button" class="composer-unarchive-btn" data-unarchive-active-thread ${busy ? "disabled" : ""}>${busy ? "解除中…" : "解除归档"}</button>
   `;
 }
 
@@ -3979,9 +4080,23 @@ function resolveImagePreviewLocalPath(src) {
   } catch { return ""; }
 }
 
+function ensureImagePreviewSvgHost() {
+  let svgHost = $("imagePreviewSvgHost");
+  if (svgHost) return svgHost;
+  const stage = $("imagePreviewStage");
+  if (!stage) return null;
+  svgHost = document.createElement("div");
+  svgHost.id = "imagePreviewSvgHost";
+  svgHost.className = "image-preview-svg-host";
+  svgHost.hidden = true;
+  stage.appendChild(svgHost);
+  return svgHost;
+}
+
 function openImagePreviewModal(src, caption = "", rawSrc = "") {
   const modal = $("imagePreviewModal");
   const img = $("imagePreviewImg");
+  const svgHost = $("imagePreviewSvgHost");
   const capEl = $("imagePreviewCaption");
   const metaEl = $("imagePreviewMeta");
   const loadRawBtn = $("imagePreviewLoadRawBtn");
@@ -3990,7 +4105,16 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
 
   const isCompressedUrl = !src.startsWith("data:") && /[?&]w=\d+/i.test(src) && !/[?&]raw=1/i.test(src);
   const resolvedRaw = rawSrc || "";
-  state.imagePreview = { src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0 };
+  state.imagePreview = { svgMode: false, src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0 };
+  modal.classList.remove("is-svg-preview");
+
+  if (svgHost) {
+    svgHost.hidden = true;
+    svgHost.innerHTML = "";
+    svgHost.style.transform = "";
+    svgHost.classList.remove("is-zoomed", "is-dragging");
+  }
+  img.hidden = false;
 
   const localPath = resolveImagePreviewLocalPath(resolvedRaw || src);
   for (const target of [img, capEl]) {
@@ -4003,10 +4127,14 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
   img.style.transform = "";
   img.classList.remove("is-zoomed", "is-dragging");
   const zoomBtn = $("imagePreviewZoomBtn");
+  const zoomOutBtn = $("imagePreviewZoomOutBtn");
+  const zoomInBtn = $("imagePreviewZoomInBtn");
   if (zoomBtn) {
     zoomBtn.hidden = true;
     zoomBtn.textContent = "100%";
   }
+  if (zoomOutBtn) zoomOutBtn.hidden = true;
+  if (zoomInBtn) zoomInBtn.hidden = true;
   if (capEl) capEl.textContent = caption || "图片预览";
   if (metaEl) {
     metaEl.hidden = src.startsWith("data:");
@@ -4030,6 +4158,55 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
   }
   if (!modal.open && typeof modal.showModal === "function") {
     modal.showModal();
+  }
+}
+
+function openMermaidPreviewModal(svgHtml, caption = "Mermaid 图表") {
+  try {
+    const modal = $("imagePreviewModal");
+    const img = $("imagePreviewImg");
+    const svgHost = ensureImagePreviewSvgHost();
+    const capEl = $("imagePreviewCaption");
+    const metaEl = $("imagePreviewMeta");
+    const loadRawBtn = $("imagePreviewLoadRawBtn");
+    const rawLink = $("imagePreviewOpenRaw");
+    const zoomBtn = $("imagePreviewZoomBtn");
+    const zoomOutBtn = $("imagePreviewZoomOutBtn");
+    const zoomInBtn = $("imagePreviewZoomInBtn");
+    if (!modal || !svgHost || !svgHtml) return;
+
+    const prepared = prepareMermaidSvgForPreview(svgHtml);
+    state.imagePreview = { svgMode: true, src: "", rawSrc: "", caption, showingRaw: true, scale: 1, tx: 0, ty: 0 };
+    modal.classList.add("is-svg-preview");
+
+    if (img) {
+      img.hidden = true;
+      img.removeAttribute("src");
+      img.style.transform = "";
+      img.classList.remove("is-zoomed", "is-dragging");
+    }
+    svgHost.innerHTML = prepared.svg;
+    svgHost.hidden = false;
+    svgHost.style.transform = "";
+    svgHost.classList.remove("is-zoomed", "is-dragging");
+    if (zoomOutBtn) zoomOutBtn.hidden = false;
+    if (zoomBtn) {
+      zoomBtn.hidden = false;
+      zoomBtn.textContent = "100%";
+    }
+    if (zoomInBtn) zoomInBtn.hidden = false;
+    if (capEl) capEl.textContent = caption || "Mermaid 图表";
+    if (metaEl) metaEl.hidden = true;
+    if (loadRawBtn) loadRawBtn.hidden = true;
+    if (rawLink) {
+      rawLink.hidden = true;
+      rawLink.setAttribute("href", "#");
+    }
+    if (!modal.open && typeof modal.showModal === "function") {
+      modal.showModal();
+    }
+  } catch (error) {
+    showToastBanner("图表放大预览失败", { detail: error?.message || "请重试或切换源码查看", error: true });
   }
 }
 
@@ -4057,6 +4234,7 @@ function renderFilePreviewBody(meta, { threadId = "", rawMode = false } = {}) {
   const targetLine = meta.startLine || 0;
   if (meta.kind === "markdown" && !rawMode) {
     bodyEl.innerHTML = `<div class="file-preview-md md-body">${renderMarkdown(meta.content || "", { threadId, basePath: meta.displayPath || meta.requestPath || "" })}</div>`;
+    scheduleMermaidHydration(bodyEl);
     return;
   }
   if (meta.kind === "video") {
@@ -4189,13 +4367,24 @@ function renderComposerControls() {
     sendBtn.disabled = !sub.canSubmit;
     sendBtn.setAttribute("aria-busy", state.isSubmitting ? "true" : "false");
   }
-  $("promptInput").readOnly = state.isSubmitting;
+  const promptInput = $("promptInput");
+  promptInput.readOnly = state.isSubmitting;
+  promptInput.setAttribute(
+    "enterkeyhint",
+    isMobileTouchComposer() ? "enter" : (activeEditingQueueItem() ? "done" : "send"),
+  );
   $("composerGoalBtn").setAttribute("aria-pressed", state.composerGoal ? "true" : "false");
   const imgBadge = $("imageCountBadge");
   if (imgBadge) {
     imgBadge.textContent = String(state.images.length || "");
     imgBadge.hidden = state.images.length === 0;
   }
+  const holdImgBadge = $("holdImageCountBadge");
+  if (holdImgBadge) {
+    holdImgBadge.textContent = String(state.images.length || "");
+    holdImgBadge.hidden = state.images.length === 0;
+  }
+  renderComposerDictationUi();
   renderComposerConfigChip();
   autoResizePromptInput();
   syncAllCustomSelects();
@@ -4774,6 +4963,7 @@ async function reloadActiveThreadAfterTurnCompletion({
   turnId = "",
   turnStatus = "completed",
   errorMessage = "",
+  lastAgentMessage = "",
 } = {}) {
   if (!threadId || state.activeThreadId !== threadId) return;
   const isFailed = turnStatus === "failed";
@@ -4802,6 +4992,14 @@ async function reloadActiveThreadAfterTurnCompletion({
       focusScroll: state.autoFollow,
       preserveStatus: isFailed,
     }).catch(() => {});
+  }
+
+  if (!isFailed && state.activeThreadId === threadId && state.activeThread) {
+    maybeSpeakCompletedTurnSummary({
+      threadId,
+      turnId,
+      fallbackText: lastAgentMessage,
+    });
   }
 
   if (!isFailed || state.activeThreadId !== threadId || !state.activeThread) return;
@@ -4856,12 +5054,18 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
     activeThreadReloadTimer = null;
   }
   const prevThreadId = state.activeThreadId;
-  if (compositeId !== prevThreadId && state.editingQueueItem) {
+  const wasDifferentThread = compositeId !== prevThreadId;
+  if (wasDifferentThread && state.editingQueueItem) {
     clearQueueEditState({ restoreDraft: state.editingQueueItem.threadId === prevThreadId });
   }
-  if (compositeId !== prevThreadId) {
+  if (wasDifferentThread) {
     closeSlashCommandMenu();
     state.composerGoal = false;
+    stopChatReplySpeech();
+    if (state.dictation.active || state.dictation.pointerDown) {
+      state.dictation.pointerDown = false;
+      void stopComposerDictation({ submit: false });
+    }
   }
   state.activeThreadId = compositeId;
   if (compositeId !== prevThreadId) {
@@ -4963,6 +5167,9 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   if (state.activeThreadId !== compositeId) return;
   lastActiveThreadReloadDoneAt = Date.now();
   state.activeThread = res.thread;
+  if (wasDifferentThread && !res.thread?.live) {
+    syncCurrentThreadSpokenBaseline(state.activeThread);
+  }
   state.nextCursor = res.nextCursor || null;
   state.activityCursor = res.activityCursor || "";
   state.liveActivity = res.activity || (res.thread?.live ? { status: "running" } : null);
@@ -5045,14 +5252,18 @@ async function copyTextToClipboard(text) {
   }
 }
 
-async function handleSend({ overrideText = null, clearDraft = true, forceGoal = false } = {}) {
+async function handleSend({ overrideText = null, clearDraft = true, forceGoal = false, includeComposerImages = false } = {}) {
   if (state.isSubmitting) return;
   if (state.imageProcessingCount > 0) {
     setComposerStatus("error", "图片正在压缩处理中，请稍候再发送", { autoClearMs: 2500 });
     return;
   }
+  if (state.chatTts.enabled) {
+    unlockChatReplySpeechAudio();
+  }
   const input = $("promptInput");
   const isOverride = typeof overrideText === "string";
+  const useLiveImages = !isOverride || includeComposerImages;
   const rawText = isOverride ? overrideText : input.value;
   const { hasDirective, cleanedText } = extractGoalDirective(rawText);
   const goalMode = Boolean(forceGoal || state.composerGoal || hasDirective);
@@ -5067,14 +5278,14 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     isEditingQueue: Boolean(editingQueue),
     mode: $("runningSubmitMode").value,
     text,
-    imageCount: isOverride ? 0 : state.images.length,
+    imageCount: useLiveImages ? state.images.length : 0,
   });
   if (!sub.canSubmit) {
     setComposerStatus("error", "请输入指令或添加图片后再发送", { autoClearMs: 2500 });
     return;
   }
 
-  const savedImages = isOverride ? [] : [...state.images];
+  const savedImages = useLiveImages ? [...state.images] : [];
   const cleanImages = savedImages.map((img, idx) => ({
     name: img?.name || `image-${idx + 1}.jpg`,
     dataUrl: img?.dataUrl || "",
@@ -5089,10 +5300,16 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
   }
 
   const resetDraftIfNeeded = () => {
-    if (!clearDraft) return;
-    input.value = "";
-    state.images = [];
-    renderComposerImages();
+    if (clearDraft) {
+      input.value = "";
+      state.images = [];
+      renderComposerImages();
+      return;
+    }
+    if (includeComposerImages && state.images.length) {
+      state.images = [];
+      renderComposerImages();
+    }
   };
 
   state.isSubmitting = true;
@@ -5232,21 +5449,34 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
         live: true,
         ...(turnRes?.thread?.title ? { title: turnRes.thread.title, name: turnRes.thread.name || turnRes.thread.title } : {}),
       });
+      const autoCompactGrowthK = turnRes?.autoCompact
+        ? Math.max(1, Math.round((Number(turnRes.autoCompact.growthTokens) || 0) / 1000))
+        : 0;
       state.liveActivity = mergeLiveActivity(state.liveActivity, {
         turnId: optimisticTurnId,
         status: "running",
-        phase: `${providerDisplayName(state.activeThread.provider)} 执行中`,
+        phase: turnRes?.autoCompact
+          ? `自动压缩上下文（已增长 ~${autoCompactGrowthK}K）…`
+          : `${providerDisplayName(state.activeThread.provider)} 执行中`,
       });
       renderThreadList();
       renderTopbarAndControls();
       renderActiveMessages();
     }
     scheduleActiveThreadReload(state.activeThreadId, 450);
-    setComposerStatus(
-      "success",
-      sub.action === "steer" ? "插话引导已发送" : "指令已发送，等待响应…",
-      { autoClearMs: 2800 },
-    );
+    if (turnRes?.autoCompact) {
+      const thresholdK = Math.max(1, Math.round((Number(turnRes.autoCompact.thresholdTokens) || 60000) / 1000));
+      setComposerStatus("pending", `上下文增长超过 ${thresholdK}K，正先 /compact 压缩后继续执行…`, { autoClearMs: 5000 });
+      showToastBanner("自动压缩上下文", {
+        detail: `已增长 ~${autoCompactGrowthK}K tokens，压缩完成后自动续发`,
+      });
+    } else {
+      setComposerStatus(
+        "success",
+        sub.action === "steer" ? "插话引导已发送" : "指令已发送，等待响应…",
+        { autoClearMs: 2800 },
+      );
+    }
   } catch (error) {
     input.value = rawText;
     state.images = savedImages;
@@ -5266,9 +5496,17 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
       || errCode === "writer_conflict"
       || errCode === "codex_app_running"
       || /already has an active writer|\bactive writer\b|正在运行|占用/.test(errMsg);
+    const isArchivedError = errCode === "thread_archived"
+      || /\bis archived\b|codex unarchive\b|已在 Codex 中归档|先解除归档/i.test(errMsg);
+    if (isArchivedError && state.activeThreadId && state.activeThread && !state.activeThread.archived) {
+      state.activeThread.archived = true;
+      renderTopbarAndControls();
+    }
     const failedProvider = state.activeThread?.provider || currentComposerProvider();
     const failedProfileId = state.activeThread?.profileId || currentComposerProfileId();
-    const altProfile = !isBusyConflict ? findFailoverCandidateProfile(state.profiles, failedProvider, failedProfileId) : null;
+    const altProfile = (!isBusyConflict && !isArchivedError)
+      ? findFailoverCandidateProfile(state.profiles, failedProvider, failedProfileId)
+      : null;
     const failoverContext = altProfile ? {
       provider: failedProvider,
       altProfile,
@@ -5280,12 +5518,47 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
       permissionMode,
       goalMode,
     } : null;
-    setComposerStatus("error", `发送失败：${errMsg}`, { failoverContext });
+    const unarchiveContext = (isArchivedError && state.activeThreadId)
+      ? { threadId: state.activeThreadId }
+      : null;
+    setComposerStatus("error", `发送失败：${errMsg}`, { failoverContext, unarchiveContext });
     showToastBanner("发送失败", { detail: errMsg, error: true });
     void refreshProvidersAndModels().catch(() => {});
   } finally {
     state.isSubmitting = false;
     renderComposerControls();
+  }
+}
+
+async function unarchiveThreadAndOptionallyResend(threadId, { retrySend = false } = {}) {
+  if (!threadId || state.unarchivingThreadId) return;
+  state.unarchivingThreadId = threadId;
+  renderComposerArchivedBanner();
+  setComposerStatus("pending", retrySend ? "正在解除归档并重新发送…" : "正在解除归档…");
+  try {
+    await apiPost("api/thread/archive", { threadId, archived: false });
+    if (state.activeThread?.id === threadId) {
+      state.activeThread.archived = false;
+    }
+    const item = state.threads.find((t) => t.id === threadId);
+    if (item) item.archived = false;
+    state.unarchivingThreadId = "";
+    renderTopbarAndControls();
+    renderComposerArchivedBanner();
+    void refreshThreads().catch(() => {});
+    if (retrySend) {
+      clearComposerStatus();
+      await handleSend();
+    } else {
+      setComposerStatus("success", "已解除归档，可以继续发送消息", { autoClearMs: 3200 });
+      showToastBanner("已解除归档");
+    }
+  } catch (error) {
+    state.unarchivingThreadId = "";
+    renderComposerArchivedBanner();
+    const errMsg = formatActionError(error, "解除归档失败");
+    setComposerStatus("error", `解除归档失败：${errMsg}`);
+    showToastBanner("解除归档失败", { detail: errMsg, error: true });
   }
 }
 
@@ -5737,7 +6010,11 @@ function scheduleSseReconnect() {
 function resyncStateAfterSseReconnect() {
   if (!sseNeedsResync) return;
   sseNeedsResync = false;
+  state.executionStats = null;
   void refreshThreads().catch(() => {});
+  if (state.telemetryExpanded || state.telemetryPickerOpen) {
+    void refreshExecutionStats();
+  }
   if (state.activeThreadId && !isBoardViewActive() && !state.initialThreadLoading) {
     scheduleActiveThreadReload(state.activeThreadId, 80);
   }
@@ -5872,6 +6149,15 @@ function bindEventSourceListeners(es) {
     setComposerStatus("error", "控制主机暂时离线，请稍候重试");
   });
 
+  let threadListLiveRenderTimer = null;
+  const scheduleThreadListLiveRender = () => {
+    if (threadListLiveRenderTimer) return;
+    threadListLiveRenderTimer = setTimeout(() => {
+      threadListLiveRenderTimer = null;
+      renderThreadList();
+    }, 120);
+  };
+
   const updateThreadLiveTracker = (threadId, patch) => {
     if (!threadId) return;
     const prev = state.liveActivityByThread.get(threadId) || {};
@@ -5882,6 +6168,14 @@ function bindEventSourceListeners(es) {
     if (threadReadState.unreadById[threadId]) {
       delete threadReadState.unreadById[threadId];
       persistThreadReadState();
+    }
+    if (
+      prev.status !== merged.status
+      || prev.phase !== merged.phase
+      || prev.text !== merged.text
+      || Boolean(prev.isStreamingText) !== merged.isStreamingText
+    ) {
+      scheduleThreadListLiveRender();
     }
   };
 
@@ -6076,6 +6370,37 @@ function bindEventSourceListeners(es) {
     }
   });
 
+  es.addEventListener("settings_updated", (ev) => {
+    try {
+      const { settings } = JSON.parse(ev.data || "{}");
+      if (!settings || typeof settings !== "object") return;
+      const titleEl = $("agentAutoTitleToggle");
+      if (titleEl && Object.hasOwn(settings, "agentAutoTitle")) {
+        titleEl.checked = settings.agentAutoTitle !== false;
+      }
+      const cliEl = $("autoUpdateCliToggle");
+      if (cliEl && Object.hasOwn(settings, "autoUpdateCli")) {
+        cliEl.checked = settings.autoUpdateCli !== false;
+      }
+      const compactEl = $("agyAutoCompactToggle");
+      if (compactEl && Object.hasOwn(settings, "agyAutoCompact")) {
+        compactEl.checked = settings.agyAutoCompact !== false;
+      }
+      const compactTokensEl = $("agyAutoCompactTokensSelect");
+      if (compactTokensEl) {
+        if (settings.agyAutoCompactTokens) {
+          const value = String(settings.agyAutoCompactTokens);
+          if (![...compactTokensEl.options].some((opt) => opt.value === value)) {
+            compactTokensEl.append(new Option(`${Math.round(Number(value) / 1000)}K`, value));
+          }
+          compactTokensEl.value = value;
+        }
+        compactTokensEl.disabled = settings.agyAutoCompact === false;
+      }
+      updateSettingsTabBadge();
+    } catch {}
+  });
+
   es.addEventListener("thread_renamed", (ev) => {
     const { threadId, name } = JSON.parse(ev.data || "{}");
     const target = state.threads.find((t) => t.id === threadId);
@@ -6094,11 +6419,26 @@ function bindEventSourceListeners(es) {
     renderVoiceLiveProgressIfOpen();
   });
 
-  es.addEventListener("thread_archived", () => {
+  es.addEventListener("thread_archived", (ev) => {
+    try {
+      const data = JSON.parse(ev.data || "{}");
+      if (state.activeThread && data?.threadId && state.activeThread.id === data.threadId) {
+        state.activeThread.archived = Boolean(data.archived);
+        renderTopbarAndControls();
+      }
+    } catch {}
     void refreshThreads();
   });
 
-  es.addEventListener("threads_archived", () => {
+  es.addEventListener("threads_archived", (ev) => {
+    try {
+      const data = JSON.parse(ev.data || "{}");
+      const ids = Array.isArray(data?.threadIds) ? data.threadIds : [];
+      if (state.activeThread && state.activeThreadId && ids.includes(state.activeThreadId)) {
+        state.activeThread.archived = Boolean(data.archived);
+        renderTopbarAndControls();
+      }
+    } catch {}
     void refreshThreads();
   });
 
@@ -6156,12 +6496,67 @@ function bindEventSourceListeners(es) {
         phase: `${providerDisplayName(evt.provider)} 执行中`,
         isStreamingText: false,
       });
+    } else if (evt.type === "stream_item_start") {
+      if (evt.blockType === "thinking") {
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `${providerDisplayName(evt.provider)} 思考中…`,
+          text: "",
+          isStreamingText: false,
+        });
+      } else if (evt.blockType === "tool_use") {
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `准备工具 ${evt.toolName || ""}`,
+          text: "",
+          isStreamingText: false,
+        });
+      } else if (evt.blockType === "text") {
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `${providerDisplayName(evt.provider)} 回复中…`,
+          text: "",
+          isStreamingText: true,
+        });
+      }
     } else if (evt.type === "stream_delta") {
       if (evt.kind === "text") {
-        updateThreadLiveTracker(evt.threadId, { status: "running", isStreamingText: true });
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `${providerDisplayName(evt.provider)} 回复中…`,
+          text: "",
+          isStreamingText: true,
+        });
+      } else if (evt.kind === "reasoning") {
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `${providerDisplayName(evt.provider)} 思考中…`,
+          text: "",
+          isStreamingText: false,
+        });
       } else if (evt.kind === "toolInput") {
-        updateThreadLiveTracker(evt.threadId, { status: "running", phase: `准备工具 ${evt.toolName || ""}` });
+        updateThreadLiveTracker(evt.threadId, {
+          status: "running",
+          phase: `准备工具 ${evt.toolName || ""}`,
+          text: "",
+          isStreamingText: false,
+        });
       }
+    } else if (evt.type === "tool_use") {
+      const toolSummary = summarizeToolUseActivity(evt.toolUse);
+      updateThreadLiveTracker(evt.threadId, {
+        status: "running",
+        phase: toolSummary.phase,
+        text: toolSummary.text,
+        isStreamingText: false,
+      });
+    } else if (evt.type === "tool_result") {
+      updateThreadLiveTracker(evt.threadId, {
+        status: "running",
+        phase: `${providerDisplayName(evt.provider)} 思考中…`,
+        text: "",
+        isStreamingText: false,
+      });
     } else if (evt.type === "acp_tool_update") {
       const rawToolText = String(evt.update?.status || "");
       const friendlyToolText = isRecoverableToolErrorText(rawToolText)
@@ -6238,6 +6633,7 @@ function bindEventSourceListeners(es) {
             turnId: params?.turn?.id || "",
             turnStatus,
             errorMessage: rawErrMsg || "执行失败",
+            lastAgentMessage: params?.turn?.lastAgentMessage || "",
           });
           void refreshThreads().catch(() => {});
         }
@@ -6255,6 +6651,30 @@ function bindEventSourceListeners(es) {
           renderStreamingTurn();
           scheduleActiveThreadReload(state.activeThreadId, 450);
           scheduleTelemetryRefresh(150);
+        } else if (evt.type === "stream_item_start") {
+          clearComposerStatus();
+          if (evt.turnId && state.streamingTurnId && evt.turnId !== state.streamingTurnId) {
+            state.streamingText = "";
+            state.streamingThought = "";
+          }
+          if (evt.turnId) state.streamingTurnId = evt.turnId;
+          if (evt.blockType === "thinking") {
+            state.liveActivity = mergeLiveActivity(state.liveActivity, {
+              status: "running",
+              phase: `${providerDisplayName(evt.provider)} 思考中…`,
+              text: "",
+            });
+            renderLiveBanner();
+            syncLiveTurnFrontier();
+          } else if (evt.blockType === "tool_use") {
+            state.liveActivity = mergeLiveActivity(state.liveActivity, {
+              status: "running",
+              phase: `准备工具 ${evt.toolName || ""}`,
+              text: "",
+            });
+            renderLiveBanner();
+            syncLiveTurnFrontier();
+          }
         } else if (evt.type === "stream_delta") {
           clearComposerStatus();
           if (evt.turnId && state.streamingTurnId && evt.turnId !== state.streamingTurnId) {
@@ -6271,6 +6691,11 @@ function bindEventSourceListeners(es) {
             const wasEmpty = !state.streamingText;
             state.streamingText += String(evt.delta || "");
             if (wasEmpty) {
+              state.liveActivity = mergeLiveActivity(state.liveActivity, {
+                status: "running",
+                phase: `${providerDisplayName(evt.provider)} 回复中…`,
+                text: "",
+              });
               renderLiveBanner();
               renderActiveMessages();
             } else {
@@ -6278,6 +6703,12 @@ function bindEventSourceListeners(es) {
             }
           } else if (evt.kind === "reasoning") {
             state.streamingThought += String(evt.delta || "");
+            state.liveActivity = mergeLiveActivity(state.liveActivity, {
+              status: "running",
+              phase: `${providerDisplayName(evt.provider)} 思考中…`,
+              text: "",
+            });
+            renderLiveBanner();
             syncLiveTurnFrontier();
           } else if (evt.kind === "toolInput") {
             const hadStreamingText = Boolean(state.streamingText);
@@ -6286,6 +6717,7 @@ function bindEventSourceListeners(es) {
             state.liveActivity = mergeLiveActivity(state.liveActivity, {
               status: "running",
               phase: `准备工具 ${evt.toolName || ""}`,
+              text: "",
             });
             renderLiveBanner();
             if (hadStreamingText) renderActiveMessages();
@@ -6294,6 +6726,29 @@ function bindEventSourceListeners(es) {
           } else {
             renderStreamingTurn();
           }
+        } else if (evt.type === "tool_use") {
+          const hadStreamingText = Boolean(state.streamingText);
+          state.streamingText = "";
+          state.streamingThought = "";
+          const toolSummary = summarizeToolUseActivity(evt.toolUse);
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            status: "running",
+            phase: toolSummary.phase,
+            text: toolSummary.text,
+          });
+          renderLiveBanner();
+          if (hadStreamingText) renderActiveMessages();
+          else syncLiveTurnFrontier();
+          scheduleActiveThreadReload(state.activeThreadId, 350);
+        } else if (evt.type === "tool_result") {
+          state.liveActivity = mergeLiveActivity(state.liveActivity, {
+            status: "running",
+            phase: `${providerDisplayName(evt.provider)} 思考中…`,
+            text: "",
+          });
+          renderLiveBanner();
+          syncLiveTurnFrontier();
+          scheduleActiveThreadReload(state.activeThreadId, 250);
         } else if (evt.type === "acp_tool_update") {
           const rawToolText = String(evt.update?.status || "");
           const friendlyToolText = isRecoverableToolErrorText(rawToolText)
@@ -6335,6 +6790,7 @@ function bindEventSourceListeners(es) {
             turnId: evt.turnId || "",
             turnStatus,
             errorMessage: rawErrMsg || "执行失败",
+            lastAgentMessage: evt.lastAgentMessage || "",
           });
           void refreshThreads().catch(() => {});
           scheduleTelemetryRefresh(200);
@@ -6462,6 +6918,68 @@ function renderUpdateIndicators() {
   }
 }
 
+function syncUpdateModalTabs() {
+  const modal = $("updateModal");
+  if (!modal) return;
+  const activeTab = ["notes", "settings", "cli"].includes(state.updateModalTab)
+    ? state.updateModalTab
+    : "notes";
+  state.updateModalTab = activeTab;
+  for (const btn of modal.querySelectorAll("[data-update-tab]")) {
+    const isAct = btn.getAttribute("data-update-tab") === activeTab;
+    btn.classList.toggle("is-active", isAct);
+    btn.setAttribute("aria-selected", isAct ? "true" : "false");
+  }
+  for (const panel of modal.querySelectorAll("[data-update-panel]")) {
+    panel.hidden = panel.getAttribute("data-update-panel") !== activeTab;
+  }
+}
+
+function updateSettingsTabBadge() {
+  const badge = $("updateTabSettingsBadge");
+  if (!badge) return;
+  const ids = [
+    "autoCheckUpdateToggle",
+    "autoUpdateToggle",
+    "autoUpdateDesktopToggle",
+    "agentAutoTitleToggle",
+    "autoUpdateCliToggle",
+    "agyAutoCompactToggle",
+  ];
+  const els = ids.map((id) => $(id)).filter(Boolean);
+  if (!els.length) {
+    badge.textContent = "";
+    return;
+  }
+  const enabledCount = els.filter((el) => Boolean(el.checked)).length;
+  badge.textContent = `${enabledCount}/${els.length}`;
+}
+
+function currentUiLocale() {
+  return window.AgentControlI18n?.getLocale?.() || document.documentElement?.lang || "zh-CN";
+}
+
+function renderUpdateReleaseNotesBody() {
+  const snap = state.updateStatus;
+  const releaseNotesSec = $("updateReleaseNotesSection");
+  const releaseNotesBody = $("updateReleaseNotesBody");
+  if (!releaseNotesSec || !releaseNotesBody) return;
+  const locale = currentUiLocale();
+  const tabs = buildReleaseVersionTabs(snap, { locale });
+  if (state.updateNotesVersionKey && !tabs.some((t) => t.key === state.updateNotesVersionKey)) {
+    state.updateNotesVersionKey = "";
+  }
+  const notesHtml = renderReleaseNotesCardHtml(snap, {
+    escapeHtml,
+    selectedVersionKey: state.updateNotesVersionKey,
+    selectedCategory: state.updateNotesCategory,
+    locale,
+  });
+  releaseNotesSec.hidden = !notesHtml;
+  releaseNotesSec.classList.toggle("is-has-update", Boolean(snap?.hasUpdate && notesHtml));
+  releaseNotesBody.innerHTML = notesHtml;
+}
+
 function renderUpdateModal() {
   const snap = state.updateStatus;
   const pill = $("updateStatePill");
@@ -6470,10 +6988,13 @@ function renderUpdateModal() {
   const desktopEl = $("updateDesktopInfo");
   const statusEl = $("updateActionStatus");
   const dirtyEl = $("updateDirtyWarning");
+  const releaseNotesSec = $("updateReleaseNotesSection");
+  const notesBadge = $("updateTabNotesBadge");
   const autoCheckEl = $("autoCheckUpdateToggle");
   const autoUpdateEl = $("autoUpdateToggle");
   const autoDesktopEl = $("autoUpdateDesktopToggle");
   const pendingSec = $("updatePendingSection");
+  const pendingDetailsEl = $("updatePendingDetails");
   const pendingCountEl = $("updatePendingCount");
   const pendingListEl = $("updatePendingList");
   const desktopBtn = $("applyDesktopUpdateBtn");
@@ -6500,35 +7021,37 @@ function renderUpdateModal() {
 
   if (currentEl) {
     if (!snap) {
-      currentEl.innerHTML = `<span>正在读取本地版本与仓库状态…</span>`;
+      currentEl.innerHTML = `<span class="update-hero-sub">正在读取版本信息…</span>`;
     } else {
-      const shaPart = snap.localShortSha ? `${escapeHtml(snap.branch || "main")} @ <code>${escapeHtml(snap.localShortSha)}</code>` : "非 Git 部署";
-      const timePart = snap.lastCheckedAt ? formatUpdateTimestamp(snap.lastCheckedAt) : "尚未检查";
+      const shaLabel = snap.localShortSha
+        ? `${escapeHtml(snap.branch || "main")} @ <code>${escapeHtml(snap.localShortSha)}</code>`
+        : "非 Git 部署";
+      const uiTitleAttr = snap.uiVersion ? ` title="UI 资源版本 ${escapeHtml(snap.uiVersion)}"` : "";
+      const timePart = snap.lastCheckedAt ? `${formatUpdateTimestamp(snap.lastCheckedAt)} 检查` : "尚未检查";
+      const modePart = snap.managedService ? "后台托管" : "直启";
       currentEl.innerHTML = `
-        <div class="update-meta-row">
-          <span>服务版本 <strong>v${escapeHtml(snap.packageVersion || "0.1.0")}</strong>${snap.uiVersion ? ` · UI ${escapeHtml(snap.uiVersion)}` : ""}</span>
-          <span>${shaPart}</span>
+        <div class="update-hero-main">
+          <span class="update-hero-ver"${uiTitleAttr}>v${escapeHtml(snap.packageVersion || "0.1.0")}</span>
+          <span class="update-hero-sha">${shaLabel}</span>
         </div>
-        ${snap.localCommitSubject ? `<div class="update-meta-row"><span>最近提交：${escapeHtml(snap.localCommitSubject)}</span></div>` : ""}
-        <div class="update-meta-row">
-          <span>上次检查：${escapeHtml(timePart)}</span>
-          <span>${snap.managedService ? "后台常驻服务已托管（支持重启自恢复）" : "命令行直启模式"}</span>
+        <div class="update-hero-sub">
+          <span>${escapeHtml(timePart)} · ${modePart}</span>
         </div>
       `;
     }
   }
 
+  const locale = currentUiLocale();
+  const activeNotes = resolveReleaseNotesBucket(snap, locale) || snap?.releaseNotes || null;
+
   if (remoteEl) {
-    if (snap?.isGitRepo && snap?.remoteUrl) {
+    if (snap?.isGitRepo && snap?.remoteUrl && snap?.hasUpdate) {
       remoteEl.hidden = false;
-      const remoteVer = snap.remoteVersion ? `v${escapeHtml(snap.remoteVersion)} · ` : "";
-      const remoteSha = snap.remoteShortSha ? `<code>${escapeHtml(snap.remoteShortSha)}</code>` : "待同步";
+      const remoteVer = snap.remoteVersion ? `v${escapeHtml(snap.remoteVersion)}` : (snap.remoteShortSha ? escapeHtml(snap.remoteShortSha) : "新版");
+      const headline = renderReleaseHeadline(activeNotes?.pending?.[0] || activeNotes?.remote);
       remoteEl.innerHTML = `
-        <div class="update-meta-row">
-          <span>远端最新：${remoteVer}${remoteSha}</span>
-          <span>${snap.hasUpdate ? `落后 ${snap.behindCount} 个提交` : (snap.updateState === "up_to_date" ? "已与远端同步" : "")}</span>
-        </div>
-        ${snap.remoteCommitSubject ? `<div class="update-meta-row"><span>${escapeHtml(snap.remoteCommitSubject)}</span></div>` : ""}
+        <span class="update-remote-pill">发现新版 ${remoteVer} · 落后 ${snap.behindCount || 1} 提交</span>
+        ${headline ? `<span class="update-remote-topic" title="${escapeHtml(headline)}">${escapeHtml(headline)}</span>` : ""}
       `;
     } else {
       remoteEl.hidden = true;
@@ -6543,28 +7066,56 @@ function renderUpdateModal() {
         const tagClass = desktopInfo.needsUpdate ? "is-warn" : "is-ok";
         const tagText = desktopInfo.needsUpdate ? "壳子待更新" : "壳子已同步";
         const verStr = `v${escapeHtml(desktopInfo.installedVersion || "未知")}${desktopInfo.installedBuildNumber ? ` (#${escapeHtml(desktopInfo.installedBuildNumber)})` : ""}`;
-        const hashStr = desktopInfo.installedHash
-          ? `<code>${escapeHtml(desktopInfo.installedHash)}</code>${desktopInfo.expectedHash && desktopInfo.installedHash !== desktopInfo.expectedHash ? ` → <code>${escapeHtml(desktopInfo.expectedHash)}</code>` : ""}`
-          : "无指纹（旧壳）";
+        const shortInstalled = desktopInfo.installedHash ? desktopInfo.installedHash.slice(0, 7) : "";
+        const shortExpected = desktopInfo.expectedHash ? desktopInfo.expectedHash.slice(0, 7) : "";
+        const hashLabel = shortInstalled
+          ? (shortExpected && shortInstalled !== shortExpected ? `指纹 ${shortInstalled} → ${shortExpected}` : `指纹 ${shortInstalled}`)
+          : "旧壳无指纹";
+        const statusDesc = desktopInfo.needsUpdate ? `源码已变动，${hashLabel}` : hashLabel;
         desktopEl.innerHTML = `
-          <div class="update-meta-row">
-            <span>桌面 App <strong>${verStr}</strong> · ${hashStr}</span>
+          <div class="update-hero-tile-head">
+            <span class="update-tile-label">桌面 App</span>
             <span class="update-desktop-tag ${tagClass}">${tagText}</span>
           </div>
-          ${desktopInfo.reason ? `<div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason)}</span></div>` : ""}
+          <div class="update-hero-main">
+            <span class="update-hero-ver">${verStr}</span>
+          </div>
+          <div class="update-hero-sub" title="${escapeHtml(desktopInfo.reason || statusDesc)}">
+            <span>${escapeHtml(statusDesc)}</span>
+          </div>
         `;
       } else {
         desktopEl.innerHTML = `
-          <div class="update-meta-row">
-            <span>桌面 App <strong>尚未安装</strong></span>
+          <div class="update-hero-tile-head">
+            <span class="update-tile-label">桌面 App</span>
             <span class="update-desktop-tag">未安装</span>
           </div>
-          <div class="update-meta-row"><span>${escapeHtml(desktopInfo.reason || "可在当前系统点击“构建桌面 App”完成安装")}</span></div>
+          <div class="update-hero-main">
+            <span class="update-hero-ver is-muted">尚未安装</span>
+          </div>
+          <div class="update-hero-sub" title="${escapeHtml(desktopInfo.reason || "")}">
+            <span>点击下方「构建桌面 App」即可安装</span>
+          </div>
         `;
       }
     } else {
       desktopEl.hidden = true;
       desktopEl.innerHTML = "";
+    }
+  }
+
+  renderUpdateReleaseNotesBody();
+
+  if (notesBadge) {
+    if (snap?.hasUpdate) {
+      notesBadge.textContent = snap.remoteVersion ? `v${snap.remoteVersion}` : "有新版";
+      notesBadge.className = "update-tab-badge is-warn";
+    } else if (activeNotes?.current?.version || snap?.packageVersion) {
+      notesBadge.textContent = `v${activeNotes?.current?.version || snap.packageVersion}`;
+      notesBadge.className = "update-tab-badge";
+    } else {
+      notesBadge.textContent = "";
+      notesBadge.className = "update-tab-badge";
     }
   }
 
@@ -6574,6 +7125,8 @@ function renderUpdateModal() {
     autoDesktopEl.checked = snap.autoUpdateDesktopApp !== false;
     autoDesktopEl.disabled = Boolean(desktopInfo && !desktopInfo.supported);
   }
+  updateSettingsTabBadge();
+  syncUpdateModalTabs();
 
   if (statusEl) {
     const desktopActive = Boolean(state.desktopUpdating || snap?.desktopUpdating || snap?.desktopPhase === "error");
@@ -6596,15 +7149,19 @@ function renderUpdateModal() {
   if (dirtyEl) {
     if (snap?.dirty) {
       dirtyEl.hidden = false;
-      const sample = Array.isArray(snap.dirtySample) && snap.dirtySample.length
-        ? `（例如：<code>${escapeHtml(snap.dirtySample.slice(0, 3).join("、"))}</code>）`
+      const sampleList = Array.isArray(snap.dirtySample) ? snap.dirtySample : [];
+      const sampleHint = sampleList.length
+        ? `（如 ${sampleList.slice(0, 2).map((f) => `<code>${escapeHtml(f)}</code>`).join("、")}${sampleList.length > 2 ? " 等" : ""}）`
         : "";
-      dirtyEl.innerHTML = `检测到本地有 ${snap.dirtyCount || 1} 项未提交修改${sample}。为保护你的修改不被覆盖，在线拉取更新已锁定；请在本机提交或暂存修改后再更新。`;
+      dirtyEl.title = sampleList.join(", ");
+      dirtyEl.innerHTML = `本地有 ${snap.dirtyCount || 1} 项未提交修改${sampleHint}，已锁定在线拉取。`;
     } else if (snap?.desktopRebuildSuggested && !desktopInfo?.needsUpdate) {
       dirtyEl.hidden = false;
-      dirtyEl.innerHTML = `本次更新包含 macOS 桌面外壳改动，可点击下方「更新桌面 App」同步重建。`;
+      dirtyEl.title = "";
+      dirtyEl.innerHTML = `本次更新包含桌面外壳改动，可点击下方「更新桌面 App」同步重建。`;
     } else {
       dirtyEl.hidden = true;
+      dirtyEl.title = "";
       dirtyEl.innerHTML = "";
     }
   }
@@ -6613,6 +7170,14 @@ function renderUpdateModal() {
     const commits = Array.isArray(snap?.pendingCommits) ? snap.pendingCommits : [];
     pendingSec.hidden = commits.length === 0;
     pendingCountEl.textContent = `${commits.length} 条提交`;
+    if (pendingDetailsEl) {
+      const hasStructuredNotes = Boolean(
+        activeNotes?.pendingSource === "release_notes"
+        || activeNotes?.pendingSource === "changelog",
+      );
+      const notesShown = Boolean(releaseNotesSec && !releaseNotesSec.hidden);
+      pendingDetailsEl.open = !hasStructuredNotes && !notesShown;
+    }
     pendingListEl.innerHTML = commits.map((c) => `
       <li class="update-pending-item">
         <span class="update-pending-sha">${escapeHtml(c.sha || "")}</span>
@@ -6644,7 +7209,7 @@ function renderUpdateModal() {
     applyBtn.disabled = !canApply;
     if (snap?.updating || state.updateApplying) applyBtn.textContent = "正在更新…";
     else if (snap?.restartPending) applyBtn.textContent = "重启服务中…";
-    else if (snap?.hasUpdate) applyBtn.textContent = `一键更新并重启 (${snap.behindCount || 1})`;
+    else if (snap?.hasUpdate) applyBtn.textContent = `一键更新 (${snap.behindCount || 1})`;
     else applyBtn.textContent = "已是最新";
   }
 }
@@ -6669,7 +7234,7 @@ function applyUpdateStatusSnapshot(snap, { fromReconnectReady = false } = {}) {
         const manualRestart = Boolean(parsed?.manualRestart);
         if (!snap.updating && !snap.restartPending && (shaChanged || uiChanged || manualRestart)) {
           sessionStorage.removeItem(UPDATE_RESTART_FLAG_KEY);
-          if (uiChanged && !($("promptInput")?.value || "").trim()) {
+          if (uiChanged && !($("promptInput")?.value || "").trim() && !state.editingQueueItem && !state.images.length) {
             location.reload();
             return;
           }
@@ -6944,28 +7509,61 @@ async function openAutomationsModal() {
 
 async function renderCliVersionsInModal(cliStatus = null) {
   const listEl = $("cliVersionsList");
-  if (!listEl) return;
+  const cliBadge = $("updateTabCliBadge");
   const statusMap = cliStatus || (await apiGet("api/cli/status").then((r) => r?.cliStatus).catch(() => null)) || {};
   const entries = Object.values(statusMap).filter((item) => item?.updatable);
+
+  if (cliBadge) {
+    const upgradableCount = entries.filter((item) => Boolean(item?.updateAvailable)).length;
+    if (upgradableCount > 0) {
+      cliBadge.textContent = `可升 ${upgradableCount}`;
+      cliBadge.className = "update-tab-badge is-warn";
+    } else if (entries.length > 0) {
+      cliBadge.textContent = String(entries.length);
+      cliBadge.className = "update-tab-badge";
+    } else {
+      cliBadge.textContent = "";
+      cliBadge.className = "update-tab-badge";
+    }
+  }
+
+  if (!listEl) return;
   if (!entries.length) {
-    listEl.innerHTML = `<div class="update-meta-row"><span>CLI 状态</span><span>暂无可检测的 CLI</span></div>`;
+    listEl.innerHTML = `<div class="update-hero-sub">暂无可检测的 CLI 工具</div>`;
     return;
   }
   listEl.innerHTML = entries.map((item) => {
     const ver = item.installedVersion ? `v${item.installedVersion}` : (item.cliInstalled ? "已安装" : "未安装");
-    const badge = item.updateAvailable && item.latestVersion
-      ? ` -> v${item.latestVersion}`
-      : (item.latestVersion ? "（已最新）" : "");
+    const sourceLabel = (item.installSource === "homebrew-cask" || item.installSource === "homebrew-formula")
+      ? "Homebrew"
+      : (item.installSource === "npm" ? "npm" : "");
+    const verText = sourceLabel ? `${ver} · ${sourceLabel}` : ver;
+    const tagCls = item.updateAvailable ? "is-warn" : (item.cliInstalled ? "is-ok" : "");
+    const tagLabel = item.updateAvailable
+      ? `可升级 v${item.latestVersion || ""}`
+      : (item.latestVersion ? "已最新" : (item.cliInstalled ? "已安装" : "未安装"));
     const actionBtn = item.updateAvailable
-      ? `<button type="button" class="btn-primary btn-xs" data-cli-upgrade="${escapeHtml(item.provider)}"${item.installing ? " disabled" : ""}>${item.installing ? "升级中…" : `升级到 v${escapeHtml(item.latestVersion)}`}</button>`
+      ? `<button type="button" class="btn-primary btn-xs" data-cli-upgrade="${escapeHtml(item.provider)}"${item.installing ? " disabled" : ""}>${item.installing ? "升级中…" : "升级"}</button>`
       : "";
-    const errorMsg = item.lastError && (item.updateAvailable || !item.cliInstalled)
+    const errorMsg = item.lastError
       ? String(item.lastError).split(/\r?\n/)[0].slice(0, 140)
       : "";
     const errorHtml = errorMsg
       ? `<div class="cli-version-error" title="${escapeHtml(item.lastError)}">${escapeHtml(errorMsg)}</div>`
       : "";
-    return `<div class="cli-version-entry"><div class="update-meta-row"><span>${escapeHtml(item.label || item.provider)}</span><span>${escapeHtml(ver + badge)} ${actionBtn}</span></div>${errorHtml}</div>`;
+    return `
+      <div class="cli-card">
+        <div class="cli-card-head">
+          <span class="cli-card-name">${escapeHtml(item.label || item.provider)}</span>
+          <span class="update-desktop-tag ${tagCls}">${escapeHtml(tagLabel)}</span>
+        </div>
+        <div class="cli-card-meta">
+          <span class="cli-card-ver" title="${escapeHtml(item.executable || item.manualHint || "")}">${escapeHtml(verText)}</span>
+          ${actionBtn}
+        </div>
+        ${errorHtml}
+      </div>
+    `;
   }).join("");
 }
 
@@ -6974,6 +7572,11 @@ async function openUpdateModal() {
   setComposerConfigOpen(false);
   const modal = $("updateModal");
   if (!modal) return;
+  if (state.updateStatus?.hasUpdate) {
+    state.updateModalTab = "notes";
+    state.updateNotesVersionKey = "";
+    state.updateNotesCategory = "all";
+  }
   renderUpdateModal();
   if (!modal.open) modal.showModal();
   try {
@@ -6988,6 +7591,20 @@ async function openUpdateModal() {
         if (cliEl && res?.settings) {
           cliEl.checked = res.settings.autoUpdateCli !== false;
         }
+        const compactEl = $("agyAutoCompactToggle");
+        if (compactEl && res?.settings) {
+          compactEl.checked = res.settings.agyAutoCompact !== false;
+        }
+        const compactTokensEl = $("agyAutoCompactTokensSelect");
+        if (compactTokensEl && res?.settings?.agyAutoCompactTokens) {
+          const value = String(res.settings.agyAutoCompactTokens);
+          if (![...compactTokensEl.options].some((opt) => opt.value === value)) {
+            compactTokensEl.append(new Option(`${Math.round(Number(value) / 1000)}K`, value));
+          }
+          compactTokensEl.value = value;
+          compactTokensEl.disabled = res.settings.agyAutoCompact === false;
+        }
+        updateSettingsTabBadge();
       }).catch(() => {}),
       renderCliVersionsInModal(),
     ]);
@@ -7022,23 +7639,6 @@ function renderLocalApps() {
       }).join("")
       : "";
     if (hasApps) hydrateDeclarativeIcons(strip);
-  }
-
-  const menuBox = $("topbarLocalAppsBox");
-  if (menuBox) {
-    menuBox.hidden = !hasApps;
-    menuBox.innerHTML = hasApps
-      ? apps.map((app) => {
-        const href = escapeHtml(localAppLaunchUrl(app));
-        const name = escapeHtml(app.name || app.id);
-        return `<a class="btn-secondary btn-sm topbar-local-app-link" href="${href}">`
-          + `<span class="btn-icon-glyph" data-icon="film" data-icon-size="13" aria-hidden="true"></span>`
-          + `<span>打开${name}</span>`
-          + `<span class="btn-icon-glyph local-app-chip-arrow" data-icon="external-link" data-icon-size="11" aria-hidden="true"></span>`
-          + `</a>`;
-      }).join("")
-      : "";
-    if (hasApps) hydrateDeclarativeIcons(menuBox);
   }
 
   const remoteSec = $("remoteLocalAppsSection");
@@ -7644,6 +8244,7 @@ function renderSpriteAssistantMount() {
   const hasInspector = Boolean(
     state.tycoonInspectorMode === "unassigned"
     || state.tycoonInspectorMode === "incubator"
+    || state.tycoonInspectorMode === "recent_done"
     || state.tycoonSelectedTopicId,
   );
   mount.classList.add("is-3d");
@@ -10506,22 +11107,237 @@ function minimizeVoiceModal() {
   showToastBanner("语音通话在后台继续", { detail: "点击顶部语音按钮可随时回到通话界面" });
 }
 
+function isMobileComposerViewport() {
+  return typeof window !== "undefined" && Boolean(window.matchMedia?.("(max-width: 960px)")?.matches);
+}
+
+function isMobileTouchComposer() {
+  if (typeof window === "undefined") return false;
+  return Boolean(
+    isMobileComposerViewport()
+    || window.matchMedia?.("(pointer: coarse)")?.matches
+    || window.matchMedia?.("(hover: none)")?.matches,
+  );
+}
+
+function renderChatTtsButton() {
+  const btn = $("chatTtsToggleBtn");
+  if (!btn) return;
+  const onBoard = isBoardViewActive();
+  btn.hidden = onBoard;
+  if (onBoard) return;
+  const { enabled, speaking, loading } = state.chatTts;
+  const isPlaying = Boolean(speaking || loading);
+  btn.classList.toggle("is-active", enabled);
+  btn.classList.toggle("is-speaking", isPlaying);
+  btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  btn.title = enabled
+    ? (isPlaying ? "朗读播报中（点击关闭自动朗读）" : "朗读播报已开启：每轮回复自动播报结尾总结（点击关闭）")
+    : "朗读播报：点击开启后自动播报回复结尾总结";
+  const iconEl = $("chatTtsToggleIcon");
+  if (iconEl) {
+    iconEl.innerHTML = iconSvg(enabled ? "speaker" : "speaker-off", { size: 14 });
+  }
+}
+
+function unlockChatReplySpeechAudio() {
+  try {
+    if (typeof Audio === "undefined") return;
+    if (!state.chatTts.audioEl) {
+      const audio = new Audio();
+      audio.playsInline = true;
+      audio.preload = "auto";
+      state.chatTts.audioEl = audio;
+    }
+    if (!state.chatTts.audioUnlocked && !state.chatTts.speaking && !state.chatTts.loading) {
+      state.chatTts.audioUnlocked = true;
+      const audio = state.chatTts.audioEl;
+      audio.src = getSilentWavDataUri();
+      audio.play().catch(() => {
+        state.chatTts.audioUnlocked = false;
+      });
+    }
+  } catch {
+    state.chatTts.audioUnlocked = false;
+  }
+}
+
+function stopChatReplySpeech() {
+  state.chatTts.playToken += 1;
+  const wasActive = Boolean(state.chatTts.speaking || state.chatTts.loading);
+  state.chatTts.speaking = false;
+  state.chatTts.loading = false;
+  if (state.chatTts.audioEl) {
+    try {
+      state.chatTts.audioEl.pause();
+      state.chatTts.audioEl.removeAttribute("src");
+      state.chatTts.audioEl.load?.();
+    } catch {}
+  }
+  if (wasActive) {
+    renderChatTtsButton();
+  }
+}
+
+function syncCurrentThreadSpokenBaseline(thread) {
+  if (!thread?.id) return;
+  const { turnId, text } = extractFinalAssistantMessageFromTurns(thread.turns, "");
+  if (!text) return;
+  state.chatTts.lastSpokenKey = `${thread.id}::${turnId || text.slice(-80)}`;
+}
+
+function toggleChatReplyTts() {
+  const next = !state.chatTts.enabled;
+  state.chatTts.enabled = next;
+  saveChatReplyTtsPref(next);
+  if (next) {
+    unlockChatReplySpeechAudio();
+    if (state.activeThread && !state.activeThread.live) {
+      syncCurrentThreadSpokenBaseline(state.activeThread);
+    }
+    renderChatTtsButton();
+    showToastBanner("已开启朗读播报", { detail: "回复完成后将默认朗读结尾总结" });
+  } else {
+    stopChatReplySpeech();
+    renderChatTtsButton();
+    showToastBanner("已关闭朗读播报");
+  }
+}
+
+async function speakChatReplyText(summaryText = "") {
+  const clean = stripMarkdownForSpeech(summaryText, 300);
+  if (!clean || !state.chatTts.enabled) return;
+  stopChatReplySpeech();
+  const token = ++state.chatTts.playToken;
+  state.chatTts.loading = true;
+  renderChatTtsButton();
+
+  const clearPlayback = () => {
+    if (token !== state.chatTts.playToken) return;
+    state.chatTts.loading = false;
+    state.chatTts.speaking = false;
+    renderChatTtsButton();
+  };
+
+  try {
+    const tts = await fetchVoiceTtsAudio({ text: clean, register: false });
+    if (!state.chatTts.enabled || token !== state.chatTts.playToken || isBoardViewActive()) {
+      clearPlayback();
+      return;
+    }
+    if (!tts?.audioBase64 || typeof Audio === "undefined") {
+      clearPlayback();
+      return;
+    }
+    if (!state.chatTts.audioEl) {
+      const audio = new Audio();
+      audio.playsInline = true;
+      audio.preload = "auto";
+      state.chatTts.audioEl = audio;
+    }
+    const audio = state.chatTts.audioEl;
+    const mime = tts.mimeType || "audio/mpeg";
+    audio.onended = clearPlayback;
+    audio.onerror = clearPlayback;
+    audio.src = `data:${mime};base64,${tts.audioBase64}`;
+    state.chatTts.loading = false;
+    state.chatTts.speaking = true;
+    state.chatTts.audioUnlocked = true;
+    renderChatTtsButton();
+    await audio.play();
+  } catch (err) {
+    clearPlayback();
+    if (err?.name === "NotAllowedError") {
+      setComposerStatus("info", "浏览器限制了自动播放，轻触页面任意处后即可自动朗读总结", { autoClearMs: 3200 });
+    }
+  }
+}
+
+function maybeSpeakCompletedTurnSummary({ threadId = "", turnId = "", fallbackText = "" } = {}) {
+  if (!state.chatTts.enabled || !threadId || state.activeThreadId !== threadId || isBoardViewActive()) return;
+  if (state.voice.callActive || state.dictation.active || state.dictation.pointerDown) return;
+  const extracted = extractFinalAssistantMessageFromTurns(state.activeThread?.turns, fallbackText);
+  const finalReply = extracted.text;
+  if (!finalReply) return;
+  const dedupeKey = `${threadId}::${extracted.turnId || turnId || finalReply.slice(-80)}`;
+  if (state.chatTts.lastSpokenKey === dedupeKey) return;
+  const closingSummary = extractReplyClosingSummaryForSpeech(finalReply, { maxChars: 260 });
+  if (!closingSummary) return;
+  state.chatTts.lastSpokenKey = dedupeKey;
+  void speakChatReplyText(closingSummary);
+}
+
+function setComposerHoldMode(enabled, { focusInput = false } = {}) {
+  const next = Boolean(enabled);
+  if (!next && (state.dictation.active || state.dictation.pointerDown)) {
+    state.dictation.pointerDown = false;
+    state.dictation.cancelArmed = false;
+    void stopComposerDictation({ submit: false });
+  }
+  state.dictation.holdMode = next;
+  if (next) {
+    setComposerConfigOpen(false);
+    closeSlashCommandMenu();
+    $("promptInput")?.blur();
+  }
+  renderComposerDictationUi();
+  if (!next && focusInput) {
+    requestAnimationFrame(() => $("promptInput")?.focus());
+  }
+}
+
 function renderComposerDictationUi() {
+  const composerBox = $("composerArea")?.querySelector(".composer-box");
+  const holdBar = $("composerHoldBar");
+  const holdBtn = $("composerHoldTalkBtn");
+  const holdIcon = $("composerHoldTalkIcon");
+  const holdWave = $("composerHoldTalkWave");
+  const holdLabel = $("composerHoldTalkLabel");
   const btn = $("composerVoiceBtn");
   const iconEl = $("composerVoiceIcon");
   const labelEl = $("composerVoiceLabel");
+
+  const { active, transcribing, holdMode, cancelArmed } = state.dictation;
+  const showHoldBar = Boolean(holdMode && isMobileComposerViewport());
+  composerBox?.classList.toggle("is-hold-voice-mode", showHoldBar);
+  if (holdBar) holdBar.hidden = !showHoldBar;
+
+  if (holdBtn) {
+    const gesture = resolveHoldTalkGestureState({
+      active,
+      transcribing,
+      cancelArmed,
+      isSubmitting: state.isSubmitting,
+    });
+    holdBtn.disabled = gesture.disabled;
+    holdBtn.classList.toggle("is-recording", gesture.stateKey === "recording");
+    holdBtn.classList.toggle("is-cancel-armed", gesture.stateKey === "cancel");
+    holdBtn.classList.toggle("is-transcribing", gesture.stateKey === "transcribing");
+    if (holdWave) holdWave.hidden = gesture.stateKey !== "recording";
+    if (holdIcon) {
+      holdIcon.hidden = gesture.stateKey === "recording";
+      holdIcon.innerHTML = gesture.stateKey === "cancel"
+        ? iconSvg("close", { size: 15 })
+        : gesture.stateKey === "transcribing"
+          ? iconSvg("clock", { size: 15 })
+          : iconSvg("mic", { size: 16 });
+    }
+    if (holdLabel) {
+      holdLabel.textContent = gesture.label;
+    }
+  }
+
   if (!btn) return;
-  const { active, transcribing } = state.dictation;
-  btn.classList.toggle("is-recording", active);
-  btn.classList.toggle("is-transcribing", transcribing);
-  btn.setAttribute("aria-pressed", active ? "true" : "false");
+  btn.classList.toggle("is-recording", active && !showHoldBar);
+  btn.classList.toggle("is-transcribing", transcribing && !showHoldBar);
+  btn.setAttribute("aria-pressed", (showHoldBar || active) ? "true" : "false");
   btn.disabled = transcribing;
   if (iconEl) {
-    iconEl.innerHTML = active
+    iconEl.innerHTML = (active && !showHoldBar)
       ? iconSvg("stop", { size: 13 })
-      : transcribing
+      : (transcribing && !showHoldBar)
         ? iconSvg("clock", { size: 13 })
-        : iconSvg("mic", { size: 14 });
+        : iconSvg("mic", { size: 15 });
   }
   if (labelEl) {
     labelEl.textContent = active ? "停止" : transcribing ? "识别中" : "语音";
@@ -10549,18 +11365,31 @@ function teardownComposerDictationAudio() {
   state.dictation.audioCtx = null;
 }
 
-async function stopComposerDictation({ submit = true } = {}) {
-  if (!state.dictation.active) return;
+async function stopComposerDictation({ submit = true, autoSend = false } = {}) {
+  state.dictation.pointerDown = false;
+  state.dictation.pointerId = null;
+  const wasCancelArmed = state.dictation.cancelArmed;
+  state.dictation.cancelArmed = false;
+  if (!state.dictation.active) {
+    renderComposerDictationUi();
+    return;
+  }
   state.dictation.active = false;
   const chunks = state.dictation.chunks;
   state.dictation.chunks = [];
   teardownComposerDictationAudio();
 
   const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
-  if (!submit || totalLen < 1600) {
+  if (!submit || wasCancelArmed || totalLen < 1600) {
     renderComposerDictationUi();
-    if (submit && totalLen > 0) {
-      setComposerStatus("error", "录音时间太短，请再说一次", { autoClearMs: 2200 });
+    if (!submit || wasCancelArmed) {
+      if (wasCancelArmed) {
+        setComposerStatus("info", "已取消语音发送", { autoClearMs: 1600 });
+      } else {
+        clearComposerStatus();
+      }
+    } else if (totalLen > 0) {
+      setComposerStatus("error", "说话时间太短，请按住说完再松手", { autoClearMs: 2200 });
     }
     return;
   }
@@ -10574,7 +11403,7 @@ async function stopComposerDictation({ submit = true } = {}) {
 
   state.dictation.transcribing = true;
   renderComposerDictationUi();
-  setComposerStatus("pending", "正在本地语音识别…");
+  setComposerStatus("pending", autoSend ? "正在识别语音并发送…" : "正在本地语音识别…");
 
   try {
     const wavBytes = encodePcm16SamplesToWav(merged, 16000);
@@ -10584,36 +11413,41 @@ async function stopComposerDictation({ submit = true } = {}) {
     });
     const text = String(res?.text || "").trim();
     if (text) {
-      const input = $("promptInput");
-      if (input) {
-        const cur = input.value;
-        input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
-        autoResizePromptInput();
-        renderComposerControls();
-        input.focus();
+      if (autoSend) {
+        clearComposerStatus();
+        await handleSend({
+          overrideText: text,
+          clearDraft: false,
+          includeComposerImages: true,
+        });
+      } else {
+        const input = $("promptInput");
+        if (input) {
+          const cur = input.value;
+          input.value = cur && !/\s$/.test(cur) ? `${cur} ${text}` : `${cur}${text}`;
+          autoResizePromptInput();
+          renderComposerControls();
+          input.focus();
+        }
+        clearComposerStatus();
       }
-      clearComposerStatus();
     } else {
       setComposerStatus("error", "未识别到清晰语音，请重试", { autoClearMs: 2400 });
     }
   } catch (error) {
-    setComposerStatus("error", `语音转文字失败：${formatActionError(error)}`, { autoClearMs: 3600 });
+    setComposerStatus("error", `语音识别失败：${formatActionError(error)}`, { autoClearMs: 3600 });
   } finally {
     state.dictation.transcribing = false;
     renderComposerDictationUi();
   }
 }
 
-async function toggleComposerDictation() {
-  if (state.dictation.transcribing) return;
-  if (state.dictation.active) {
-    await stopComposerDictation({ submit: true });
-    return;
-  }
+async function startComposerAudioCapture({ autoSendOnMax = false, holdToken = 0 } = {}) {
   if (!navigator.mediaDevices?.getUserMedia) {
     setComposerStatus("error", "当前浏览器不支持网页麦克风录音", { autoClearMs: 3000 });
-    return;
+    return false;
   }
+  stopChatReplySpeech();
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) throw new Error("不支持 AudioContext");
@@ -10627,6 +11461,15 @@ async function toggleComposerDictation() {
         channelCount: 1,
       },
     });
+    if (holdToken && (!state.dictation.pointerDown || state.dictation.holdToken !== holdToken)) {
+      for (const track of stream.getTracks()) {
+        try { track.stop(); } catch {}
+      }
+      try { void ctx.close?.(); } catch {}
+      renderComposerDictationUi();
+      setComposerStatus("info", "麦克风已就绪，请按住说话松手发送", { autoClearMs: 2200 });
+      return false;
+    }
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(2048, 1, 1);
     const silentGain = ctx.createGain();
@@ -10650,16 +11493,31 @@ async function toggleComposerDictation() {
     state.dictation.processor = processor;
     state.dictation.active = true;
     state.dictation.maxTimer = setTimeout(() => {
-      void stopComposerDictation({ submit: true });
-    }, 30000);
+      void stopComposerDictation({ submit: true, autoSend: autoSendOnMax });
+    }, 55000);
     renderComposerDictationUi();
-    setComposerStatus("pending", "正在录音… 再次点击麦克风结束并识别");
+    if (!holdToken) {
+      setComposerStatus("pending", "正在录音… 再次点击麦克风结束并识别");
+    }
+    return true;
   } catch (error) {
+    state.dictation.pointerDown = false;
+    state.dictation.cancelArmed = false;
     teardownComposerDictationAudio();
     state.dictation.active = false;
     renderComposerDictationUi();
     setComposerStatus("error", `麦克风启动失败：${error?.message || "请检查权限"}`, { autoClearMs: 3200 });
+    return false;
   }
+}
+
+async function toggleComposerDictation() {
+  if (state.dictation.transcribing) return;
+  if (state.dictation.active) {
+    await stopComposerDictation({ submit: true, autoSend: false });
+    return;
+  }
+  await startComposerAudioCapture({ autoSendOnMax: false, holdToken: 0 });
 }
 
 function enterTycoon3DAndSummonSprite({ startVoice = false } = {}) {
@@ -10914,6 +11772,7 @@ function applyThemeMode(mode = loadThemeMode(), { persist = false } = {}) {
     btn.dataset.themeMode = safeMode;
     btn.dataset.theme = resolved;
   }
+  scheduleMermaidHydration(document, { forceThemeSync: true });
   return { mode: safeMode, resolved };
 }
 
@@ -11092,6 +11951,7 @@ function bindEvents() {
       state.telemetryPickerOpen = false;
     }
     renderAgentTelemetryBar();
+    if (nextOpen) void refreshExecutionStats();
   });
 
   const handleTelemetryBarClick = (e) => {
@@ -11220,6 +12080,20 @@ function bindEvents() {
   $("boardBatchBar")?.addEventListener("click", handleBatchBarClick);
 
   $("boardToggleBtn").addEventListener("click", () => openProjectBoardView());
+
+  $("chatTtsToggleBtn")?.addEventListener("click", () => {
+    toggleChatReplyTts();
+  });
+
+  if (state.chatTts.enabled) {
+    const unlockOnce = () => {
+      unlockChatReplySpeechAudio();
+      document.removeEventListener("pointerdown", unlockOnce, true);
+      document.removeEventListener("touchend", unlockOnce, true);
+    };
+    document.addEventListener("pointerdown", unlockOnce, { capture: true, passive: true });
+    document.addEventListener("touchend", unlockOnce, { capture: true, passive: true });
+  }
 
   $("voiceModeBtn").addEventListener("click", () => {
     enterTycoon3DAndSummonSprite({ startVoice: true });
@@ -11633,6 +12507,13 @@ function bindEvents() {
 
     if (e.target.closest("[data-tycoon-open-unassigned]")) {
       state.tycoonInspectorMode = state.tycoonInspectorMode === "unassigned" ? "" : "unassigned";
+      state.tycoonSelectedTopicId = "";
+      renderProjectBoard();
+      return;
+    }
+
+    if (e.target.closest("[data-tycoon-open-recent-done]")) {
+      state.tycoonInspectorMode = state.tycoonInspectorMode === "recent_done" ? "" : "recent_done";
       state.tycoonSelectedTopicId = "";
       renderProjectBoard();
       return;
@@ -12397,6 +13278,12 @@ function bindEvents() {
     void updateSlashCommandMenu();
   });
   $("promptInput").addEventListener("change", () => renderComposerControls());
+  $("promptInput").addEventListener("focus", () => {
+    minVisualViewportHeightWhileFocused = Math.round(window.visualViewport?.height || 0);
+  });
+  $("promptInput").addEventListener("blur", () => {
+    lastPromptBlurAt = Date.now();
+  });
   $("promptInput").addEventListener("compositionend", () => {
     renderComposerControls();
     void updateSlashCommandMenu();
@@ -12428,7 +13315,13 @@ function bindEvents() {
         return;
       }
     }
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    if (shouldSubmitPromptOnEnter({
+      key: e.key,
+      shiftKey: e.shiftKey,
+      isComposing: e.isComposing,
+      keyCode: e.keyCode,
+      isMobileTouch: isMobileTouchComposer(),
+    })) {
       e.preventDefault();
       void handleSend();
     }
@@ -12498,7 +13391,85 @@ function bindEvents() {
   });
 
   $("imageUploadBtn").addEventListener("click", () => $("imageFileInput").click());
-  $("composerVoiceBtn")?.addEventListener("click", () => void toggleComposerDictation());
+  $("composerHoldAttachBtn")?.addEventListener("click", () => $("imageFileInput").click());
+  $("composerVoiceBtn")?.addEventListener("click", () => {
+    if (state.chatTts.enabled) unlockChatReplySpeechAudio();
+    if (isMobileComposerViewport()) {
+      setComposerHoldMode(true);
+      return;
+    }
+    void toggleComposerDictation();
+  });
+  $("composerHoldKeyboardBtn")?.addEventListener("click", () => {
+    setComposerHoldMode(false, { focusInput: true });
+  });
+
+  const holdTalkBtn = $("composerHoldTalkBtn");
+  if (holdTalkBtn) {
+    holdTalkBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+    holdTalkBtn.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      if (state.dictation.transcribing || state.isSubmitting) return;
+      e.preventDefault();
+      if (state.chatTts.enabled) unlockChatReplySpeechAudio();
+      const token = ++state.dictation.holdToken;
+      state.dictation.pointerDown = true;
+      state.dictation.pointerId = e.pointerId;
+      state.dictation.startY = Number(e.clientY) || 0;
+      state.dictation.cancelArmed = false;
+      try { holdTalkBtn.setPointerCapture?.(e.pointerId); } catch {}
+      try { navigator.vibrate?.(12); } catch {}
+      renderComposerDictationUi();
+      void startComposerAudioCapture({ autoSendOnMax: true, holdToken: token });
+    });
+
+    holdTalkBtn.addEventListener("pointermove", (e) => {
+      if (!state.dictation.pointerDown || state.dictation.pointerId !== e.pointerId) return;
+      const dy = state.dictation.startY - (Number(e.clientY) || 0);
+      const nextCancel = dy > 48;
+      if (nextCancel !== state.dictation.cancelArmed) {
+        state.dictation.cancelArmed = nextCancel;
+        try { navigator.vibrate?.(10); } catch {}
+        renderComposerDictationUi();
+      }
+    });
+
+    const finishHoldGesture = (e, { forceCancel = false } = {}) => {
+      if (!state.dictation.pointerDown) return;
+      if (e?.pointerId !== undefined && state.dictation.pointerId !== null && e.pointerId !== state.dictation.pointerId) {
+        return;
+      }
+      const shouldCancel = Boolean(forceCancel || state.dictation.cancelArmed);
+      state.dictation.pointerDown = false;
+      state.dictation.pointerId = null;
+      if (!state.dictation.active) {
+        state.dictation.cancelArmed = false;
+        renderComposerDictationUi();
+        return;
+      }
+      void stopComposerDictation({ submit: !shouldCancel, autoSend: !shouldCancel });
+    };
+
+    holdTalkBtn.addEventListener("pointerup", (e) => finishHoldGesture(e, { forceCancel: false }));
+    holdTalkBtn.addEventListener("pointercancel", (e) => finishHoldGesture(e, { forceCancel: true }));
+    holdTalkBtn.addEventListener("lostpointercapture", (e) => {
+      if (state.dictation.pointerDown) finishHoldGesture(e, { forceCancel: false });
+    });
+
+    window.addEventListener("blur", () => {
+      if (state.dictation.pointerDown || (state.dictation.holdMode && state.dictation.active)) {
+        state.dictation.pointerDown = false;
+        void stopComposerDictation({ submit: false });
+      }
+    });
+    window.addEventListener("resize", () => {
+      if (!isMobileComposerViewport() && state.dictation.holdMode && !state.dictation.active && !state.dictation.transcribing) {
+        setComposerHoldMode(false);
+      } else {
+        renderComposerDictationUi();
+      }
+    });
+  }
   $("imageFileInput").addEventListener("change", (e) => {
     const files = [...(e.target.files || [])];
     e.target.value = "";
@@ -12649,35 +13620,62 @@ function bindEvents() {
     const stage = $("imagePreviewStage");
     const imgEl = $("imagePreviewImg");
     const zoomBtn = $("imagePreviewZoomBtn");
+    const zoomOutBtn = $("imagePreviewZoomOutBtn");
+    const zoomInBtn = $("imagePreviewZoomInBtn");
 
     const applyPreviewTransform = (dragging = false) => {
       const info = state.imagePreview;
-      if (!info || !imgEl) return;
-      const scale = Math.max(1, Math.min(6, info.scale || 1));
+      const svgHostEl = $("imagePreviewSvgHost");
+      const isSvg = Boolean(info?.svgMode);
+      const targetEl = isSvg ? svgHostEl : imgEl;
+      if (!info || !targetEl) return;
+      const minScale = isSvg ? 0.5 : 1;
+      const maxScale = isSvg ? 8 : 6;
+      const scale = Math.max(minScale, Math.min(maxScale, info.scale || 1));
       info.scale = scale;
-      if (scale <= 1.01) {
+
+      if (!isSvg && scale <= 1.01) {
         info.scale = 1;
         info.tx = 0;
         info.ty = 0;
-        imgEl.style.transform = "";
-        imgEl.classList.remove("is-zoomed", "is-dragging");
+        targetEl.style.transform = "";
+        targetEl.classList.remove("is-zoomed", "is-dragging");
         if (zoomBtn) zoomBtn.hidden = true;
+        if (zoomOutBtn) zoomOutBtn.hidden = true;
+        if (zoomInBtn) zoomInBtn.hidden = true;
         return;
       }
-      imgEl.classList.add("is-zoomed");
-      imgEl.classList.toggle("is-dragging", dragging);
-      imgEl.style.transform = `translate3d(${info.tx.toFixed(1)}px, ${info.ty.toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
+
+      const atRestSvg = isSvg
+        && Math.abs(scale - 1) <= 0.01
+        && Math.abs(info.tx || 0) < 0.5
+        && Math.abs(info.ty || 0) < 0.5;
+      if (atRestSvg) {
+        info.scale = 1;
+        info.tx = 0;
+        info.ty = 0;
+        targetEl.style.transform = "";
+        targetEl.classList.remove("is-zoomed", "is-dragging");
+      } else {
+        targetEl.classList.add("is-zoomed");
+        targetEl.classList.toggle("is-dragging", dragging);
+        targetEl.style.transform = `translate3d(${(info.tx || 0).toFixed(1)}px, ${(info.ty || 0).toFixed(1)}px, 0) scale(${scale.toFixed(3)})`;
+      }
+
       if (zoomBtn) {
         zoomBtn.hidden = false;
-        zoomBtn.textContent = `${Math.round(scale * 100)}%`;
+        zoomBtn.textContent = `${Math.round(info.scale * 100)}%`;
       }
+      if (zoomOutBtn) zoomOutBtn.hidden = !isSvg;
+      if (zoomInBtn) zoomInBtn.hidden = !isSvg;
     };
 
     const zoomAtPoint = (nextScaleRaw, clientX, clientY) => {
       const info = state.imagePreview;
       if (!info || !stage) return;
+      const isSvg = Boolean(info.svgMode);
       const oldScale = info.scale || 1;
-      const nextScale = Math.max(1, Math.min(6, nextScaleRaw));
+      const nextScale = Math.max(isSvg ? 0.5 : 1, Math.min(isSvg ? 8 : 6, nextScaleRaw));
       if (Math.abs(nextScale - oldScale) < 0.001) return;
       const rect = stage.getBoundingClientRect();
       const ox = clientX - (rect.left + rect.width / 2);
@@ -12689,6 +13687,13 @@ function bindEvents() {
       applyPreviewTransform(false);
     };
 
+    const zoomByStep = (factor) => {
+      const info = state.imagePreview;
+      if (!info || !stage) return;
+      const rect = stage.getBoundingClientRect();
+      zoomAtPoint((info.scale || 1) * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    };
+
     const resetPreviewZoom = () => {
       if (!state.imagePreview) return;
       state.imagePreview.scale = 1;
@@ -12698,6 +13703,8 @@ function bindEvents() {
     };
 
     zoomBtn?.addEventListener("click", resetPreviewZoom);
+    zoomInBtn?.addEventListener("click", () => zoomByStep(1.35));
+    zoomOutBtn?.addEventListener("click", () => zoomByStep(1 / 1.35));
     stage?.addEventListener("dblclick", (e) => {
       e.preventDefault();
       if ((state.imagePreview?.scale || 1) > 1.05) {
@@ -12707,13 +13714,13 @@ function bindEvents() {
       }
     });
 
-    // Trackpad two-finger pinch (`ctrlKey` + wheel) & two-finger pan when zoomed
+    // Trackpad two-finger pinch (`ctrlKey` + wheel), mouse wheel in SVG mode, & two-finger pan when zoomed
     stage?.addEventListener("wheel", (e) => {
       const info = state.imagePreview;
       if (!info) return;
-      if (e.ctrlKey || e.metaKey) {
+      if (e.ctrlKey || e.metaKey || info.svgMode) {
         e.preventDefault();
-        const factor = Math.exp(-e.deltaY * 0.01);
+        const factor = Math.exp(-e.deltaY * 0.008);
         zoomAtPoint((info.scale || 1) * factor, e.clientX, e.clientY);
       } else if ((info.scale || 1) > 1.01) {
         e.preventDefault();
@@ -12741,7 +13748,7 @@ function bindEvents() {
           startScale: info.scale || 1,
           lastMid: mid,
         };
-      } else if (e.touches.length === 1 && (info.scale || 1) > 1.01) {
+      } else if (e.touches.length === 1 && (info.svgMode || (info.scale || 1) > 1.01)) {
         panState = { x: e.touches[0].clientX, y: e.touches[0].clientY, tx: info.tx || 0, ty: info.ty || 0 };
       }
     }, { passive: false });
@@ -12774,7 +13781,7 @@ function bindEvents() {
 
     stage?.addEventListener("mousedown", (e) => {
       const info = state.imagePreview;
-      if (e.button !== 0 || !info || (info.scale || 1) <= 1.01) return;
+      if (e.button !== 0 || !info || (!info.svgMode && (info.scale || 1) <= 1.01)) return;
       e.preventDefault();
       panState = { x: e.clientX, y: e.clientY, tx: info.tx || 0, ty: info.ty || 0 };
     });
@@ -12795,10 +13802,20 @@ function bindEvents() {
     });
     imgModal.addEventListener("close", () => {
       resetPreviewZoom();
+      imgModal.classList.remove("is-svg-preview");
+      if (zoomBtn) zoomBtn.hidden = true;
+      if (zoomOutBtn) zoomOutBtn.hidden = true;
+      if (zoomInBtn) zoomInBtn.hidden = true;
       if (imgEl) {
         imgEl.onload = null;
         imgEl.onerror = null;
         imgEl.removeAttribute("src");
+        imgEl.hidden = false;
+      }
+      const currentSvgHost = $("imagePreviewSvgHost");
+      if (currentSvgHost) {
+        currentSvgHost.innerHTML = "";
+        currentSvgHost.hidden = true;
       }
       resetMobileViewportAfterModal();
     });
@@ -12851,6 +13868,12 @@ function bindEvents() {
   });
 
   $("composerStatus").addEventListener("click", (e) => {
+    if (e.target.closest("[data-unarchive-retry-trigger]") && state.lastUnarchiveContext?.threadId) {
+      const ctx = state.lastUnarchiveContext;
+      clearComposerStatus();
+      void unarchiveThreadAndOptionallyResend(ctx.threadId, { retrySend: true });
+      return;
+    }
     if (e.target.closest("[data-failover-trigger]") && state.lastFailoverContext?.altProfile) {
       const ctx = state.lastFailoverContext;
       clearComposerStatus();
@@ -12860,9 +13883,50 @@ function bindEvents() {
     if (e.target.closest("[data-dismiss-composer-status]")) clearComposerStatus();
   });
 
-  $("sendBtn").addEventListener("click", () => void handleSend());
+  $("composerArchivedBanner")?.addEventListener("click", (e) => {
+    if (e.target.closest("[data-unarchive-active-thread]") && state.activeThreadId) {
+      void unarchiveThreadAndOptionallyResend(state.activeThreadId, { retrySend: false });
+    }
+  });
+
+  const sendBtn = $("sendBtn");
+  sendBtn.addEventListener("pointerdown", () => {
+    const now = Date.now();
+    sendBtnPointerDown = {
+      at: now,
+      hadRecentCollapse: lastKeyboardCollapseAt > 0 && (now - lastKeyboardCollapseAt) >= 0 && (now - lastKeyboardCollapseAt) < 450,
+    };
+  });
+  sendBtn.addEventListener("pointercancel", () => {
+    sendBtnPointerDown = null;
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (!(e.target instanceof Element && e.target.closest("#sendBtn"))) {
+      sendBtnPointerDown = null;
+    }
+  }, { capture: true, passive: true });
+  sendBtn.addEventListener("click", (e) => {
+    const pointerInfo = sendBtnPointerDown;
+    sendBtnPointerDown = null;
+    if (!shouldAllowSendButtonClick({
+      isMobileTouch: isMobileTouchComposer(),
+      isEditingQueue: Boolean(activeEditingQueueItem()),
+      nowMs: Date.now(),
+      lastKeyboardCollapseAtMs: lastKeyboardCollapseAt,
+      lastPromptBlurAtMs: lastPromptBlurAt,
+      pointerDownAtMs: pointerInfo?.at || 0,
+      pointerDownHadRecentCollapse: Boolean(pointerInfo?.hadRecentCollapse),
+      clickDetail: Number(e.detail ?? 1),
+    })) {
+      e.preventDefault();
+      return;
+    }
+    void handleSend();
+  });
   $("messagesViewport")?.addEventListener("click", async (e) => {
-    const resumeBtn = e.target.closest("[data-resume-interrupted-turn]");
+    const targetEl = e.target instanceof Element ? e.target : e.target?.parentElement;
+    if (!targetEl) return;
+    const resumeBtn = targetEl.closest("[data-resume-interrupted-turn]");
     if (resumeBtn) {
       if (!state.activeThreadId || state.isSubmitting) return;
       if (isActiveThreadRunning()) {
@@ -12882,7 +13946,7 @@ function bindEvents() {
       }
       return;
     }
-    const forkBtn = e.target.closest("[data-fork-turn-index]");
+    const forkBtn = targetEl.closest("[data-fork-turn-index]");
     if (forkBtn) {
       if (!state.activeThreadId || forkBtn.disabled) return;
       const upToTurnIndex = Number(forkBtn.dataset.forkTurnIndex);
@@ -12898,14 +13962,21 @@ function bindEvents() {
       }
       return;
     }
-    const messageCopyBtn = e.target.closest("[data-copy-message]");
-    const copyBtn = messageCopyBtn || e.target.closest("[data-copy-code]");
-    if (!copyBtn) return;
+    if (handleMermaidInteraction(e)) return;
+    await handleCopyButtonClick(e);
+  });
+
+  const handleCopyButtonClick = async (e) => {
+    const targetEl = e.target instanceof Element ? e.target : e.target?.parentElement;
+    if (!targetEl) return false;
+    const messageCopyBtn = targetEl.closest("[data-copy-message]");
+    const copyBtn = messageCopyBtn || targetEl.closest("[data-copy-code]");
+    if (!copyBtn) return false;
     const block = copyBtn.closest(".md-code-block");
     const codeText = messageCopyBtn
       ? messageCopyBtn.dataset.copyMessage
       : (block?.querySelector("pre > code")?.textContent ?? "");
-    if (!codeText) return;
+    if (!codeText) return true;
     const copyLabel = messageCopyBtn?.querySelector("span") || copyBtn;
     const copied = await copyTextToClipboard(codeText);
     if (copied) {
@@ -12919,7 +13990,77 @@ function bindEvents() {
     } else if (messageCopyBtn) {
       showToastBanner("复制失败", { detail: "请重试或选中文字后复制", error: true });
     }
+    return true;
+  };
+
+  const handleMermaidInteraction = (e) => {
+    const targetEl = e.target instanceof Element ? e.target : e.target?.parentElement;
+    if (!targetEl) return false;
+    const toggleBtn = targetEl.closest("[data-mermaid-toggle]");
+    if (toggleBtn) {
+      const block = toggleBtn.closest("[data-mermaid-block]");
+      if (!block) return true;
+      const stageEl = block.querySelector("[data-mermaid-stage]");
+      const sourceEl = block.querySelector("pre.md-mermaid-source");
+      const nextShowSource = block.dataset.mermaidView !== "source";
+      block.dataset.mermaidView = nextShowSource ? "source" : "diagram";
+      if (stageEl) stageEl.hidden = nextShowSource;
+      if (sourceEl) sourceEl.hidden = !nextShowSource;
+      toggleBtn.textContent = nextShowSource ? "图表" : "源码";
+      toggleBtn.setAttribute("aria-pressed", nextShowSource ? "true" : "false");
+      if (!nextShowSource && block.dataset.mermaidState !== "rendered" && block.dataset.mermaidState !== "streaming") {
+        scheduleMermaidHydration(block);
+      }
+      return true;
+    }
+    const zoomBtn = targetEl.closest("[data-mermaid-zoom]");
+    if (zoomBtn) {
+      const block = zoomBtn.closest("[data-mermaid-block]");
+      if (!block) return true;
+      const caption = block.querySelector(".md-mermaid-lang")?.textContent?.trim() || "Mermaid 图表";
+      const svgEl = block.querySelector("[data-mermaid-stage] svg");
+      if (svgEl) {
+        openMermaidPreviewModal(svgEl.outerHTML, caption);
+      } else {
+        void hydrateMermaidBlocks(block)
+          .then(() => {
+            const nextSvg = block.querySelector("[data-mermaid-stage] svg");
+            if (nextSvg) openMermaidPreviewModal(nextSvg.outerHTML, caption);
+            else showToastBanner("暂无可放大的图表", { detail: "请稍候待图表渲染完成后再试" });
+          })
+          .catch(() => {
+            showToastBanner("图表放大预览失败", { detail: "请切换源码查看", error: true });
+          });
+      }
+      return true;
+    }
+    const stageSvg = targetEl.closest("[data-mermaid-stage] svg");
+    if (stageSvg && !targetEl.closest("a[href], button")) {
+      const selected = typeof window !== "undefined" ? window.getSelection?.()?.toString?.()?.trim() : "";
+      if (selected) return false;
+      const block = stageSvg.closest("[data-mermaid-block]");
+      const caption = block?.querySelector(".md-mermaid-lang")?.textContent?.trim() || "Mermaid 图表";
+      openMermaidPreviewModal(stageSvg.outerHTML, caption);
+      return true;
+    }
+    return false;
+  };
+
+  const handleMermaidDblClick = (e) => {
+    const targetEl = e.target instanceof Element ? e.target : e.target?.parentElement;
+    const svgEl = targetEl?.closest?.("[data-mermaid-stage] svg");
+    if (!svgEl || $("imagePreviewModal")?.open) return;
+    const block = svgEl.closest("[data-mermaid-block]");
+    const caption = block?.querySelector(".md-mermaid-lang")?.textContent?.trim() || "Mermaid 图表";
+    openMermaidPreviewModal(svgEl.outerHTML, caption);
+  };
+
+  $("messagesViewport")?.addEventListener("dblclick", handleMermaidDblClick);
+  $("filePreviewBody")?.addEventListener("click", async (e) => {
+    if (handleMermaidInteraction(e)) return;
+    await handleCopyButtonClick(e);
   });
+  $("filePreviewBody")?.addEventListener("dblclick", handleMermaidDblClick);
   $("loadOlderBtn").addEventListener("click", async () => {
     try {
       await loadOlderMessages();
@@ -13001,10 +14142,14 @@ function bindEvents() {
 
   $("archiveThreadBtn").addEventListener("click", async () => {
     if (!state.activeThreadId || !state.activeThread) return;
+    if (state.activeThread.archived) {
+      setTopbarMenuOpen(false);
+      await unarchiveThreadAndOptionallyResend(state.activeThreadId, { retrySend: false });
+      return;
+    }
     try {
-      const nextArchived = !state.activeThread.archived;
-      await apiPost("api/thread/archive", { threadId: state.activeThreadId, archived: nextArchived });
-      if (nextArchived && !state.showArchived) {
+      await apiPost("api/thread/archive", { threadId: state.activeThreadId, archived: true });
+      if (!state.showArchived) {
         await selectThread("");
       } else {
         await selectThread(state.activeThreadId, { focusScroll: false });
@@ -13539,6 +14684,9 @@ function bindEvents() {
     void openUpdateModal();
   });
   $("openUpdateModalBtn")?.addEventListener("click", () => void openUpdateModal());
+  window.addEventListener("ac:locale-change", () => {
+    if ($("updateModal")?.open) renderUpdateModal();
+  });
   $("openAutomationsModalBtn")?.addEventListener("click", () => void openAutomationsModal());
   $("sidebarAutomationsBtn")?.addEventListener("click", () => void openAutomationsModal());
   $("refreshAutomationsBtn")?.addEventListener("click", () => void refreshAutomations().catch(() => {}));
@@ -13638,31 +14786,62 @@ function bindEvents() {
   $("checkUpdateBtn")?.addEventListener("click", () => void triggerCheckUpdates());
   $("applyUpdateBtn")?.addEventListener("click", () => void triggerApplyUpdate());
   $("autoCheckUpdateToggle")?.addEventListener("change", (e) => {
+    updateSettingsTabBadge();
     void saveUpdateConfig({ autoCheckEnabled: Boolean(e.target.checked) });
   });
   $("autoUpdateToggle")?.addEventListener("change", (e) => {
+    updateSettingsTabBadge();
     void saveUpdateConfig({ autoUpdateEnabled: Boolean(e.target.checked) });
   });
   $("autoUpdateDesktopToggle")?.addEventListener("change", (e) => {
+    updateSettingsTabBadge();
     void saveUpdateConfig({ autoUpdateDesktopApp: Boolean(e.target.checked) });
   });
   $("agentAutoTitleToggle")?.addEventListener("change", async (e) => {
     const enabled = Boolean(e.target.checked);
+    updateSettingsTabBadge();
     try {
       await apiPost("api/settings", { agentAutoTitle: enabled });
       showToastBanner(enabled ? "已开启 AI 会话主动同步标题" : "已关闭 AI 会话主动同步标题");
     } catch (error) {
       e.target.checked = !enabled;
+      updateSettingsTabBadge();
       showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
     }
   });
   $("autoUpdateCliToggle")?.addEventListener("change", async (e) => {
     const enabled = Boolean(e.target.checked);
+    updateSettingsTabBadge();
     try {
       await apiPost("api/settings", { autoUpdateCli: enabled });
       showToastBanner(enabled ? "已开启闲时自动更新 CLI" : "已关闭闲时自动更新 CLI");
     } catch (error) {
       e.target.checked = !enabled;
+      updateSettingsTabBadge();
+      showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
+    }
+  });
+  $("agyAutoCompactToggle")?.addEventListener("change", async (e) => {
+    const enabled = Boolean(e.target.checked);
+    updateSettingsTabBadge();
+    const tokensEl = $("agyAutoCompactTokensSelect");
+    if (tokensEl) tokensEl.disabled = !enabled;
+    try {
+      await apiPost("api/settings", { agyAutoCompact: enabled });
+      showToastBanner(enabled ? "已开启 AGY 发送前自动压缩" : "已关闭 AGY 发送前自动压缩");
+    } catch (error) {
+      e.target.checked = !enabled;
+      if (tokensEl) tokensEl.disabled = enabled;
+      updateSettingsTabBadge();
+      showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
+    }
+  });
+  $("agyAutoCompactTokensSelect")?.addEventListener("change", async (e) => {
+    const tokens = Number(e.target.value) || 60000;
+    try {
+      const res = await apiPost("api/settings", { agyAutoCompactTokens: tokens });
+      showToastBanner(`AGY 自动压缩阈值已设为 ${Math.round((res?.settings?.agyAutoCompactTokens || tokens) / 1000)}K`);
+    } catch (error) {
       showToastBanner("保存设置失败", { detail: error?.message || "未知错误", error: true });
     }
   });
@@ -13699,7 +14878,31 @@ function bindEvents() {
     }
   });
   $("updateModal")?.addEventListener("click", (e) => {
-    if (e.target === $("updateModal")) $("updateModal").close();
+    if (e.target === $("updateModal")) {
+      $("updateModal").close();
+      return;
+    }
+    const tabBtn = e.target?.closest?.("[data-update-tab]");
+    if (tabBtn) {
+      const tab = tabBtn.getAttribute("data-update-tab");
+      if (tab) {
+        state.updateModalTab = tab;
+        syncUpdateModalTabs();
+      }
+      return;
+    }
+    const verBtn = e.target?.closest?.("[data-notes-version]");
+    if (verBtn) {
+      state.updateNotesVersionKey = verBtn.getAttribute("data-notes-version") || "";
+      state.updateNotesCategory = "all";
+      renderUpdateReleaseNotesBody();
+      return;
+    }
+    const catBtn = e.target?.closest?.("[data-notes-category]");
+    if (catBtn) {
+      state.updateNotesCategory = catBtn.getAttribute("data-notes-category") || "all";
+      renderUpdateReleaseNotesBody();
+    }
   });
 
   $("remoteModalBtn").addEventListener("click", () => void openRemoteModal());
@@ -13990,6 +15193,12 @@ function addComposerImageFile(file) {
   return task;
 }
 
+let lastVisualViewportHeight = 0;
+let minVisualViewportHeightWhileFocused = 0;
+let lastKeyboardCollapseAt = 0;
+let lastPromptBlurAt = 0;
+let sendBtnPointerDown = null;
+
 function syncVisualViewportLayout() {
   const vv = window.visualViewport;
   if (!vv) {
@@ -13998,9 +15207,24 @@ function syncVisualViewportLayout() {
     return;
   }
   if (vv.scale > 1.05) return;
-  document.documentElement.style.setProperty("--app-height", `${Math.round(vv.height)}px`);
+  const nextHeight = Math.round(vv.height);
+  const promptFocused = document.activeElement === $("promptInput");
+  if (promptFocused) {
+    if (minVisualViewportHeightWhileFocused === 0 || nextHeight < minVisualViewportHeightWhileFocused) {
+      minVisualViewportHeightWhileFocused = nextHeight;
+    }
+  }
+  const steppedUp = lastVisualViewportHeight > 0 && (nextHeight - lastVisualViewportHeight) >= 60;
+  const animatedCollapse = minVisualViewportHeightWhileFocused > 0
+    && nextHeight > lastVisualViewportHeight
+    && (nextHeight - minVisualViewportHeightWhileFocused) >= 80;
+  if (steppedUp || animatedCollapse) {
+    lastKeyboardCollapseAt = Date.now();
+  }
+  lastVisualViewportHeight = nextHeight;
+  document.documentElement.style.setProperty("--app-height", `${nextHeight}px`);
   document.documentElement.style.setProperty("--app-offset-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
-  if (document.activeElement === $("promptInput")) {
+  if (promptFocused) {
     scrollViewportIfFollowing();
   }
 }
@@ -14131,7 +15355,7 @@ async function checkUiVersionAndReloadIfStale() {
   const currentMeta = document.querySelector('meta[name="ac-ui-version"]')?.getAttribute("content") || "";
   if (!currentMeta) return;
   const draft = $("promptInput")?.value || "";
-  if (draft.trim()) return;
+  if (draft.trim() || state.editingQueueItem || state.images.length) return;
 
   uiVersionCheckInFlight = true;
   try {

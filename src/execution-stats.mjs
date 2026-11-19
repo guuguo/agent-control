@@ -9,6 +9,8 @@ const finite = (value) => value !== null && value !== undefined && Number.isFini
 const percentile = (values, p) => values.length ? [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * p) - 1)] : null;
 const average = (values) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
 
+const MAX_PLAUSIBLE_TOKENS_PER_SEC = 2000;
+
 export function computeRunTokensPerSec(row = {}, { useEstimated = false } = {}) {
   const durationMs = finite(row?.durationMs);
   if (durationMs === null || durationMs <= 0) return null;
@@ -21,7 +23,8 @@ export function computeRunTokensPerSec(row = {}, { useEstimated = false } = {}) 
     ? finite(row?.estimatedOutputTokens)
     : finite(row?.outputTokens);
   if (rawTokens === null || rawTokens <= 0) return null;
-  return rawTokens / (genMs / 1000);
+  const rate = rawTokens / (genMs / 1000);
+  return rate > 0 && rate <= MAX_PLAUSIBLE_TOKENS_PER_SEC ? rate : null;
 }
 
 function cleanEffort(value) {

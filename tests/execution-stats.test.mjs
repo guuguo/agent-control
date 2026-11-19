@@ -218,6 +218,20 @@ test("ExecutionStats computes medianTokensPerSec, handles short turns, and sorts
     }),
     null,
   );
+  // ACP history-replay burst (>2000 tok/s) is excluded as implausible
+  assert.equal(
+    computeRunTokensPerSec(
+      {
+        durationMs: 349,
+        firstResponseMs: 47,
+        outputTokens: null,
+        estimatedOutputTokens: 41092,
+        tokenSource: "estimated",
+      },
+      { useEstimated: true },
+    ),
+    null,
+  );
 
   const dir = await mkdtemp(join(tmpdir(), "ac-exec-speed-"));
   const filePath = join(dir, "execution-stats.json");
@@ -545,4 +559,39 @@ test("execution-stats UI builds human summary ignoring 1-turn outliers, renders 
   assert.equal(/\p{Extended_Pictographic}/u.test(html), false);
   assert.equal(html.includes("<script>"), false);
   assert.equal(html.includes("&lt;script&gt;"), true);
+
+  // Legacy backend payload omitting medianTokensPerSec falls back cleanly to meanOutputTokens/medianMs estimation
+  const legacySnapshot = {
+    days: 7,
+    startedAt: 1_794_400_000_000,
+    updatedAt: 1_795_000_000_000,
+    groups: [
+      {
+        provider: "codex",
+        model: "gpt-6.1-sol",
+        effort: "medium",
+        count: 46,
+        completed: 46,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 72_000,
+        p90Ms: 497_000,
+        firstResponseMs: 6_000,
+        meanInputTokens: 3_044_377,
+        meanOutputTokens: 3_492,
+        meanCachedTokens: 1_200_000,
+        meanReasoningTokens: 500,
+        meanToolCalls: 3,
+        reportedCount: 46,
+      },
+    ],
+    runs: [],
+  };
+  const legacySummary = buildExecutionSummary(legacySnapshot, { days: 7 });
+  assert.equal(legacySummary.fastestThroughput?.model, "gpt-6.1-sol");
+  const legacyHtml = renderExecutionStatsHtml(legacySnapshot, { days: 7, provider: "all" });
+  assert.equal(legacyHtml.includes("暂无速率"), false);
+  assert.match(legacyHtml, /≈53 tok\/s/);
 });

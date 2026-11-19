@@ -10,7 +10,7 @@ import {
   isScratchNoiseCwd,
 } from "../src/mission-overview-service.mjs";
 import { renderMissionOverviewHtml, renderTycoonHudHtml } from "../public/mission-overview.js";
-import { buildTycoonWorldLayout, computeStudioProgression } from "../public/tycoon-3d.js";
+import { buildTycoonWorldLayout, computeStudioProgression, resolveStationArchetype, resolveWorkstationActivityState } from "../public/tycoon-3d.js";
 
 async function seedGenericTestDomains(dataDir, topics = null) {
   const domains = [
@@ -410,6 +410,7 @@ test("MissionOverviewService Smart Dispatcher reuses clean idle workstation, spa
     assert.equal(exec2.dispatched[0].topicId, "translator-app");
     assert.equal(hub.startedThreads.length, 1);
     assert.equal(hub.startedThreads[0].cwd, "/Users/demo/workspace/translator-app");
+    assert.equal(hub.startedThreads[0].memoryTopic, "translator-app", "dispatch passes its topic so the hub adds the memory pointer");
     assert.equal(hub.metaStore.listThreads()[exec2.dispatched[0].threadId].topicId, "translator-app");
 
     const exec3 = await service.dispatchTask({
@@ -909,4 +910,201 @@ test("planAndApplyBlueprintEdit supports deterministic & AI-assisted natural-lan
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
   }
+});
+
+test("resolveWorkstationActivityState separates working, pending, and resting states without harvest masking", () => {
+  const multiWorkingHarvest = resolveWorkstationActivityState({
+    liveCount: 2,
+    pendingCount: 0,
+    readyToHarvest: true,
+  });
+  assert.deepEqual(multiWorkingHarvest, {
+    state: "working",
+    intensityTier: 2,
+    isWorking: true,
+    isPending: false,
+    isResting: false,
+    statusText: "火力全开 ×2",
+    showHarvest: true,
+  });
+
+  const overdriveWorking = resolveWorkstationActivityState({
+    liveCount: 3,
+    pendingCount: 0,
+    readyToHarvest: true,
+  });
+  assert.deepEqual(overdriveWorking, {
+    state: "working",
+    intensityTier: 3,
+    isWorking: true,
+    isPending: false,
+    isResting: false,
+    statusText: "超频爆气 ×3",
+    showHarvest: true,
+  });
+
+  const singleWorking = resolveWorkstationActivityState({
+    liveCount: 1,
+    pendingCount: 0,
+    readyToHarvest: false,
+  });
+  assert.deepEqual(singleWorking, {
+    state: "working",
+    intensityTier: 1,
+    isWorking: true,
+    isPending: false,
+    isResting: false,
+    statusText: "工作中",
+    showHarvest: false,
+  });
+
+  const pendingWithWork = resolveWorkstationActivityState({
+    liveCount: 1,
+    pendingCount: 1,
+    readyToHarvest: true,
+  });
+  assert.deepEqual(pendingWithWork, {
+    state: "pending",
+    intensityTier: 1,
+    isWorking: true,
+    isPending: true,
+    isResting: false,
+    statusText: "待拍板 1",
+    showHarvest: true,
+  });
+
+  const restingHarvest = resolveWorkstationActivityState({
+    liveCount: 0,
+    pendingCount: 0,
+    readyToHarvest: true,
+  });
+  assert.deepEqual(restingHarvest, {
+    state: "resting",
+    intensityTier: 0,
+    isWorking: false,
+    isPending: false,
+    isResting: true,
+    statusText: "休息中",
+    showHarvest: true,
+  });
+
+  const pureResting = resolveWorkstationActivityState({
+    liveCount: 0,
+    pendingCount: 0,
+    readyToHarvest: false,
+  });
+  assert.deepEqual(pureResting, {
+    state: "resting",
+    intensityTier: 0,
+    isWorking: false,
+    isPending: false,
+    isResting: true,
+    statusText: "休息中",
+    showHarvest: false,
+  });
+});
+
+test("each department gets a distinct station archetype and layout exposes it", () => {
+  assert.equal(resolveStationArchetype("indie-lab"), "code");
+  assert.equal(resolveStationArchetype("drama-studio"), "studio");
+  assert.equal(resolveStationArchetype("global-pub"), "broadcast");
+  assert.equal(resolveStationArchetype("bounty-guild"), "workshop");
+  assert.equal(resolveStationArchetype("unknown-room"), "code");
+
+  const layout = buildTycoonWorldLayout({
+    domains: [
+      { id: "indie-lab", topics: [{ id: "a", name: "A" }] },
+      { id: "drama-studio", topics: [{ id: "b", name: "B" }] },
+      { id: "global-pub", topics: [{ id: "c", name: "C" }] },
+      { id: "bounty-guild", topics: [{ id: "d", name: "D" }] },
+    ],
+  });
+  assert.deepEqual(
+    layout.workstations.map((w) => w.archetype),
+    ["code", "studio", "broadcast", "workshop"],
+  );
+});
+
+test("overview, tycoon HUD, and project board render recent unread completed indicators and compact 3m relative times", async () => {
+  const { renderMissionOverviewHtml, renderTycoonHudHtml } = await import("../public/mission-overview.js");
+  const { renderProjectBoardHtml } = await import("../public/project-board.js");
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const doneThread = {
+    id: "codex:default:recent-done-1",
+    provider: "codex",
+    profileId: "default",
+    cwd: "/Users/alice/dev/demo",
+    title: "已完成未读测试会话",
+    preview: "已完成校验",
+    updatedAt: nowSec - 180,
+    live: false,
+    pendingCount: 0,
+    queuedCount: 0,
+    stage: "研发",
+  };
+  const liveThread = {
+    id: "claude:default:live-1",
+    provider: "claude",
+    profileId: "default",
+    cwd: "/Users/alice/dev/demo",
+    title: "运行中测试会话",
+    updatedAt: nowSec - 30,
+    live: true,
+    pendingCount: 0,
+    queuedCount: 0,
+    stage: "研发",
+  };
+  const recentCompletedByThread = new Map([
+    [doneThread.id, { status: "completed", summary: "已完成校验", at: Date.now(), updatedAt: doneThread.updatedAt }],
+  ]);
+  const topic = {
+    id: "demo-topic",
+    domainId: "indie-lab",
+    name: "示例产线",
+    primaryCwd: "/Users/alice/dev/demo",
+    yieldType: "growth",
+    pipeline: { stageIndex: 2, stageLabel: "研发", readyToHarvest: false },
+    activeThreads: [doneThread, liveThread],
+    archivedThreads: [],
+  };
+  const overview = {
+    domains: [{ id: "indie-lab", name: "软件研发室", shortName: "研发室", topics: [topic] }],
+    topics: [topic],
+    bossFocus: [],
+    incubator: { eggs: [], chilled: [], totalActive: 0, chilledCount: 0 },
+    unassignedActive: [],
+    radar: { liveThreads: [liveThread], pendingThreads: [], totalActiveCount: 2, driftedCount: 0, harvestReadyCount: 0 },
+    meta: {},
+  };
+
+  const overviewHtml = renderMissionOverviewHtml(overview, { recentCompletedByThread });
+  assert.match(overviewHtml, /is-recent-done/);
+  assert.match(overviewHtml, /新完成/);
+  assert.match(overviewHtml, />3m</);
+  assert.doesNotMatch(overviewHtml, />3分钟前</);
+
+  const hudHtml = renderTycoonHudHtml(overview, {
+    inspectorMode: "recent_done",
+    recentCompletedByThread,
+  });
+  assert.match(hudHtml, /data-tycoon-open-recent-done="1"/);
+  assert.match(hudHtml, /最近完成未读 · 1 条/);
+  assert.match(hudHtml, /已完成未读测试会话/);
+  assert.match(hudHtml, />3m</);
+
+  const boardHtml = renderProjectBoardHtml({
+    groups: [{
+      cwd: "/Users/alice/dev/demo",
+      name: "demo",
+      pinned: true,
+      liveCount: 1,
+      pendingCount: 0,
+      threads: [doneThread, liveThread],
+    }],
+    recentCompletedByThread,
+  });
+  assert.match(boardHtml, /board-task-row[^"]*is-recent-done/);
+  assert.match(boardHtml, /board-status-pill is-recent-done/);
+  assert.match(boardHtml, />3m</);
 });

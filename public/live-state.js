@@ -87,6 +87,46 @@ export function humanizeLiveActivity(activity = {}, { isStreamingText = false } 
   };
 }
 
+export function summarizeToolUseActivity(toolUse = {}) {
+  const name = String(toolUse?.name || "").trim();
+  const input = (toolUse?.input && typeof toolUse.input === "object" && !Array.isArray(toolUse.input))
+    ? toolUse.input
+    : {};
+  const rawPath = String(input.file_path || input.path || input.target_file || "").trim();
+  const shortFile = rawPath ? extractShortFileFromPhase(rawPath) : "";
+  const lower = name.toLowerCase();
+
+  if (lower === "bash" || lower === "exec_command" || lower === "run_command" || lower === "shell") {
+    const cmdLine = String(input.command || input.cmd || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) || "";
+    const text = cmdLine.length > 80 ? `${cmdLine.slice(0, 80).trim()}…` : cmdLine;
+    return { phase: "正在执行命令…", text };
+  }
+  if (lower === "read" || lower === "read_file" || lower === "view_file" || lower === "list_dir") {
+    return { phase: shortFile ? `正在查阅 ${shortFile}…` : "正在查阅文件…", text: "" };
+  }
+  if (lower === "edit" || lower === "write" || lower === "multiedit" || lower === "edit_file" || lower === "write_file" || lower === "replace_file") {
+    return { phase: shortFile ? `正在修改 ${shortFile}…` : "正在修改代码…", text: "" };
+  }
+  if (lower === "grep" || lower === "glob" || lower === "search" || lower === "grep_search" || lower === "find_by_name") {
+    const query = String(input.pattern || input.query || "").trim();
+    const text = query.length > 80 ? `${query.slice(0, 80).trim()}…` : query;
+    return { phase: "正在检索代码…", text };
+  }
+  if (lower === "agent" || lower === "task") {
+    const desc = String(input.description || input.subagent_type || "").trim();
+    const text = desc.length > 80 ? `${desc.slice(0, 80).trim()}…` : desc;
+    return { phase: "正在运行子代理…", text };
+  }
+
+  return {
+    phase: name ? mapEnglishPhaseToChinese(name, shortFile) : "正在执行操作…",
+    text: "",
+  };
+}
+
 export function bindFollowIntent(target, { pause, settle }) {
   if (!target) return () => {};
   let lastUpwardScrollAt = 0;

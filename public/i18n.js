@@ -68,6 +68,33 @@ const DICTIONARY = {
   },
   "额度": { en: "Quota", "zh-TW": "額度", ja: "クォータ", ko: "할당량" },
   "通话": { en: "Voice", "zh-TW": "通話", ja: "音声", ko: "음성" },
+  "朗读": { en: "Read", "zh-TW": "朗讀", ja: "読上", ko: "읽기" },
+  "朗读播报": { en: "Read Aloud", "zh-TW": "朗讀播報", ja: "音声読み上げ", ko: "음성 읽어주기" },
+  "按住 说话": { en: "Hold to Talk", "zh-TW": "按住 說話", ja: "押して話す", ko: "길게 눌러 말하기" },
+  "松开 发送（上滑取消）": {
+    en: "Release to Send (Slide up to cancel)",
+    "zh-TW": "放開 傳送（上滑取消）",
+    ja: "離して送信（上スライドで取消）",
+    ko: "놓아서 전송 (위로 밀어 취소)",
+  },
+  "松开手指 取消发送": {
+    en: "Release to Cancel",
+    "zh-TW": "放開手指 取消傳送",
+    ja: "指を離してキャンセル",
+    ko: "손을 떼면 취소",
+  },
+  "正在识别并发送…": {
+    en: "Transcribing & sending…",
+    "zh-TW": "正在辨識並傳送…",
+    ja: "音声認識して送信中…",
+    ko: "음성 인식 및 전송 중…",
+  },
+  "切换回键盘输入": {
+    en: "Switch to keyboard",
+    "zh-TW": "切換回鍵盤輸入",
+    ja: "キーボード入力に戻す",
+    ko: "키보드 입력으로 전환",
+  },
   "中断": { en: "Stop", "zh-TW": "中斷", ja: "停止", ko: "중단" },
   "中断当前执行": { en: "Interrupt current run", "zh-TW": "中斷目前執行", ja: "現在の実行を中断", ko: "현재 실행 중단" },
   "更多操作": { en: "More actions", "zh-TW": "更多操作", ja: "その他の操作", ko: "더 보기" },
@@ -144,6 +171,8 @@ const DICTIONARY = {
   "更新桌面 App": { en: "Update Desktop App", "zh-TW": "更新桌面 App", ja: "デスクトップAppを更新", ko: "데스크톱 앱 업데이트" },
   "自动更新策略": { en: "Auto-Update Policy", "zh-TW": "自動更新策略", ja: "自動更新ポリシー", ko: "자동 업데이트 정책" },
   "定期自动检测新版本": { en: "Check for updates periodically", "zh-TW": "定期自動偵測新版本", ja: "新しいバージョンを定期確認", ko: "새 버전 주기적 자동 확인" },
+  "AGY 发送前自动压缩上下文": { en: "Auto-compact AGY context before sending", "zh-TW": "AGY 傳送前自動壓縮上下文", ja: "AGY 送信前にコンテキストを自動圧縮", ko: "AGY 전송 전 컨텍스트 자동 압축" },
+  "上下文较上次压缩增长超过阈值时，先执行 /compact 再发送消息，节省周额度": { en: "When context grows past the threshold since the last compaction, run /compact before sending to save weekly quota", "zh-TW": "上下文較上次壓縮增長超過閾值時，先執行 /compact 再傳送訊息，節省週額度", ja: "前回の圧縮からコンテキストが閾値を超えて増えたら、送信前に /compact を実行して週間クォータを節約", ko: "마지막 압축 이후 컨텍스트가 임계값을 넘으면 전송 전에 /compact 를 실행해 주간 할당량을 절약" },
   "闲时自动更新并重启服务": { en: "Auto-update & restart when idle", "zh-TW": "閒置時自動更新並重啟服務", ja: "アイドル時に自動更新・再起動", ko: "유휴 시 자동 업데이트 및 재시작" },
   "同步更新 macOS 桌面 App 壳子": { en: "Sync macOS Desktop App wrapper", "zh-TW": "同步更新 macOS 桌面 App 外殼", ja: "macOS デスクトップAppも同期更新", ko: "macOS 데스크톱 앱 래퍼 동기화" },
   "开车 / 免提语音通话": { en: "Hands-Free Voice Control", "zh-TW": "開車 / 免持語音通話", ja: "ハンズフリー音声コントロール", ko: "핸즈프리 음성 제어" },
@@ -327,6 +356,9 @@ export function setLocale(nextLocale, storage = typeof localStorage !== "undefin
     if (selectEl && selectEl.value !== normalized) {
       selectEl.value = normalized;
     }
+  }
+  if (typeof window !== "undefined" && typeof CustomEvent === "function") {
+    window.dispatchEvent(new CustomEvent("ac:locale-change", { detail: { locale: normalized } }));
   }
   return normalized;
 }

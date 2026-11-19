@@ -1,6 +1,6 @@
 import { iconSvg, providerIconSvg } from "./icons.js";
 import { escapeHtml } from "./markdown.js";
-import { formatRelativeTimeShort, projectBaseName } from "./project-board.js";
+import { formatCompactRelativeTime, projectBaseName } from "./project-board.js";
 import { LANDMARK_BADGE_LABELS, ROOM_BLUEPRINTS, computeStudioProgression } from "./tycoon-3d.js";
 
 const DEFAULT_STAGES = [
@@ -624,15 +624,57 @@ function renderSmartDispatcherBarHtml({
   `;
 }
 
+function isThreadRecentUnreadDone(thread, recentCompletedByThread = null) {
+  if (!thread?.id || thread.live || (thread.pendingCount || 0) > 0) return false;
+  return Boolean(recentCompletedByThread?.has?.(thread.id));
+}
+
+function collectRecentCompletedThreads(overview, recentCompletedByThread = null) {
+  if (!recentCompletedByThread?.size) return [];
+  const seen = new Set();
+  const list = [];
+  const domains = Array.isArray(overview?.domains) ? overview.domains : [];
+  for (const d of domains) {
+    for (const tp of d.topics || []) {
+      for (const t of tp.activeThreads || []) {
+        if (!t?.id || seen.has(t.id) || !isThreadRecentUnreadDone(t, recentCompletedByThread)) continue;
+        seen.add(t.id);
+        const entry = recentCompletedByThread.get(t.id);
+        list.push({
+          ...t,
+          ownerTopicName: tp.name,
+          ownerTopicId: tp.id,
+          recentAt: Number(entry?.at) || (Number(t.updatedAt) || 0) * 1000,
+        });
+      }
+    }
+  }
+  for (const t of overview?.unassignedActive || []) {
+    if (!t?.id || seen.has(t.id) || !isThreadRecentUnreadDone(t, recentCompletedByThread)) continue;
+    seen.add(t.id);
+    const entry = recentCompletedByThread.get(t.id);
+    list.push({
+      ...t,
+      ownerTopicName: "待归类",
+      ownerTopicId: "",
+      recentAt: Number(entry?.at) || (Number(t.updatedAt) || 0) * 1000,
+    });
+  }
+  list.sort((a, b) => (b.recentAt || 0) - (a.recentAt || 0));
+  return list;
+}
+
 function renderOverviewThreadRowHtml(thread, {
   activeThreadId = "",
   allTopics = [],
   assignOpenThreadId = "",
+  recentCompletedByThread = null,
 } = {}) {
   const isSelected = thread.id === activeThreadId;
   const stage = thread.stage || "研发";
   const stageCls = stageClassSuffix(stage);
-  const timeText = formatRelativeTimeShort(thread.updatedAt);
+  const timeText = formatCompactRelativeTime(thread.updatedAt);
+  const isRecentDone = isThreadRecentUnreadDone(thread, recentCompletedByThread);
   const sourceLabel = !thread.isSlice && thread.isCrossWorkspace && thread.cwd ? projectBaseName(thread.cwd) : "";
   const footprints = Array.isArray(thread.footprints) ? thread.footprints.slice(0, 2) : [];
 
@@ -651,6 +693,9 @@ function renderOverviewThreadRowHtml(thread, {
   }
   if (thread.live) {
     statusChips.push(`<span class="mo-status-pill is-live"><i class="mo-live-pulse"></i>运行中</span>`);
+  }
+  if (isRecentDone) {
+    statusChips.push(`<span class="mo-status-pill is-recent-done" title="刚刚完成，尚未查看"><i class="mo-recent-dot"></i>新完成</span>`);
   }
   if (thread.queuedCount > 0) {
     statusChips.push(`<span class="mo-status-pill is-queued">排队 ${thread.queuedCount}</span>`);
@@ -677,7 +722,7 @@ function renderOverviewThreadRowHtml(thread, {
 
   return `
     <div class="mo-thread-wrap">
-      <div class="mo-thread-row ${isSelected ? "is-selected" : ""}${thread.live ? " is-live" : ""}${thread.pendingCount > 0 ? " is-pending" : ""}${thread.isSlice ? " is-slice" : ""}">
+      <div class="mo-thread-row ${isSelected ? "is-selected" : ""}${thread.live ? " is-live" : ""}${thread.pendingCount > 0 ? " is-pending" : ""}${isRecentDone ? " is-recent-done" : ""}${thread.isSlice ? " is-slice" : ""}">
         <button
           type="button"
           class="mo-thread-open-btn"
@@ -883,6 +928,7 @@ function renderTopicCardHtml(topic, {
   expandedMetricsTopics = new Set(),
   searchText = "",
   inInspector = false,
+  recentCompletedByThread = null,
 } = {}) {
   const q = String(searchText || "").trim().toLowerCase();
   const matchesQuery = (t) => {
@@ -944,12 +990,14 @@ function renderTopicCardHtml(topic, {
     </div>
   ` : "";
 
+  const recentDoneCount = (topic.activeThreads || []).filter((t) => isThreadRecentUnreadDone(t, recentCompletedByThread)).length;
   const cardClasses = [
     "mo-topic-card",
     inInspector ? "is-in-inspector" : "",
     topic.pinned ? "is-pinned" : "",
     topic.liveCount > 0 ? "has-live" : "",
     topic.pendingCount > 0 ? "has-pending" : "",
+    recentDoneCount > 0 ? "has-recent-done" : "",
     pipeline.readyToHarvest ? "is-harvest-ready" : "",
   ].filter(Boolean).join(" ");
 
@@ -966,6 +1014,7 @@ function renderTopicCardHtml(topic, {
             <span class="mo-topic-count-badge">${topic.primaryActiveCount ?? visibleActive.length} 工位${topic.sliceCount > 0 ? ` +${topic.sliceCount}切片` : ""}</span>
             ${topic.liveCount > 0 ? `<span class="mo-status-pill is-live"><i class="mo-live-pulse"></i>${topic.liveCount} 运转</span>` : ""}
             ${topic.pendingCount > 0 ? `<span class="mo-status-pill is-pending">待拍板 ${topic.pendingCount}</span>` : ""}
+            ${recentDoneCount > 0 ? `<span class="mo-status-pill is-recent-done"><i class="mo-recent-dot"></i>新完成 ${recentDoneCount}</span>` : ""}
             ${gitBadgeHtml}
             ${ledgerBadgeHtml}
           </div>
@@ -1037,7 +1086,7 @@ function renderTopicCardHtml(topic, {
 
       ${shownActive.length ? `
         <div class="mo-thread-list">
-          ${shownActive.map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId })).join("")}
+          ${shownActive.map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
         </div>
       ` : `
         <div class="mo-topic-empty">近 7 天暂无活跃工位${visibleArchived.length ? `（另有 ${visibleArchived.length} 条历史归档）` : ""}</div>
@@ -1062,7 +1111,7 @@ function renderTopicCardHtml(topic, {
 
       ${isArchiveOpen && visibleArchived.length ? `
         <div class="mo-archive-list">
-          ${visibleArchived.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId })).join("")}
+          ${visibleArchived.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
         </div>
       ` : ""}
     </article>
@@ -1092,6 +1141,7 @@ export function renderMissionOverviewHtml(overview, {
   dispatchPreview = null,
   lastDispatchReceipt = null,
   dispatchAgent = {},
+  recentCompletedByThread = null,
 } = {}) {
   const domains = Array.isArray(overview?.domains) ? overview.domains : [];
   const allTopics = Array.isArray(overview?.topics) ? overview.topics : [];
@@ -1123,10 +1173,14 @@ export function renderMissionOverviewHtml(overview, {
         : unassignedActive)
     : [];
 
+  const recentDoneThreads = collectRecentCompletedThreads(overview, recentCompletedByThread);
+  const recentDoneIds = new Set(recentDoneThreads.map((t) => t.id));
   const radarItems = [
     ...(radar.pendingThreads || []).slice(0, 4).map((t) => ({ ...t, radarKind: "pending" })),
     ...(radar.liveThreads || []).filter((t) => !(t.pendingCount > 0)).slice(0, 5).map((t) => ({ ...t, radarKind: "live" })),
+    ...recentDoneThreads.filter((t) => !((radar.pendingThreads || []).some((p) => p.id === t.id))).slice(0, 4).map((t) => ({ ...t, radarKind: "recent_done" })),
   ];
+  void recentDoneIds;
 
   const domainNavChips = [
     { id: "all", name: "全厂产线", count: radar.totalActiveCount || 0, theme: "theme-all" },
@@ -1158,6 +1212,7 @@ export function renderMissionOverviewHtml(overview, {
         editingContextTopicId,
         expandedMetricsTopics,
         searchText,
+        recentCompletedByThread,
       }))
       .filter(Boolean)
       .join("");
@@ -1263,17 +1318,27 @@ export function renderMissionOverviewHtml(overview, {
           <div class="mo-radar-bar" aria-label="实时工位雷达">
             <div class="mo-radar-label">${iconSvg("bolt", { size: 13 })} 实时运转</div>
             <div class="mo-radar-pills">
-              ${radarItems.map((t) => `
+              ${radarItems.map((t) => {
+                const pillCls = t.radarKind === "pending"
+                  ? "is-pending"
+                  : (t.radarKind === "recent_done" ? "is-recent-done" : "is-live");
+                const tagText = t.radarKind === "pending"
+                  ? `待拍板 ${t.pendingCount}`
+                  : (t.radarKind === "recent_done" ? "新完成" : "运转中");
+                const timeBadge = formatCompactRelativeTime(t.updatedAt);
+                return `
                 <button
                   type="button"
-                  class="mo-radar-pill ${t.radarKind === "pending" ? "is-pending" : "is-live"}"
+                  class="mo-radar-pill ${pillCls}"
                   data-board-open-thread="${escapeHtml(t.id)}"
                   title="${escapeHtml(t.title || "新会话")}"
                 >
-                  <span class="mo-radar-tag">${t.radarKind === "pending" ? `待拍板 ${t.pendingCount}` : "运转中"}</span>
+                  <span class="mo-radar-tag">${tagText}</span>
                   <span class="mo-radar-text">${escapeHtml(t.title || "新会话")}</span>
+                  ${timeBadge ? `<span class="mo-radar-time">${escapeHtml(timeBadge)}</span>` : ""}
                 </button>
-              `).join("")}
+              `;
+              }).join("")}
             </div>
           </div>
         ` : ""}
@@ -1323,7 +1388,7 @@ export function renderMissionOverviewHtml(overview, {
           </div>
           <div class="mo-unassigned-card">
             <div class="mo-thread-list">
-              ${visibleUnassigned.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId })).join("")}
+              ${visibleUnassigned.slice(0, 12).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
             </div>
           </div>
         </section>
@@ -1360,6 +1425,7 @@ export function renderTycoonHudHtml(overview, {
   dispatchPreview = null,
   lastDispatchReceipt = null,
   dispatchAgent = {},
+  recentCompletedByThread = null,
 } = {}) {
   const domains = Array.isArray(overview?.domains) ? overview.domains : [];
   const allTopics = Array.isArray(overview?.topics) ? overview.topics : [];
@@ -1374,6 +1440,7 @@ export function renderTycoonHudHtml(overview, {
 
   const allFlatTopics = domains.flatMap((d) => d.topics || []);
   const unassignedActive = Array.isArray(overview?.unassignedActive) ? overview.unassignedActive : [];
+  const recentDoneThreads = collectRecentCompletedThreads(overview, recentCompletedByThread);
   const liveTotal = (radar.liveThreads || []).length;
   const pendingTotal = (radar.pendingThreads || []).reduce((s, t) => s + (t.pendingCount || 1), 0);
   const harvestReadyTotal = Number(radar.harvestReadyCount) || allFlatTopics.filter((tp) => tp.pipeline?.readyToHarvest).length;
@@ -1428,7 +1495,24 @@ export function renderTycoonHudHtml(overview, {
     : (isRouteCustom ? "自定义路由" : "自动路由");
 
   let inspectorDrawerHtml = "";
-  if (inspectorMode === "unassigned") {
+  if (inspectorMode === "recent_done") {
+    inspectorDrawerHtml = `
+      <aside class="tycoon-hud-inspector" aria-label="最近完成未读会话">
+        <div class="tycoon-drawer-bar">
+          <span>${iconSvg("check", { size: 13 })} 最近完成未读 · ${recentDoneThreads.length} 条</span>
+          <button type="button" class="tycoon-drawer-close" data-tycoon-close-inspector="1" title="关闭面板">${iconSvg("close", { size: 13 })}</button>
+        </div>
+        <div class="tycoon-inspector-scroll">
+          <p class="tycoon-drawer-hint">这些会话刚完成一轮执行且尚未查看，点击标题直接打开并标记已读。</p>
+          ${recentDoneThreads.length ? `
+            <div class="mo-thread-list">
+              ${recentDoneThreads.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
+            </div>
+          ` : `<div class="mo-panel-empty">暂无最近完成未读会话</div>`}
+        </div>
+      </aside>
+    `;
+  } else if (inspectorMode === "unassigned") {
     inspectorDrawerHtml = `
       <aside class="tycoon-hud-inspector" aria-label="待归类会话">
         <div class="tycoon-drawer-bar">
@@ -1439,7 +1523,7 @@ export function renderTycoonHudHtml(overview, {
           <p class="tycoon-drawer-hint">点右侧文件夹图标归入产线，或点标题直接进入对话。</p>
           ${unassignedActive.length ? `
             <div class="mo-thread-list">
-              ${unassignedActive.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId })).join("")}
+              ${unassignedActive.slice(0, 40).map((t) => renderOverviewThreadRowHtml(t, { activeThreadId, allTopics, assignOpenThreadId, recentCompletedByThread })).join("")}
             </div>
           ` : `<div class="mo-panel-empty">全部会话都已归类</div>`}
         </div>
@@ -1503,6 +1587,7 @@ export function renderTycoonHudHtml(overview, {
             expandedMetricsTopics,
             searchText: "",
             inInspector: true,
+            recentCompletedByThread,
           })}
         </div>
       </aside>
@@ -1541,6 +1626,13 @@ export function renderTycoonHudHtml(overview, {
             <span>灵光蛋</span>
             <strong>${eggCount}</strong>
           </button>
+          ${recentDoneThreads.length ? `
+            <button type="button" class="tycoon-res-pill is-recent-done ${inspectorMode === "recent_done" ? "is-active" : ""}" data-tycoon-open-recent-done="1" title="最近完成但尚未查看的会话，点开逐条查看">
+              ${iconSvg("check", { size: 13 })}
+              <span>新完成</span>
+              <strong>${recentDoneThreads.length}</strong>
+            </button>
+          ` : ""}
           ${unassignedActive.length ? `
             <button type="button" class="tycoon-res-pill is-unassigned ${inspectorMode === "unassigned" ? "is-active" : ""}" data-tycoon-open-unassigned="1" title="没归到任何产线的近期会话，点开逐条归类">
               ${iconSvg("folder", { size: 13 })}
@@ -1609,12 +1701,16 @@ export function renderTycoonHudHtml(overview, {
           <div class="tycoon-search-popup">
             <span class="tycoon-search-pop-label">3D 光柱已锁定「${escapeHtml(searchText)}」：</span>
             <div class="tycoon-search-pop-pills">
-              ${searchMatchedThreads.map((mt) => `
+              ${searchMatchedThreads.map((mt) => {
+                const timeBadge = formatCompactRelativeTime(mt.updatedAt);
+                return `
                 <button type="button" class="mo-radar-pill is-live" data-board-open-thread="${escapeHtml(mt.id)}">
                   <span class="mo-radar-tag">${escapeHtml(mt.ownerTopicName)}</span>
                   <span class="mo-radar-text">${escapeHtml(mt.title)}</span>
+                  ${timeBadge ? `<span class="mo-radar-time">${escapeHtml(timeBadge)}</span>` : ""}
                 </button>
-              `).join("")}
+              `;
+              }).join("")}
             </div>
           </div>
         ` : ""}

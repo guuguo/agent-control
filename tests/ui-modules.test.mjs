@@ -27,7 +27,13 @@ import {
 } from "../src/voice-call-service.mjs";
 import { createHotExtensionServer, mergeUpstreamLiveThreadState } from "../src/hot-extension.mjs";
 import { apiGet, apiUrl, clearApiEtagCache, isHostOfflineError } from "../public/api-client.js";
-import { extractGoalDirective, renderQueuedTurnsPanelHtml, resolveComposerSubmission } from "../public/composer-mode.js";
+import {
+  extractGoalDirective,
+  renderQueuedTurnsPanelHtml,
+  resolveComposerSubmission,
+  shouldAllowSendButtonClick,
+  shouldSubmitPromptOnEnter,
+} from "../public/composer-mode.js";
 import { bindFollowIntent } from "../public/live-state.js";
 import {
   extractSelectDescriptor,
@@ -79,7 +85,7 @@ import {
   summarizeTelemetryMobileBadge,
   UI_PERMISSION_MODES,
 } from "../public/instance-switcher.js";
-import { humanizeLiveActivity, mergeLiveActivity } from "../public/live-state.js";
+import { humanizeLiveActivity, mergeLiveActivity, summarizeToolUseActivity } from "../public/live-state.js";
 import {
   clearFailedThreadImages,
   dedupeAdjacentTurns,
@@ -116,14 +122,25 @@ import {
 } from "../public/project-board.js";
 import { renderServerRequestCard } from "../public/server-request-ui.js";
 import {
+  buildReleaseVersionTabs,
+  renderReleaseHeadline,
+  renderReleaseNotesCardHtml,
+  resolveReleaseNotesBucket,
+} from "../public/release-notes.js";
+import {
   buildLocalProgressBriefing,
   buildVoiceLiveProgressItems,
   createVadTurnDetector,
   downsampleFloat32ToInt16,
   encodePcm16SamplesToWav,
+  extractFinalAssistantMessageFromTurns,
+  extractReplyClosingSummaryForSpeech,
+  loadChatReplyTtsPref,
   pcm16Base64ToWavBytes,
   renderVoiceCallTranscriptHtml,
   renderVoiceLiveProgressHtml,
+  resolveHoldTalkGestureState,
+  saveChatReplyTtsPref,
   stripMarkdownForSpeech,
   uint8ArrayToBase64,
 } from "../public/voice-copilot.js";
@@ -724,6 +741,22 @@ test("UI noise reduction collapses process items, filters legacy agy-gen echoes,
     humanizeLiveActivity({ phase: "read_file", text: "in_progress" }, { isStreamingText: true }),
     { phase: "正在生成回复…", detail: "" },
   );
+  assert.deepEqual(
+    summarizeToolUseActivity({ name: "Bash", input: { command: "npm test\necho done" } }),
+    { phase: "正在执行命令…", text: "npm test" },
+  );
+  assert.deepEqual(
+    summarizeToolUseActivity({ name: "Read", input: { file_path: "/tmp/demo/public/app.js" } }),
+    { phase: "正在查阅 app.js…", text: "" },
+  );
+  assert.deepEqual(
+    summarizeToolUseActivity({ name: "Edit", input: { file_path: "/tmp/demo/src/server.mjs" } }),
+    { phase: "正在修改 server.mjs…", text: "" },
+  );
+  assert.deepEqual(
+    summarizeToolUseActivity({ name: "Grep", input: { pattern: "tool_use" } }),
+    { phase: "正在检索代码…", text: "tool_use" },
+  );
 
   // Voice briefing skips legacy agy-gen-* raw tool output.
   const briefing = buildLocalProgressBriefing({
@@ -1303,6 +1336,7 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "composerGoalBtn",
     "composerConfigBtn",
     "composerConfigPopover",
+    "composerArchivedBanner",
     "runningSubmitMode",
     "sendBtn",
     "remoteActiveDot",
@@ -1322,16 +1356,36 @@ test("compact mobile visual helpers and index.html preserve all existing IDs and
     "openUpdateModalBtn",
     "updateModal",
     "updateStatePill",
+    "updateTabNotesBadge",
+    "updateTabSettingsBadge",
+    "updateTabCliBadge",
+    "updateReleaseNotesSection",
+    "updateReleaseNotesBody",
     "updateDesktopInfo",
     "autoCheckUpdateToggle",
     "autoUpdateToggle",
     "autoUpdateDesktopToggle",
+    "agentAutoTitleToggle",
+    "autoUpdateCliToggle",
+    "agyAutoCompactToggle",
+    "agyAutoCompactTokensSelect",
+    "cliUpdateCard",
+    "checkCliUpdatesBtn",
+    "cliVersionsList",
+    "updatePendingSection",
+    "updatePendingDetails",
+    "restartServiceBtn",
     "applyDesktopUpdateBtn",
     "checkUpdateBtn",
     "applyUpdateBtn",
   ]) {
     assert.match(html, new RegExp(`id="${requiredId}"`), `missing required DOM id: ${requiredId}`);
   }
+  assert.doesNotMatch(
+    html,
+    /<label\b[^>]*>(?:(?!<\/label>)[\s\S])*?<select\s+id="agyAutoCompactTokensSelect"/,
+    "agyAutoCompactTokensSelect must not be nested inside a checkbox <label>",
+  );
 
   assert.equal(normalizeProjectCwd("C:\\dev\\agent-control\\"), "C:\\dev\\agent-control");
   assert.equal(normalizeProjectCwd("C:/"), "C:\\");
@@ -3736,7 +3790,8 @@ test("telemetry toggle stops propagation across re-render and places desktop com
   assert.match(indexHtml, /id="boardToggleBtn"[^>]*class="[^"]*sidebar-view-btn/);
   assert.match(appCss, /\.local-apps-strip\s*\{[^}]*flex-direction:\s*row;/);
   assert.match(appCss, /\.local-app-open-mark\s*\{/);
-  const localAppsStripCode = appJs.match(/const strip = \$\("localAppsStrip"\);[\s\S]*?const menuBox = \$\("topbarLocalAppsBox"\);/)?.[0] || "";
+  assert.doesNotMatch(indexHtml, /id="topbarLocalAppsBox"/);
+  const localAppsStripCode = appJs.match(/const strip = \$\("localAppsStrip"\);[\s\S]*?const remoteSec = \$\("remoteLocalAppsSection"\);/)?.[0] || "";
   assert.ok(localAppsStripCode);
   assert.doesNotMatch(localAppsStripCode, /data-icon="film"/);
   assert.match(localAppsStripCode, /class="local-app-open-mark"/);
@@ -4003,6 +4058,27 @@ test("renderTurnHtml and renderMarkdown format Codex image tags, Files mentioned
   assert.match(replyTurnHtml, /class="user-question-reply"/);
   assert.match(replyTurnHtml, /这张截图是哪天 09:28 左右报错的？/);
   assert.match(replyTurnHtml, /今天/);
+
+  const claudeCompactHtml = renderTurnHtml({
+    id: "turn-claude-compact",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        id: "u-compact",
+        content: [
+          {
+            type: "text",
+            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n<system-reminder>\n<tools-used-before-summary>Bash, Read, Write</tools-used-before-summary>\n</system-reminder>\nSummary:\n1. Primary Request and Intent:\n   - Task A completed.",
+          },
+        ],
+      },
+    ],
+  }, { agentLabel: "Claude Code", threadId: "claude:hotmail:c-compact" });
+
+  assert.doesNotMatch(claudeCompactHtml, /msg-user|system-reminder|tools-used-before-summary/);
+  assert.match(claudeCompactHtml, /上下文已压缩/);
+  assert.match(claudeCompactHtml, /1\. Primary Request and Intent:/);
 
   const filesTurnHtml = renderTurnHtml({
     id: "turn-codex-files",
@@ -5384,10 +5460,535 @@ test("pasted file URIs and absolute paths format as markdown file links and rend
 
 test("compactModelBadgeLabel automatically formats future Orchestrator and Gemini codenames without hardcoding", async () => {
   const { compactModelBadgeLabel } = await import("../public/instance-switcher.js");
+  const { formatTurnModelBadge } = await import("../public/markdown.js");
   assert.equal(compactModelBadgeLabel("Orchestrator (Neon)"), "Neon");
   assert.equal(compactModelBadgeLabel("Orchestrator (Cobalt)"), "Cobalt");
   assert.equal(compactModelBadgeLabel("Orchestrator (Argon)"), "Argon");
+  assert.equal(compactModelBadgeLabel("gemini-pro-orchestrator-neon"), "Neon");
+  assert.equal(compactModelBadgeLabel("gemini-pro-orchestrator-argon"), "Argon");
+  assert.equal(compactModelBadgeLabel("gemini-pro-orchestrator-cobalt"), "Cobalt");
   assert.equal(compactModelBadgeLabel("Gemini 4.5 Plasma (High)"), "Plasma H");
   assert.equal(compactModelBadgeLabel("gemini-4-neon-xhigh"), "Neon XH");
+  assert.equal(compactModelBadgeLabel("gemini-3.8-flash"), "3.8 Flash");
+  assert.equal(compactModelBadgeLabel("gemini-3.8-flash-low"), "3.8 Flash L");
+  assert.equal(compactModelBadgeLabel("gpt-6.2-astra"), "GPT-6.2-ASTRA");
+  assert.equal(compactModelBadgeLabel("gpt-6.1-terra"), "GPT-6.1-TERRA");
   assert.equal(compactModelBadgeLabel("gpt-6.3-nova"), "GPT-6.3-NOVA");
+  assert.deepEqual(
+    formatTurnModelBadge({ model: "gemini-pro-orchestrator-neon" }),
+    { label: "Neon", title: "gemini-pro-orchestrator-neon" },
+  );
+  assert.deepEqual(
+    formatTurnModelBadge({ models: ["gemini-pro-orchestrator-neon", "gemini-4-hydrogen-high"] }),
+    { label: "Neon → Hydrogen H", title: "gemini-pro-orchestrator-neon → gemini-4-hydrogen-high" },
+  );
+  assert.deepEqual(
+    formatTurnModelBadge({ model: "gemini-3.8-flash-low" }),
+    { label: "3.8 Flash L", title: "gemini-3.8-flash-low" },
+  );
+  assert.deepEqual(
+    formatTurnModelBadge({ model: "gpt-6.2-astra", effort: "high" }),
+    { label: "GPT-6.2-ASTRA · H", title: "gpt-6.2-astra (high)" },
+  );
+});
+
+test("renderMarkdown and mermaid-renderer render Mermaid diagrams with streaming safety, caching, theme sync, and error fallback", async () => {
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const { renderMarkdown } = await import("../public/markdown.js");
+  const {
+    detectMermaidDiagramLabel,
+    buildMermaidInitConfig,
+    extractMermaidErrorMessage,
+    hydrateMermaidBlocks,
+    prepareMermaidSvgForPreview,
+    resetMermaidRenderCache,
+  } = await import("../public/mermaid-renderer.js");
+
+  assert.equal(existsSync(resolve(process.cwd(), "public/vendor/mermaid.min.js")), true);
+  const htmlSnapshot = readFileSync(resolve(process.cwd(), "public/index.html"), "utf8");
+  assert.match(htmlSnapshot, /id="imagePreviewSvgHost"/);
+  assert.match(htmlSnapshot, /id="imagePreviewZoomOutBtn"/);
+  assert.match(htmlSnapshot, /id="imagePreviewZoomInBtn"/);
+
+  const rawMermaidSvg = '<svg id="ac-mermaid-1" width="100%" style="max-width: 1554px;" viewBox="0 0 1554 1007"><style>#ac-mermaid-1 .node{fill:#111;}</style><defs><marker id="ac-mermaid-1_point" /></defs><path marker-end="url(#ac-mermaid-1_point)" /></svg>';
+  const preview = prepareMermaidSvgForPreview(rawMermaidSvg, { previewId: "ac-mermaid-preview-99" });
+  assert.equal(preview.viewWidth, 1554);
+  assert.equal(preview.viewHeight, 1007);
+  assert.equal(preview.previewId, "ac-mermaid-preview-99");
+  assert.doesNotMatch(preview.svg, /ac-mermaid-1(?![0-9])/);
+  assert.match(preview.svg, /id="ac-mermaid-preview-99"/);
+  assert.match(preview.svg, /#ac-mermaid-preview-99 \.node/);
+  assert.match(preview.svg, /id="ac-mermaid-preview-99_point"/);
+  assert.match(preview.svg, /url\(#ac-mermaid-preview-99_point\)/);
+  assert.match(preview.svg, /width="1554"\s+height="1007"/);
+  assert.match(preview.svg, /aspect-ratio:\s*1554 \/ 1007/);
+  assert.doesNotMatch(preview.svg, /max-width:\s*1554px/);
+
+  // Diagram type labels & config
+  assert.equal(detectMermaidDiagramLabel("%% comment\nflowchart TD\n  A --> B"), "流程图");
+  assert.equal(detectMermaidDiagramLabel("sequenceDiagram\n  A->>B: hi"), "时序图");
+  assert.equal(buildMermaidInitConfig("dark").securityLevel, "strict");
+  assert.equal(buildMermaidInitConfig("dark").suppressErrorRendering, true);
+  assert.equal(buildMermaidInitConfig("light").theme, "default");
+  assert.equal(buildMermaidInitConfig("dark").theme, "dark");
+  assert.equal(extractMermaidErrorMessage(new Error("Parse error\non line 2")), "Parse error on line 2");
+
+  // Closed mermaid block renders structured placeholder + escaped source + zero emojis
+  const closedHtml = renderMarkdown("```mermaid\nflowchart TD\n  A[\"<script>xss</script>\"] --> B\n```");
+  assert.match(closedHtml, /class="md-code-block md-mermaid-block"/);
+  assert.match(closedHtml, /data-mermaid-state="pending"/);
+  assert.match(closedHtml, /data-mermaid-view="diagram"/);
+  assert.match(closedHtml, />Mermaid · 流程图</);
+  assert.match(closedHtml, /data-mermaid-toggle="1"/);
+  assert.match(closedHtml, /data-mermaid-zoom="1" hidden/);
+  assert.match(closedHtml, /<pre class="md-pre md-mermaid-source" data-lang="mermaid" hidden>/);
+  assert.equal(closedHtml.includes("<script>"), false);
+  assert.equal(closedHtml.includes("&lt;script&gt;"), true);
+  assert.equal(/\p{Extended_Pictographic}/u.test(closedHtml), false);
+
+  // Streaming (unclosed) mermaid block stays in source view without rendering broken partial SVG
+  const streamingHtml = renderMarkdown("```mermaid\nflowchart TD\n  A --> B");
+  assert.match(streamingHtml, /data-mermaid-state="streaming"/);
+  assert.match(streamingHtml, /data-mermaid-view="source"/);
+  assert.match(streamingHtml, /<div class="md-mermaid-stage" data-mermaid-stage hidden>/);
+
+  // Hydration with mock mermaidRuntime + lightweight DOM stub
+  const makeBlock = (codeText, { state = "pending", view = "diagram" } = {}) => {
+    const stageEl = { innerHTML: "", hidden: view === "source" };
+    const sourceEl = { hidden: view !== "source" };
+    const errorEl = { hidden: true, textContent: "" };
+    const toggleBtn = { hidden: state === "streaming", disabled: false, textContent: view === "source" ? "图表" : "源码", attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+    const zoomBtn = { hidden: true };
+    const codeEl = { textContent: codeText };
+    return {
+      isConnected: true,
+      dataset: { mermaidState: state, mermaidView: view, mermaidTheme: "" },
+      _stage: stageEl,
+      _source: sourceEl,
+      _error: errorEl,
+      _toggle: toggleBtn,
+      _zoom: zoomBtn,
+      querySelector(sel) {
+        if (sel === "[data-mermaid-stage]") return stageEl;
+        if (sel === "pre.md-mermaid-source") return sourceEl;
+        if (sel === "[data-mermaid-error]") return errorEl;
+        if (sel === "[data-mermaid-toggle]") return toggleBtn;
+        if (sel === "[data-mermaid-zoom]") return zoomBtn;
+        if (sel === "pre > code") return codeEl;
+        return null;
+      },
+    };
+  };
+
+  resetMermaidRenderCache();
+  let initCalls = [];
+  let renderCalls = 0;
+  const mockRuntime = {
+    initialize(cfg) { initCalls.push(cfg.theme); },
+    async render(id, src) {
+      renderCalls += 1;
+      if (src.includes("BROKEN")) throw new Error("Syntax error in graph");
+      return { svg: `<svg id="${id}" data-theme="${initCalls[initCalls.length - 1]}"><g></g></svg>` };
+    },
+  };
+
+  const bGood = makeBlock("flowchart TD\n  A --> B");
+  const bStream = makeBlock("flowchart TD\n  A -->", { state: "streaming", view: "source" });
+  const bBad = makeBlock("flowchart TD\n  BROKEN");
+  const stubRoot = { querySelectorAll: () => [bGood, bStream, bBad] };
+
+  const sum1 = await hydrateMermaidBlocks(stubRoot, { mermaidRuntime: mockRuntime, theme: "dark" });
+  assert.equal(sum1.rendered, 1);
+  assert.equal(sum1.skipped, 1);
+  assert.equal(sum1.errors, 1);
+  assert.equal(renderCalls, 2);
+  assert.equal(bGood.dataset.mermaidState, "rendered");
+  assert.equal(bGood.dataset.mermaidTheme, "dark");
+  assert.match(bGood._stage.innerHTML, /<svg/);
+  assert.equal(bGood._stage.hidden, false);
+  assert.equal(bGood._source.hidden, true);
+  assert.equal(bGood._zoom.hidden, false);
+
+  assert.equal(bBad.dataset.mermaidState, "error");
+  assert.equal(bBad.dataset.mermaidView, "source");
+  assert.equal(bBad._source.hidden, false);
+  assert.equal(bBad._error.hidden, false);
+  assert.match(bBad._error.textContent, /Syntax error in graph/);
+
+  // Cache hit when rendering another block with identical source & theme
+  const bGoodDup = makeBlock("flowchart TD\n  A --> B");
+  const sumCache = await hydrateMermaidBlocks({ querySelectorAll: () => [bGoodDup] }, { mermaidRuntime: mockRuntime, theme: "dark" });
+  assert.equal(sumCache.cached, 1);
+  assert.equal(sumCache.rendered, 0);
+  assert.equal(renderCalls, 2);
+
+  // Theme switch triggers re-render cleanly
+  const sumLight = await hydrateMermaidBlocks({ querySelectorAll: () => [bGood] }, { forceThemeSync: true, mermaidRuntime: mockRuntime, theme: "light" });
+  assert.equal(sumLight.rendered, 1);
+  assert.equal(bGood.dataset.mermaidTheme, "light");
+  assert.match(bGood._stage.innerHTML, /data-theme="default"/);
+});
+
+test("release-notes UI renders multi-dimensional version tabs, category filters, and concise copy without emojis", async () => {
+  const esc = (s) => String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+
+  assert.equal(renderReleaseHeadline({ version: "0.2.3", title: "v0.2.3 图表直出与统计升级", summary: "一句话" }), "图表直出与统计升级");
+  assert.equal(renderReleaseHeadline({ title: "", summary: "只有总结" }), "只有总结");
+
+  const multiSnap = {
+    hasUpdate: true,
+    remoteVersion: "0.2.4",
+    releaseNotes: {
+      pendingSource: "release_notes",
+      pending: [{
+        id: "v0.2.4",
+        version: "0.2.4",
+        date: "2026-11-20",
+        title: "v0.2.4 人话版更新说明上线",
+        summary: "把技术提交翻译成清晰功能清单。",
+        items: [
+          { category: "new", categoryLabel: "新增", title: "版本亮点卡片", detail: "普通用户一眼看懂本次改了什么。" },
+          { category: "fix", categoryLabel: "修复", title: "", detail: "解决弹窗标题过长换行的错位。" },
+        ],
+      }],
+      current: {
+        id: "v0.2.3",
+        version: "0.2.3",
+        date: "2026-11-19",
+        title: "图表直出与解归档",
+        summary: "全面提升可用性。",
+        items: [{ category: "new", categoryLabel: "新增", title: "Mermaid 渲染", detail: "直接画流程图。" }],
+      },
+      recent: [
+        {
+          id: "v0.2.3",
+          version: "0.2.3",
+          date: "2026-11-19",
+          title: "图表直出与解归档",
+          summary: "全面提升可用性。",
+          items: [{ category: "new", categoryLabel: "新增", title: "Mermaid 渲染", detail: "直接画流程图。" }],
+        },
+        {
+          id: "v0.2.2",
+          version: "0.2.2",
+          date: "2026-11-16",
+          title: "语音交互升级",
+          items: [{ category: "improve", categoryLabel: "优化", title: "", detail: "响应更快" }],
+        },
+      ],
+    },
+  };
+
+  const tabs = buildReleaseVersionTabs(multiSnap);
+  assert.deepEqual(tabs.map((t) => [t.key, t.label]), [
+    ["pending", "待更新 v0.2.4"],
+    ["v0.2.3", "当前 v0.2.3"],
+    ["v0.2.2", "v0.2.2"],
+  ]);
+
+  const updateHtml = renderReleaseNotesCardHtml(multiSnap, { escapeHtml: esc });
+  assert.match(updateHtml, /data-notes-version="pending"/);
+  assert.match(updateHtml, /待更新 v0\.2\.4/);
+  assert.match(updateHtml, /当前 v0\.2\.3/);
+  assert.match(updateHtml, /data-notes-category="all"/);
+  assert.match(updateHtml, /update-notes-badge is-new">新增</);
+  assert.match(updateHtml, /update-notes-badge is-fix">修复</);
+  assert.match(updateHtml, /人话版更新说明上线/);
+  // Date should appear once (deduped header) and title shouldn't repeat v0.2.4 prefix
+  assert.equal((updateHtml.match(/2026-11-20/g) || []).length, 1);
+  assert.doesNotMatch(updateHtml, /class="update-notes-hero-title">v0\.2\.4/);
+  assert.equal(/\p{Extended_Pictographic}/u.test(updateHtml), false);
+
+  // Switching category filter narrows items cleanly
+  const fixOnlyHtml = renderReleaseNotesCardHtml(multiSnap, { escapeHtml: esc, selectedCategory: "fix" });
+  assert.match(fixOnlyHtml, /解决弹窗标题过长换行的错位/);
+  assert.doesNotMatch(fixOnlyHtml, /版本亮点卡片/);
+
+  // Switching version tab displays history entry
+  const historyHtml = renderReleaseNotesCardHtml(multiSnap, { escapeHtml: esc, selectedVersionKey: "v0.2.2" });
+  assert.match(historyHtml, /语音交互升级/);
+  assert.match(historyHtml, /响应更快/);
+
+  const fallbackHtml = renderReleaseNotesCardHtml({
+    hasUpdate: true,
+    remoteVersion: "",
+    releaseNotes: {
+      pendingSource: "commits_fallback",
+      pending: [{
+        version: "",
+        date: "2026-11-20",
+        title: "最新代码更新",
+        summary: "",
+        items: [{ category: "improve", categoryLabel: "优化", title: "", detail: "提升响应速度" }],
+      }],
+    },
+  }, { escapeHtml: esc });
+  assert.match(fallbackHtml, /按提交记录自动整理/);
+
+  const indexHtml = await readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  assert.match(indexHtml, /data-update-tab="notes"/);
+  assert.match(indexHtml, /data-update-tab="settings"/);
+  assert.match(indexHtml, /data-update-tab="cli"/);
+
+  const releaseNotesMd = await readFile(fileURLToPath(new URL("../RELEASE_NOTES.md", import.meta.url)), "utf8");
+  assert.match(releaseNotesMd, /^# Agent Control 更新说明/m);
+  assert.equal(/\p{Extended_Pictographic}/u.test(releaseNotesMd), false);
+
+  const releaseNotesEnMd = await readFile(fileURLToPath(new URL("../RELEASE_NOTES.en.md", import.meta.url)), "utf8");
+  assert.match(releaseNotesEnMd, /^# Agent Control Release Notes/m);
+  assert.equal(/\p{Extended_Pictographic}/u.test(releaseNotesEnMd), false);
+
+  const bilingualSnap = {
+    ...multiSnap,
+    releaseNotes: {
+      ...multiSnap.releaseNotes,
+      locales: {
+        zh: multiSnap.releaseNotes,
+        en: {
+          pendingSource: "release_notes",
+          pending: [{
+            id: "v0.2.4",
+            version: "0.2.4",
+            date: "2026-11-20",
+            title: "v0.2.4 Bilingual Release Notes",
+            summary: "Clear takeaways for English UI users.",
+            items: [
+              { category: "new", categoryLabel: "New", title: "Release Card", detail: "See what changed at a glance." },
+              { category: "fix", categoryLabel: "Fixed", title: "", detail: "Prevented header wrapping on mobile." },
+            ],
+          }],
+          current: {
+            id: "v0.2.3",
+            version: "0.2.3",
+            date: "2026-11-19",
+            title: "Diagrams & Unarchive",
+            summary: "Usability polish.",
+            items: [{ category: "new", categoryLabel: "New", title: "Mermaid", detail: "Render diagrams inline." }],
+          },
+          recent: [{
+            id: "v0.2.3",
+            version: "0.2.3",
+            date: "2026-11-19",
+            title: "Diagrams & Unarchive",
+            summary: "Usability polish.",
+            items: [{ category: "new", categoryLabel: "New", title: "Mermaid", detail: "Render diagrams inline." }],
+          }],
+        },
+      },
+    },
+  };
+
+  assert.equal(resolveReleaseNotesBucket(bilingualSnap, "en")?.current?.title, "Diagrams & Unarchive");
+  assert.equal(resolveReleaseNotesBucket(bilingualSnap, "zh-CN")?.current?.title, "图表直出与解归档");
+  const enTabs = buildReleaseVersionTabs(bilingualSnap, { locale: "en" });
+  assert.deepEqual(enTabs.map((t) => [t.key, t.label]), [
+    ["pending", "Update v0.2.4"],
+    ["v0.2.3", "Current v0.2.3"],
+  ]);
+  const enHtml = renderReleaseNotesCardHtml(bilingualSnap, { escapeHtml: esc, locale: "en" });
+  assert.match(enHtml, /Update v0\.2\.4/);
+  assert.match(enHtml, /Current v0\.2\.3/);
+  assert.match(enHtml, /update-notes-badge is-new">New</);
+  assert.match(enHtml, /update-notes-badge is-fix">Fixed</);
+  assert.match(enHtml, /Bilingual Release Notes/);
+  assert.match(enHtml, /<span>All<\/span>/);
+  assert.equal(/\p{Extended_Pictographic}/u.test(enHtml), false);
+
+  // Graceful fallback to default notes when locales.en is absent
+  const fallbackEnTabs = buildReleaseVersionTabs(multiSnap, { locale: "en" });
+  assert.equal(fallbackEnTabs[0].label, "Update v0.2.4");
+  const fallbackEnHtml = renderReleaseNotesCardHtml(multiSnap, { escapeHtml: esc, locale: "en" });
+  assert.match(fallbackEnHtml, /update-notes-badge is-new">New</);
+});
+
+test("mobile hold-to-talk composer bar and topbar reply-summary TTS helpers work cleanly", async () => {
+  const mem = new Map();
+  const storage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => mem.set(k, String(v)),
+  };
+  assert.equal(loadChatReplyTtsPref(storage).enabled, false);
+  saveChatReplyTtsPref(true, storage);
+  assert.equal(loadChatReplyTtsPref(storage).enabled, true);
+  mem.set("agentControl.chatReplyTts.v1", "{bad-json");
+  assert.equal(loadChatReplyTtsPref(storage).enabled, false);
+
+  assert.deepEqual(resolveHoldTalkGestureState({}), {
+    stateKey: "idle",
+    label: "按住 说话",
+    isDanger: false,
+    isBusy: false,
+    disabled: false,
+  });
+  assert.equal(resolveHoldTalkGestureState({ active: true }).stateKey, "recording");
+  assert.equal(resolveHoldTalkGestureState({ active: true, cancelArmed: true }).stateKey, "cancel");
+  assert.equal(resolveHoldTalkGestureState({ active: false, transcribing: true }).stateKey, "transcribing");
+
+  const turns = [
+    {
+      id: "turn-1",
+      items: [
+        { type: "agentMessage", phase: "commentary", text: "先检查目录结构…" },
+        {
+          type: "agentMessage",
+          text: [
+            "我已经检查了三个核心模块并修复了竞态问题：",
+            "",
+            "```js",
+            "const ok = await runCheck();",
+            "```",
+            "",
+            "1. 修复了连接池泄漏并补齐超时保护；",
+            "2. 调整了缓存刷新时机，避免并发抖动；",
+            "3. 新增了回归单测覆盖边界输入。",
+            "",
+            "### 总结",
+            "本次已完成连接池修复与回归验证，全部 24 项单测通过，可直接上线体验。",
+          ].join("\n"),
+        },
+      ],
+    },
+  ];
+  const extracted = extractFinalAssistantMessageFromTurns(turns);
+  assert.equal(extracted.turnId, "turn-1");
+  const summaryFromHeading = extractReplyClosingSummaryForSpeech(extracted.text, { maxChars: 200 });
+  assert.equal(summaryFromHeading, "本次已完成连接池修复与回归验证，全部 24 项单测通过，可直接上线体验。");
+
+  const longUnheaded = [
+    "第一段详细背景说明：这里排查了初始化顺序、模块加载链路、事件订阅生命周期以及大量日志上下文，确保没有遗漏任何前置依赖和潜在副作用，同时核对了所有关联配置文件的默认值与降级逻辑。",
+    "",
+    "```bash",
+    "npm test",
+    "```",
+    "",
+    "第二段详细实现过程：我们在适配器层补充了幂等守卫，并对异步回调增加了取消令牌校验，防止旧轮次状态覆盖新轮次视图，确保高并发切换会话时界面始终稳定一致。",
+    "",
+    "以上改动已全部验证通过，你可以直接在手机端按住说话体验新交互。",
+  ].join("\n");
+  const tailSummary = extractReplyClosingSummaryForSpeech(longUnheaded, { maxChars: 140, minTailChars: 24 });
+  assert.match(tailSummary, /以上改动已全部验证通过/);
+  assert.doesNotMatch(tailSummary, /第一段详细背景说明/);
+  assert.doesNotMatch(tailSummary, /代码部分已省略/);
+
+  const indexHtml = await readFile(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  const appCss = await readFile(fileURLToPath(new URL("../public/app.css", import.meta.url)), "utf8");
+  assert.match(indexHtml, /id="chatTtsToggleBtn"[^>]*class="[^"]*chat-tts-toggle-btn[^"]*"[^>]*hidden/);
+  assert.doesNotMatch(indexHtml, /id="chatTtsToggleBtn"[^>]*class="[^"]*mobile-only[^"]*"/);
+  const submitGroupMatch = indexHtml.match(/<div class="composer-submit-group">([\s\S]*?)<\/div>/);
+  assert.ok(submitGroupMatch?.[1], "composer-submit-group should exist");
+  const voiceIdx = submitGroupMatch[1].indexOf('id="composerVoiceBtn"');
+  const sendIdx = submitGroupMatch[1].indexOf('id="sendBtn"');
+  assert.ok(voiceIdx >= 0 && sendIdx > voiceIdx, "composerVoiceBtn should sit immediately before sendBtn on the right");
+  assert.match(indexHtml, /id="composerHoldBar"[^>]*hidden/);
+  assert.match(indexHtml, /id="composerHoldTalkBtn"/);
+  assert.match(indexHtml, /id="composerHoldKeyboardBtn"/);
+  assert.match(appCss, /\.composer-hold-talk-btn\s*\{[\s\S]*?touch-action:\s*none;/);
+});
+
+test("mobile composer guards prevent soft-keyboard dismiss or Return key from auto-updating queued tasks", () => {
+  assert.equal(shouldSubmitPromptOnEnter({ key: "Enter", isMobileTouch: false }), true);
+  assert.equal(shouldSubmitPromptOnEnter({ key: "Enter", shiftKey: true, isMobileTouch: false }), false);
+  assert.equal(shouldSubmitPromptOnEnter({ key: "Enter", isComposing: true, isMobileTouch: false }), false);
+  assert.equal(shouldSubmitPromptOnEnter({ key: "Enter", keyCode: 229, isMobileTouch: false }), false);
+  assert.equal(shouldSubmitPromptOnEnter({ key: "Enter", isMobileTouch: true }), false);
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: false,
+      isEditingQueue: true,
+      nowMs: 1000,
+      lastKeyboardCollapseAtMs: 950,
+      lastPromptBlurAtMs: 950,
+      pointerDownAtMs: 0,
+      pointerDownHadRecentCollapse: true,
+      clickDetail: 0,
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: true,
+      nowMs: 1000,
+      lastKeyboardCollapseAtMs: 920,
+      lastPromptBlurAtMs: 910,
+      pointerDownAtMs: 890,
+      pointerDownHadRecentCollapse: false,
+      clickDetail: 1,
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: true,
+      nowMs: 1600,
+      lastKeyboardCollapseAtMs: 1000,
+      lastPromptBlurAtMs: 1000,
+      pointerDownAtMs: 1560,
+      pointerDownHadRecentCollapse: false,
+      clickDetail: 1,
+    }),
+    true,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: false,
+      nowMs: 1200,
+      lastKeyboardCollapseAtMs: 1050,
+      lastPromptBlurAtMs: 0,
+      pointerDownAtMs: 0,
+      clickDetail: 1,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: false,
+      nowMs: 1200,
+      lastKeyboardCollapseAtMs: 0,
+      lastPromptBlurAtMs: 1050,
+      pointerDownAtMs: 0,
+      clickDetail: 1,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: true,
+      nowMs: 5000,
+      lastKeyboardCollapseAtMs: 0,
+      lastPromptBlurAtMs: 0,
+      pointerDownAtMs: 0,
+      clickDetail: 1,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldAllowSendButtonClick({
+      isMobileTouch: true,
+      isEditingQueue: true,
+      nowMs: 1300,
+      lastKeyboardCollapseAtMs: 1000,
+      lastPromptBlurAtMs: 980,
+      pointerDownAtMs: 1220,
+      pointerDownHadRecentCollapse: true,
+      clickDetail: 1,
+    }),
+    false,
+  );
 });

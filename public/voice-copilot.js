@@ -949,3 +949,180 @@ export function renderVoiceCallTranscriptHtml(entries = []) {
     `;
   }).join("");
 }
+
+export const CHAT_REPLY_TTS_STORAGE_KEY = "agentControl.chatReplyTts.v1";
+
+export function loadChatReplyTtsPref(storage = typeof localStorage !== "undefined" ? localStorage : null) {
+  try {
+    if (!storage) return { enabled: false };
+    const raw = JSON.parse(storage.getItem(CHAT_REPLY_TTS_STORAGE_KEY) || "null");
+    return { enabled: Boolean(raw?.enabled) };
+  } catch {
+    return { enabled: false };
+  }
+}
+
+export function saveChatReplyTtsPref(enabled, storage = typeof localStorage !== "undefined" ? localStorage : null) {
+  const next = { enabled: Boolean(enabled) };
+  try {
+    storage?.setItem(CHAT_REPLY_TTS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors cleanly.
+  }
+  return next;
+}
+
+export function extractFinalAssistantMessageFromTurns(turns = [], fallbackText = "") {
+  const list = Array.isArray(turns) ? turns : [];
+  if (list.length) {
+    const lastTurn = list[list.length - 1];
+    const turnId = String(lastTurn?.id || "");
+    const items = Array.isArray(lastTurn?.items) ? lastTurn.items : [];
+    let commentaryFallback = "";
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (!item || item.type !== "agentMessage" || isRawToolEchoItem(item)) continue;
+      const txt = String(item.text || "").trim();
+      if (!txt) continue;
+      if (item.phase !== "commentary") {
+        return { turnId, text: txt };
+      }
+      if (!commentaryFallback) {
+        commentaryFallback = txt;
+      }
+    }
+    const cleanFallback = String(fallbackText || "").trim();
+    if (cleanFallback) {
+      return { turnId, text: cleanFallback };
+    }
+    if (commentaryFallback) {
+      return { turnId, text: commentaryFallback };
+    }
+    return { turnId, text: "" };
+  }
+  return { turnId: "", text: String(fallbackText || "").trim() };
+}
+
+const SUMMARY_HEADING_RE = /^(?:#{1,6}\s*|\*\*|【)?\s*(?:总结|小结|结论|完成情况|完成汇总|修改汇总|变更摘要|最终结果|处理结果|Summary|Conclusion|Takeaway|Final\s+Result|Overview)\s*(?:】|\*\*)?\s*[:：]?\s*(.*)$/i;
+
+function trimFromCleanSentenceStart(text = "", maxChars = 260) {
+  const clean = String(text || "").trim();
+  if (clean.length <= maxChars) return clean;
+  const tailWindow = clean.slice(-maxChars);
+  const match = tailWindow.match(/[。！？；.!?\n]\s*(.+)$/);
+  if (match?.[1] && match[1].trim().length >= Math.min(48, Math.floor(maxChars * 0.25))) {
+    return match[1].trim();
+  }
+  return tailWindow.trim();
+}
+
+export function extractReplyClosingSummaryForSpeech(rawInput = "", { maxChars = 260, minTailChars = 80 } = {}) {
+  const raw = String(rawInput || "")
+    .replace(/<!--[\s\S]*?-->/g, "\n")
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{0,}:?\s*$/gm, "")
+    .trim();
+  if (!raw) return "";
+
+  const lines = raw.split(/\r?\n/);
+  let lastSummaryLineIdx = -1;
+  let inlineSummaryLead = "";
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(SUMMARY_HEADING_RE);
+    if (m) {
+      // Only treat bare words like "总结" as a section header when it really looks like a heading/bold/colon marker
+      const hasMarker = /^(?:#{1,6}\s|\*\*|【)/.test(trimmed) || /[:：]/.test(trimmed) || trimmed.length <= 8;
+      if (hasMarker) {
+        lastSummaryLineIdx = i;
+        inlineSummaryLead = String(m[1] || "").trim();
+      }
+    }
+  }
+
+  if (lastSummaryLineIdx >= 0) {
+    const restLines = [
+      ...(inlineSummaryLead ? [inlineSummaryLead] : []),
+      ...lines.slice(lastSummaryLineIdx + 1),
+    ];
+    const summaryText = stripMarkdownForSpeech(restLines.join("\n"), maxChars);
+    if (summaryText) return summaryText;
+  }
+
+  const rawBlocks = raw
+    .split(/\n{2,}/)
+    .map((block) => stripMarkdownForSpeech(block, maxChars * 2))
+    .map((s) => s.replace(/^，?代码部分已省略，?$/g, "").trim())
+    .filter(Boolean);
+
+  if (!rawBlocks.length) {
+    return stripMarkdownForSpeech(raw, maxChars);
+  }
+
+  const fullJoined = rawBlocks.join(" ");
+  if (fullJoined.length <= maxChars) {
+    return fullJoined;
+  }
+
+  const picked = [];
+  let totalLen = 0;
+  for (let i = rawBlocks.length - 1; i >= 0; i -= 1) {
+    const block = rawBlocks[i];
+    const nextLen = totalLen ? totalLen + 1 + block.length : block.length;
+    if (nextLen > maxChars && totalLen >= minTailChars) {
+      break;
+    }
+    picked.unshift(block);
+    totalLen = nextLen;
+    if (totalLen >= maxChars) break;
+  }
+
+  const tailJoined = picked.join(" ").trim();
+  if (tailJoined.length <= maxChars) {
+    return tailJoined;
+  }
+  return trimFromCleanSentenceStart(tailJoined, maxChars);
+}
+
+export function resolveHoldTalkGestureState({
+  active = false,
+  transcribing = false,
+  cancelArmed = false,
+  isSubmitting = false,
+} = {}) {
+  if (transcribing || isSubmitting) {
+    return {
+      stateKey: "transcribing",
+      label: "正在识别并发送…",
+      isDanger: false,
+      isBusy: true,
+      disabled: true,
+    };
+  }
+  if (active && cancelArmed) {
+    return {
+      stateKey: "cancel",
+      label: "松开手指 取消发送",
+      isDanger: true,
+      isBusy: false,
+      disabled: false,
+    };
+  }
+  if (active) {
+    return {
+      stateKey: "recording",
+      label: "松开 发送（上滑取消）",
+      isDanger: false,
+      isBusy: false,
+      disabled: false,
+    };
+  }
+  return {
+    stateKey: "idle",
+    label: "按住 说话",
+    isDanger: false,
+    isBusy: false,
+    disabled: false,
+  };
+}

@@ -6,7 +6,7 @@ function extractUserRequestTag(text) {
 }
 
 const CLAUDE_SYS_NOTIF_PREFIX_RE = /\[SYSTEM NOTIFICATION - NOT USER INPUT\](?:[^\n]*\n?){0,6}?(?=\s*<task-notification\b|\s*$)/gi;
-const CLAUDE_INVISIBLE_NOISE_RE = /<(?:system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/(?:system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)>/gi;
+const CLAUDE_INVISIBLE_NOISE_RE = /<(system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/\1>/gi;
 const CLAUDE_TASK_NOTIFICATION_RE = /<task-notification\b[^>]*>([\s\S]*?)<\/task-notification>/gi;
 const CLAUDE_CROSS_SESSION_RE = /(?:^|\n)[ \t]*Another Claude session sent a message:\s*\n?<cross-session-message\b[^>]*>[\s\S]*?<\/cross-session-message>|<cross-session-message\b[^>]*>[\s\S]*?<\/cross-session-message>/gi;
 

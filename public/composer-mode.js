@@ -68,6 +68,58 @@ export function extractGoalDirective(text = "") {
   };
 }
 
+export function shouldSubmitPromptOnEnter({
+  key = "",
+  shiftKey = false,
+  isComposing = false,
+  keyCode = 0,
+  isMobileTouch = false,
+} = {}) {
+  if (key !== "Enter" || shiftKey || isComposing || Number(keyCode) === 229) {
+    return false;
+  }
+  if (isMobileTouch) {
+    return false;
+  }
+  return true;
+}
+
+export function shouldAllowSendButtonClick({
+  isMobileTouch = false,
+  isEditingQueue = false,
+  nowMs = 0,
+  lastKeyboardCollapseAtMs = 0,
+  lastPromptBlurAtMs = 0,
+  pointerDownAtMs = 0,
+  pointerDownHadRecentCollapse = false,
+  clickDetail = 1,
+  guardWindowMs = 450,
+} = {}) {
+  if (!isMobileTouch) {
+    return true;
+  }
+  const hasFreshPointerDown = pointerDownAtMs > 0
+    && (nowMs - pointerDownAtMs) >= 0
+    && (nowMs - pointerDownAtMs) <= 2500;
+  const recentlyCollapsed = lastKeyboardCollapseAtMs > 0
+    && (nowMs - lastKeyboardCollapseAtMs) >= 0
+    && (nowMs - lastKeyboardCollapseAtMs) < guardWindowMs;
+  const recentlyBlurred = lastPromptBlurAtMs > 0
+    && (nowMs - lastPromptBlurAtMs) >= 0
+    && (nowMs - lastPromptBlurAtMs) < guardWindowMs;
+
+  if (!hasFreshPointerDown && (recentlyCollapsed || recentlyBlurred || isEditingQueue)) {
+    return false;
+  }
+  if (pointerDownHadRecentCollapse) {
+    return false;
+  }
+  if (isEditingQueue && Number(clickDetail) === 0 && !hasFreshPointerDown) {
+    return false;
+  }
+  return true;
+}
+
 function escapeQueuedHtml(value = "") {
   return String(value ?? "")
     .replace(/&/g, "&amp;")

@@ -617,10 +617,12 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
       const fenceLen = fence.length;
       const codeLang = String(fenceMatch[2] || "").trim().split(/\s+/)[0] || "";
       const codeLines = [];
+      let closed = false;
       i += 1;
       while (i < lines.length) {
         const closeRe = new RegExp(`^\\s*${fenceChar}{${fenceLen},}\\s*$`);
         if (closeRe.test(lines[i])) {
+          closed = true;
           i += 1;
           break;
         }
@@ -628,6 +630,39 @@ export function renderMarkdown(source, { depth = 0, threadId = "", deferImages =
         i += 1;
       }
       const codeText = codeLines.join("\n");
+      if (codeLang.toLowerCase() === "mermaid") {
+        let diagramType = "";
+        for (const rawMermaidLine of codeText.replace(/\r\n?/g, "\n").split("\n")) {
+          const trimmedMermaid = rawMermaidLine.trim();
+          if (!trimmedMermaid || trimmedMermaid.startsWith("%%")) continue;
+          const mermaidTypes = [
+            [/^(?:flowchart|graph)(?:\s|$)/i, "流程图"],
+            [/^sequenceDiagram(?:\s|$)/i, "时序图"],
+            [/^stateDiagram(?:-v2)?(?:\s|$)/i, "状态图"],
+            [/^classDiagram(?:-v2)?(?:\s|$)/i, "类图"],
+            [/^erDiagram(?:\s|$)/i, "ER 图"],
+            [/^gantt(?:\s|$)/i, "甘特图"],
+            [/^pie(?:\s|$)/i, "饼图"],
+            [/^mindmap(?:\s|$)/i, "思维导图"],
+            [/^timeline(?:\s|$)/i, "时间线"],
+            [/^xychart-beta(?:\s|$)/i, "图表"],
+            [/^gitGraph(?:\s|$)/i, "Git 图"],
+            [/^journey(?:\s|$)/i, "旅程图"],
+            [/^quadrantChart(?:\s|$)/i, "象限图"],
+            [/^architecture-beta(?:\s|$)/i, "架构图"],
+          ];
+          const matched = mermaidTypes.find(([re]) => re.test(trimmedMermaid));
+          if (matched) diagramType = matched[1];
+          break;
+        }
+        const typeSuffix = diagramType ? ` · ${diagramType}` : "";
+        const initialState = closed ? "pending" : "streaming";
+        const initialView = closed ? "diagram" : "source";
+        html.push(
+          `<div class="md-code-block md-mermaid-block" data-mermaid-block="1" data-mermaid-state="${initialState}" data-mermaid-view="${initialView}"><div class="md-code-head md-mermaid-head"><span class="md-code-lang md-mermaid-lang">Mermaid${escapeHtml(typeSuffix)}</span><div class="md-mermaid-actions"><button type="button" class="md-copy-btn md-mermaid-btn" data-mermaid-toggle="1" aria-pressed="${closed ? "false" : "true"}"${closed ? "" : " hidden"} title="切换图表与源码">${closed ? "源码" : "图表"}</button><button type="button" class="md-copy-btn md-mermaid-btn" data-mermaid-zoom="1" hidden title="全屏缩放查看">放大</button><button type="button" class="md-copy-btn" data-copy-code title="复制代码">复制</button></div></div><div class="md-mermaid-stage" data-mermaid-stage${closed ? "" : " hidden"}>${closed ? '<div class="md-mermaid-placeholder">正在渲染图表…</div>' : ""}</div><div class="md-mermaid-error" data-mermaid-error hidden></div><pre class="md-pre md-mermaid-source" data-lang="mermaid"${closed ? " hidden" : ""}><code>${escapeHtml(codeText)}</code></pre></div>`,
+        );
+        continue;
+      }
       html.push(
         `<div class="md-code-block"><div class="md-code-head"><span class="md-code-lang">${escapeHtml(codeLang || "text")}</span><button type="button" class="md-copy-btn" data-copy-code title="复制代码">复制</button></div><pre class="md-pre" data-lang="${escapeHtml(codeLang)}"><code>${escapeHtml(codeText)}</code></pre></div>`,
       );
@@ -872,7 +907,8 @@ const CLIENT_CLAUDE_SYS_PREFIX_RE = /\[SYSTEM NOTIFICATION - NOT USER INPUT\](?:
 const CLIENT_CLAUDE_TASK_NOTIF_RE = /<task-notification\b[^>]*>([\s\S]*?)<\/task-notification>/gi;
 const CLIENT_CLAUDE_CROSS_SESSION_RE = /(?:^|\n)[ \t]*(?:Another Claude session sent a message:\s*\n?)?<cross-session-message\b([^>]*)>([\s\S]*?)<\/cross-session-message>/gi;
 const CLIENT_CLAUDE_BASH_RE = /<bash-input\b[^>]*>([\s\S]*?)<\/bash-input>(?:\s*<bash-stdout\b[^>]*>([\s\S]*?)<\/bash-stdout>)?(?:\s*<bash-stderr\b[^>]*>([\s\S]*?)<\/bash-stderr>)?/gi;
-const CLIENT_CLAUDE_INVISIBLE_NOISE_RE = /<(?:system-reminder|local-command-caveat|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/(?:system-reminder|local-command-caveat|side-sessions-event|tools-used-before-summary)>/gi;
+const CLIENT_CLAUDE_INVISIBLE_NOISE_RE = /<(system-reminder|local-command-caveat|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/\1>/gi;
+const CLIENT_CLAUDE_COMPACT_PREFIX_RE = /^\s*This session is being continued from a previous conversation that ran out of context\.(?:\s+The summary below covers the earlier portion of the conversation\.)?\s*/i;
 const CLIENT_CLAUDE_SLASH_TAG_RE = /<(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr)\b[^>]*>([\s\S]*?)<\/(?:command-name|command-message|command-args|local-command-stdout|local-command-stderr)>/gi;
 const CLIENT_ANSI_ESCAPE_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
@@ -924,6 +960,7 @@ function extractClientClaudeUserEvents(rawText = "") {
   const crossSessionMessages = [];
   const bashEvents = [];
   const slashCommands = [];
+  const compactSummaries = [];
 
   if (/<(?:task-notification|cross-session-message|bash-input|command-name|command-message|local-command-|system-reminder|side-sessions-event|tools-used-before-summary)\b/i.test(working)
     || working.includes("[SYSTEM NOTIFICATION - NOT USER INPUT]")) {
@@ -958,7 +995,22 @@ function extractClientClaudeUserEvents(rawText = "") {
       }
       working = working.replace(CLIENT_CLAUDE_SLASH_TAG_RE, "\n");
     }
-    working = working.replace(CLIENT_CLAUDE_INVISIBLE_NOISE_RE, "\n");
+    for (let pass = 0; pass < 3; pass += 1) {
+      const next = working.replace(CLIENT_CLAUDE_INVISIBLE_NOISE_RE, "\n");
+      if (next === working) break;
+      working = next;
+    }
+  }
+
+  if (CLIENT_CLAUDE_COMPACT_PREFIX_RE.test(working)) {
+    const summaryBody = working
+      .replace(CLIENT_CLAUDE_COMPACT_PREFIX_RE, "")
+      .replace(/^\s*Summary:\s*/i, "")
+      .trim();
+    compactSummaries.push({
+      summary: summaryBody,
+    });
+    working = "";
   }
 
   return {
@@ -967,6 +1019,7 @@ function extractClientClaudeUserEvents(rawText = "") {
     crossSessionMessages,
     bashEvents,
     slashCommands,
+    compactSummaries,
   };
 }
 
@@ -1253,6 +1306,7 @@ function extractClientCodexUserText(rawText = "") {
     crossSessionMessages: claudeEvents.crossSessionMessages,
     bashEvents: claudeEvents.bashEvents,
     slashCommands: claudeEvents.slashCommands,
+    compactSummaries: claudeEvents.compactSummaries,
   };
 }
 
@@ -1361,6 +1415,7 @@ export function parseUserMessageContent(item) {
     crossSessionMessages: parsedText.crossSessionMessages || [],
     bashEvents: parsedText.bashEvents || [],
     slashCommands: parsedText.slashCommands || [],
+    compactSummaries: parsedText.compactSummaries || [],
   };
 }
 
@@ -1540,6 +1595,36 @@ function renderClaudeBashCard(ev) {
   `;
 }
 
+function renderClaudeCompactSummaryCard(item = {}, { threadId = "" } = {}) {
+  const summary = String(item.summary || "").trim();
+  if (!summary) {
+    return `
+      <div class="msg-row msg-claude-bash">
+        <div class="task-notif-card is-neutral is-static">
+          <div class="task-notif-summary">
+            <span class="task-notif-badge is-neutral">${iconSvg("bolt", { size: 12 })}<span>上下文已压缩</span></span>
+            <span class="task-notif-snippet">已自动归纳前序对话摘要</span>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+  const snippet = summary.replace(/\s+/g, " ").trim();
+  const previewText = snippet.length > 90 ? `${snippet.slice(0, 90).trim()}…` : snippet;
+  return `
+    <div class="msg-row msg-claude-bash">
+      <details class="task-notif-card is-neutral">
+        <summary class="task-notif-summary">
+          <span class="task-notif-badge is-neutral">${iconSvg("bolt", { size: 12 })}<span>上下文已压缩</span></span>
+          <span class="task-notif-snippet">${escapeHtml(previewText)}</span>
+          <span class="task-notif-meta"><span class="task-notif-chevron">${iconSvg("chevron-down", { size: 12 })}</span></span>
+        </summary>
+        <div class="task-notif-body md-body">${renderMarkdown(summary, { threadId, deferImages: true })}</div>
+      </details>
+    </div>
+  `;
+}
+
 function renderSlashCommandCard(cmd) {
   const fullCmd = [cmd.commandName, cmd.commandArgs].filter(Boolean).join(" ").trim();
   const out = [cmd.stdout, cmd.stderr].filter(Boolean).join("\n").trim();
@@ -1578,6 +1663,7 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
     crossSessionMessages,
     bashEvents,
     slashCommands,
+    compactSummaries,
   } = parseUserMessageContent(item);
   const hasNormalUserContent = Boolean(images.length || files.length || questionReplies.length || textParts.length);
   const skillCards = skills.map((skill) => renderSkillContextCard(skill, { threadId }));
@@ -1591,6 +1677,7 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
     ...crossSessionMessages.map((m) => renderCrossSessionMessageCard(m, { threadId })),
     ...bashEvents.map((b) => renderClaudeBashCard(b)),
     ...slashCommands.map((c) => renderSlashCommandCard(c)),
+    ...compactSummaries.map((c) => renderClaudeCompactSummaryCard(c, { threadId })),
   ];
   if (!hasNormalUserContent) {
     return eventCards.join("");
@@ -2036,15 +2123,27 @@ function shortModelName(rawModel = "") {
   const orchMatch = clean.match(/^orchestrator\s*\(([^)]+)\)/i);
   if (orchMatch?.[1]) {
     const inner = orchMatch[1].trim();
-    return inner.length > 16 ? inner.slice(0, 16) : inner;
+    return inner.length > 20 ? inner.slice(0, 20) : inner;
   }
-  if (clean === "gemini-pro-orchestrator" || lower === "orchestrator") {
-    return "Carbon";
+  const orchIdMatch = clean.match(/^gemini[- ]pro[- ]orchestrator(?:[- ]([a-z][a-z0-9]+))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (orchIdMatch || lower === "orchestrator") {
+    const rawCodename = orchIdMatch?.[1] && !/^(?:low|medium|high|xhigh)$/i.test(orchIdMatch[1])
+      ? orchIdMatch[1]
+      : "Carbon";
+    const word = rawCodename.charAt(0).toUpperCase() + rawCodename.slice(1).toLowerCase();
+    return `${word}${effortSuffix}`;
   }
   const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
   if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
     const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
     return `${word}${effortSuffix}`;
+  }
+  const geminiVersioned = clean.match(/^gemini[- ](\d+(?:[.-]\d+)*)[- ](pro|flash|lite|ultra|nano)(?:[- ](lite|exp|preview))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiVersioned) {
+    const ver = geminiVersioned[1].replace(/-/g, ".");
+    const tier = geminiVersioned[2].charAt(0).toUpperCase() + geminiVersioned[2].slice(1).toLowerCase();
+    const sub = geminiVersioned[3] ? ` ${geminiVersioned[3].charAt(0).toUpperCase() + geminiVersioned[3].slice(1).toLowerCase()}` : "";
+    return `${ver} ${tier}${sub}${effortSuffix}`;
   }
   if (lower.includes("carbon")) {
     if (lower.includes("high")) return "Carbon H";
@@ -2069,7 +2168,7 @@ function shortModelName(rawModel = "") {
       .replace(/\bflash\b/gi, "Flash")
       .replace(/\blite\b/gi, "Lite")
       .trim();
-    return cleaned.length > 16 ? cleaned.slice(0, 16) : cleaned;
+    return cleaned.length > 22 ? cleaned.slice(0, 22) : cleaned;
   }
   if (lower.includes("opus")) {
     const ver = clean.match(/(\d+(?:[.-]\d+)?)/);
@@ -2091,7 +2190,12 @@ function shortModelName(rawModel = "") {
     return "5.3 Codex";
   }
   if (lower.includes("gpt-")) {
-    return clean.replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1").toUpperCase().slice(0, 14);
+    const baseGpt = clean
+      .replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1")
+      .replace(/-(?:low|medium|high|xhigh)$/i, "")
+      .toUpperCase();
+    const withEffort = `${baseGpt}${effortSuffix}`;
+    return withEffort.length > 20 ? withEffort.slice(0, 20) : withEffort;
   }
   if (lower.startsWith("grok-")) {
     if (lower.includes("4.7-build-fast") || lower.includes("4.7 fast")) return "Grok 4.7F";
@@ -2102,7 +2206,7 @@ function shortModelName(rawModel = "") {
     .replace(/\s*\([^)]*\)\s*/g, " ")
     .replace(/^(Claude|Gemini)\s+/i, "")
     .trim();
-  return stripped.length > 14 ? stripped.slice(0, 14) : stripped;
+  return stripped.length > 20 ? stripped.slice(0, 20) : stripped;
 }
 
 function shortEffortLabel(effort = "") {

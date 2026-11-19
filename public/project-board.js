@@ -446,19 +446,24 @@ function renderThreadCompactChipHtml(thread, chip) {
   return `<span class="thread-micro-tag is-text-only is-${escapeHtml(chip.tone)}" title="${escapeHtml(chip.title)}">${escapeHtml(text)}</span>`;
 }
 
-function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [] } = {}) {
+function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, selectedSet = null, profiles = [], recentCompletedByThread = null } = {}) {
   const isSelected = thread.id === activeThreadId;
   const isBatchChecked = Boolean(selectionMode && selectedSet?.has(thread.id));
   const title = thread.title || "新会话";
   const timeText = formatCompactRelativeTime(thread.updatedAt);
   const pendingCount = thread.pendingCount || 0;
   const queuedCount = thread.queuedCount || 0;
-  const markerHtml = renderThreadStatusMarkerHtml(thread);
+  const isDone = !thread.live && pendingCount === 0;
+  const isRecentDone = isDone && Boolean(recentCompletedByThread?.has?.(thread.id));
+  const markerHtml = renderThreadStatusMarkerHtml(thread, recentCompletedByThread);
   const chip = compactThreadSourceChip(thread, { profiles });
   const chipHtml = renderThreadCompactChipHtml(thread, chip);
   const statusBadges = [];
   if (pendingCount > 0) {
     statusBadges.push(`<span class="board-status-pill is-pending">待确认 ${pendingCount}</span>`);
+  }
+  if (isRecentDone) {
+    statusBadges.push(`<span class="board-status-pill is-recent-done" title="刚刚完成，尚未查看">新完成</span>`);
   }
   if (queuedCount > 0) {
     statusBadges.push(`<span class="board-status-pill is-queued" title="排队中 ${queuedCount} 条">排队 ${queuedCount}</span>`);
@@ -473,7 +478,8 @@ function renderTaskSlotHtml(thread, activeThreadId, { selectionMode = false, sel
     isBatchChecked ? "is-batch-checked" : "",
     thread.live ? "is-live" : "",
     pendingCount > 0 ? "is-pending" : "",
-    !thread.live && pendingCount === 0 ? "is-done" : "",
+    isDone ? "is-done" : "",
+    isRecentDone ? "is-recent-done" : "",
   ].filter(Boolean).join(" ");
 
   return `
@@ -822,6 +828,7 @@ function renderProjectCardHtml(group, {
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
+  recentCompletedByThread = null,
   allowOpenProjectWindow = true,
 } = {}) {
   const baseLimit = 4;
@@ -895,7 +902,7 @@ function renderProjectCardHtml(group, {
         </div>
       </div>
       <div class="board-task-list">
-        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles })).join("")}
+        ${shownThreads.map((t) => renderTaskSlotHtml(t, activeThreadId, { selectionMode, selectedSet, profiles, recentCompletedByThread })).join("")}
       </div>
       ${hiddenCount > 0 ? (() => {
         const expandLabel = hiddenCount <= THREAD_EXPAND_STEP
@@ -935,6 +942,7 @@ export function renderProjectBoardHtml({
   selectionMode = false,
   selectedThreadIds = null,
   profiles = [],
+  recentCompletedByThread = null,
   allowOpenProjectWindow = true,
 } = {}) {
   const pinnedGroups = groups.filter((g) => g.pinned);
@@ -1032,6 +1040,7 @@ export function renderProjectBoardHtml({
             selectionMode,
             selectedThreadIds,
             profiles,
+            recentCompletedByThread,
             allowOpenProjectWindow,
           })).join("")}
         </div>
@@ -1055,6 +1064,7 @@ export function renderProjectBoardHtml({
             selectionMode,
             selectedThreadIds,
             profiles,
+            recentCompletedByThread,
             allowOpenProjectWindow,
           })).join("")}
         </div>

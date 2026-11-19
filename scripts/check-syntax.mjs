@@ -9,7 +9,7 @@ function walkJsFiles(dirPath) {
   const results = [];
   for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
     if (entry.isDirectory()) {
-      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === "vendor") continue;
       results.push(...walkJsFiles(join(dirPath, entry.name)));
       continue;
     }

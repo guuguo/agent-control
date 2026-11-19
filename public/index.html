@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261119goal" />
+  <meta name="ac-ui-version" content="20261119autocompact1" />
   <title>Agent Control · 多智能体远程控制台</title>
   <script>
     (function () {
@@ -18,8 +18,8 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261119goal" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261119goal" />
+  <link rel="stylesheet" href="./app.css?v=20261119autocompact1" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261119autocompact1" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -140,6 +140,10 @@
             <span id="telemetryTopbarDot" class="telemetry-summary-dot" aria-hidden="true"></span>
             <span id="telemetryTopbarText">额度</span>
           </button>
+          <button type="button" id="chatTtsToggleBtn" class="btn-secondary btn-sm topbar-icon-action chat-tts-toggle-btn" hidden aria-pressed="false" aria-label="朗读播报" title="朗读播报：点击开启后自动播报回复结尾总结">
+            <span id="chatTtsToggleIcon" class="btn-icon-glyph" data-icon="speaker-off" data-icon-size="14" aria-hidden="true"></span>
+            <span id="chatTtsToggleLabel" class="chat-tts-label">朗读</span>
+          </button>
           <button type="button" id="voiceModeBtn" class="btn-secondary btn-sm voice-launch-btn topbar-icon-action" title="打开梦工厂小精灵助手（支持派单、汇报、归档与语音）">
             <span class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
             <span class="btn-label-desktop">助手</span>
@@ -155,7 +159,6 @@
               <span id="topbarMoreDot" class="btn-state-dot" hidden aria-hidden="true"></span>
             </button>
             <div id="topbarMoreMenu" class="topbar-more-menu">
-              <div id="topbarLocalAppsBox" class="topbar-local-apps-box" hidden></div>
               <div id="topbarMoreProjectCard" class="topbar-more-project-card" hidden>
                 <div class="topbar-more-project-actions">
                   <button type="button" id="topbarPinProjectBtn" class="btn-secondary btn-xs"><span class="btn-icon-glyph" data-icon="star" data-icon-size="12" aria-hidden="true"></span><span>关注项目</span></button>
@@ -219,6 +222,7 @@
       <footer id="composerArea" class="composer-area" hidden>
         <div id="slashCommandMenu" class="slash-command-menu" role="listbox" hidden></div>
         <div id="composerStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
+        <div id="composerArchivedBanner" class="composer-archived-banner" hidden></div>
         <div id="composerEditBanner" class="composer-edit-banner" hidden></div>
         <div id="composerImages" class="composer-images" hidden></div>
         <div class="composer-box">
@@ -237,10 +241,6 @@
                 <span class="btn-icon-glyph" data-icon="paperclip" data-icon-size="14" aria-hidden="true"></span>
                 <span class="btn-label-desktop">图片</span>
                 <span id="imageCountBadge" class="img-count-badge" hidden></span>
-              </button>
-              <button type="button" id="composerVoiceBtn" class="btn-secondary btn-xs composer-icon-btn composer-voice-btn" title="语音输入转文字（点击开始/停止）" aria-pressed="false">
-                <span id="composerVoiceIcon" class="btn-icon-glyph" data-icon="mic" data-icon-size="14" aria-hidden="true"></span>
-                <span id="composerVoiceLabel" class="btn-label-desktop">语音</span>
               </button>
               <button type="button" id="composerSlashBtn" class="btn-secondary btn-xs composer-icon-btn composer-slash-btn" title="插入常用指令 (/)" aria-expanded="false">
                 <span class="composer-slash-glyph" aria-hidden="true">/</span>
@@ -299,8 +299,26 @@
                 <option value="queue">排队</option>
                 <option value="steer">插话</option>
               </select>
+              <button type="button" id="composerVoiceBtn" class="btn-secondary btn-xs composer-icon-btn composer-voice-btn" title="语音输入（手机端切换按住说话模式）" aria-pressed="false">
+                <span id="composerVoiceIcon" class="btn-icon-glyph" data-icon="mic" data-icon-size="15" aria-hidden="true"></span>
+                <span id="composerVoiceLabel" class="btn-label-desktop">语音</span>
+              </button>
               <button type="button" id="sendBtn" class="btn-primary">发送</button>
             </div>
+          </div>
+          <div id="composerHoldBar" class="composer-hold-bar" hidden>
+            <button type="button" id="composerHoldAttachBtn" class="btn-secondary composer-hold-side-btn" title="添加图片" aria-label="添加图片">
+              <span class="btn-icon-glyph" data-icon="paperclip" data-icon-size="16" aria-hidden="true"></span>
+              <span id="holdImageCountBadge" class="img-count-badge" hidden></span>
+            </button>
+            <button type="button" id="composerHoldTalkBtn" class="composer-hold-talk-btn" aria-label="按住说话，松开发送">
+              <span id="composerHoldTalkWave" class="composer-hold-wave" hidden aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+              <span id="composerHoldTalkIcon" class="btn-icon-glyph" data-icon="mic" data-icon-size="16" aria-hidden="true"></span>
+              <span id="composerHoldTalkLabel" class="composer-hold-talk-label">按住 说话</span>
+            </button>
+            <button type="button" id="composerHoldKeyboardBtn" class="btn-secondary composer-hold-side-btn" title="切换回键盘输入" aria-label="切换回键盘输入">
+              <span class="btn-icon-glyph" data-icon="keyboard" data-icon-size="17" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
       </footer>
@@ -625,7 +643,9 @@
           <span id="imagePreviewMeta" class="image-preview-meta" hidden></span>
         </div>
         <div class="image-preview-actions">
+          <button type="button" id="imagePreviewZoomOutBtn" class="btn-secondary btn-xs" title="缩小" hidden>-</button>
           <button type="button" id="imagePreviewZoomBtn" class="btn-secondary btn-xs" title="重置缩放" hidden>100%</button>
+          <button type="button" id="imagePreviewZoomInBtn" class="btn-secondary btn-xs" title="放大" hidden>+</button>
           <button type="button" id="imagePreviewLoadRawBtn" class="btn-secondary btn-xs" hidden>加载原图</button>
           <a id="imagePreviewOpenRaw" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>原图新窗</a>
           <button type="button" class="icon-btn" data-close-modal="imagePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
@@ -633,6 +653,7 @@
       </div>
       <div id="imagePreviewStage" class="image-preview-stage">
         <img id="imagePreviewImg" src="" alt="图片预览" />
+        <div id="imagePreviewSvgHost" class="image-preview-svg-host" hidden></div>
       </div>
     </div>
   </dialog>
@@ -663,77 +684,124 @@
         <button type="button" class="icon-btn" data-close-modal="updateModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
       </div>
       <div class="modal-body update-modal-body">
-        <section class="tunnel-card update-summary-card">
-          <div class="tunnel-card-head">
-            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="refresh" data-icon-size="13" aria-hidden="true"></span> 当前运行版本</strong>
-            <span id="updateStatePill" class="tunnel-state-pill">待检查</span>
+        <section class="update-hero-wrap">
+          <div class="update-hero-grid">
+            <div class="update-hero-tile is-server">
+              <div class="update-hero-tile-head">
+                <span class="update-tile-label"><span class="btn-icon-glyph" data-icon="refresh" data-icon-size="12" aria-hidden="true"></span> 服务端</span>
+                <span id="updateStatePill" class="tunnel-state-pill">待检查</span>
+              </div>
+              <div id="updateCurrentInfo" class="update-meta-box">正在读取版本信息…</div>
+              <div id="updateRemoteInfo" class="update-meta-box update-remote-banner" hidden></div>
+            </div>
+            <div id="updateDesktopInfo" class="update-hero-tile is-desktop update-meta-box update-desktop-box" hidden></div>
           </div>
-          <div id="updateCurrentInfo" class="update-meta-box">正在读取版本信息…</div>
-          <div id="updateRemoteInfo" class="update-meta-box" hidden></div>
-          <div id="updateDesktopInfo" class="update-meta-box update-desktop-box" hidden></div>
           <div id="updateActionStatus" class="composer-status" role="status" aria-live="polite" hidden></div>
           <div id="updateDirtyWarning" class="update-dirty-box" hidden></div>
         </section>
 
-        <section class="tunnel-card update-settings-card">
-          <div class="tunnel-card-head">
-            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="settings" data-icon-size="13" aria-hidden="true"></span> 自动更新策略</strong>
-          </div>
-          <label class="update-toggle-row">
-            <input id="autoCheckUpdateToggle" type="checkbox" checked />
-            <span class="update-toggle-copy">
-              <strong>定期自动检测新版本</strong>
-              <small>每 6 小时自动检查远端仓库是否有更新，手机端和桌面端同步展示提醒</small>
-            </span>
-          </label>
-          <label class="update-toggle-row">
-            <input id="autoUpdateToggle" type="checkbox" />
-            <span class="update-toggle-copy">
-              <strong>闲时自动更新并重启服务</strong>
-              <small>仅在本地工作区无未提交改动、且当前没有任何执行中的对话或语音通话时自动拉取并平滑重启</small>
-            </span>
-          </label>
-          <label class="update-toggle-row">
-            <input id="autoUpdateDesktopToggle" type="checkbox" checked />
-            <span class="update-toggle-copy">
-              <strong>同步更新桌面 App 壳子</strong>
-              <small>服务端版本或桌面端代码变化时自动更新本机桌面 App 壳子或快捷入口（macOS / Windows / Linux）</small>
-            </span>
-          </label>
-          <label class="update-toggle-row">
-            <input id="agentAutoTitleToggle" type="checkbox" checked />
-            <span class="update-toggle-copy">
-              <strong>允许 AI 会话主动同步标题</strong>
-              <small>开启后，Claude / Antigravity / Codex 可在确定主题时同步简短中文标题；关闭后仅保留上游原始标题与手动重命名</small>
-            </span>
-          </label>
-          <label class="update-toggle-row">
-            <input id="autoUpdateCliToggle" type="checkbox" checked />
-            <span class="update-toggle-copy">
-              <strong>闲时自动更新 Codex / Claude CLI</strong>
-              <small>每 6 小时检查 npm 最新版本，仅在没有任何运行中对话时自动执行全局升级</small>
-            </span>
-          </label>
-        </section>
+        <div class="update-tabs" role="tablist" aria-label="更新详情维度">
+          <button type="button" role="tab" class="update-tab-btn is-active" data-update-tab="notes" aria-selected="true">
+            <span>更新说明</span>
+            <span id="updateTabNotesBadge" class="update-tab-badge"></span>
+          </button>
+          <button type="button" role="tab" class="update-tab-btn" data-update-tab="settings" aria-selected="false">
+            <span>更新策略</span>
+            <span id="updateTabSettingsBadge" class="update-tab-badge"></span>
+          </button>
+          <button type="button" role="tab" class="update-tab-btn" data-update-tab="cli" aria-selected="false">
+            <span>CLI 工具</span>
+            <span id="updateTabCliBadge" class="update-tab-badge"></span>
+          </button>
+        </div>
 
-        <section id="cliUpdateCard" class="tunnel-card update-settings-card">
-          <div class="tunnel-card-head">
-            <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="terminal" data-icon-size="13" aria-hidden="true"></span> CLI 工具版本</strong>
-            <button type="button" id="checkCliUpdatesBtn" class="btn-secondary btn-xs">检查 CLI 更新</button>
-          </div>
-          <div id="cliVersionsList" class="update-meta-grid"></div>
-        </section>
+        <div class="update-tab-panels">
+          <div class="update-tab-panel" data-update-panel="notes" role="tabpanel">
+            <section id="updateReleaseNotesSection" class="update-notes-card" hidden>
+              <div id="updateReleaseNotesBody"></div>
+            </section>
 
-        <section id="updatePendingSection" class="tunnel-card update-pending-card" hidden>
-          <div class="tunnel-card-head">
-            <strong class="tunnel-card-title">待更新内容</strong>
-            <span id="updatePendingCount" class="update-pending-count">0 条提交</span>
+            <section id="updatePendingSection" class="update-pending-card" hidden>
+              <details id="updatePendingDetails" class="update-commits-details">
+                <summary class="update-commits-summary">
+                  <strong class="tunnel-card-title">技术提交明细</strong>
+                  <span id="updatePendingCount" class="update-pending-count">0 条提交</span>
+                </summary>
+                <ul id="updatePendingList" class="update-pending-list"></ul>
+              </details>
+            </section>
           </div>
-          <ul id="updatePendingList" class="update-pending-list"></ul>
-        </section>
+
+          <div class="update-tab-panel" data-update-panel="settings" role="tabpanel" hidden>
+            <section class="tunnel-card update-settings-card">
+              <label class="update-toggle-row">
+                <input id="autoCheckUpdateToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>定期自动检测新版本</strong>
+                  <small>每 6 小时自动检查远端仓库更新并多端提醒</small>
+                </span>
+              </label>
+              <label class="update-toggle-row">
+                <input id="autoUpdateToggle" type="checkbox" />
+                <span class="update-toggle-copy">
+                  <strong>闲时自动更新并重启服务</strong>
+                  <small>无未提交改动且无执行中对话或通话时平滑更新</small>
+                </span>
+              </label>
+              <label class="update-toggle-row">
+                <input id="autoUpdateDesktopToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>同步更新桌面 App 壳子</strong>
+                  <small>服务端或桌面端代码变化时自动同步本机桌面壳子</small>
+                </span>
+              </label>
+              <label class="update-toggle-row">
+                <input id="agentAutoTitleToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>允许 AI 会话主动同步标题</strong>
+                  <small>在确定主题时自动同步简短中文标题，关闭后保留原标题</small>
+                </span>
+              </label>
+              <label class="update-toggle-row">
+                <input id="autoUpdateCliToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <strong>闲时自动更新 Codex / Claude CLI</strong>
+                  <small>每 6 小时检查 npm 最新版，空闲时自动全局升级</small>
+                </span>
+              </label>
+              <div class="update-toggle-row">
+                <input id="agyAutoCompactToggle" type="checkbox" checked />
+                <span class="update-toggle-copy">
+                  <label for="agyAutoCompactToggle" class="update-toggle-label">
+                    <strong>AGY 发送前自动压缩上下文</strong>
+                    <small>上下文较上次压缩增长超过阈值时，先执行 /compact 再发送消息，节省周额度</small>
+                  </label>
+                  <select id="agyAutoCompactTokensSelect" class="update-inline-select" aria-label="AGY 自动压缩阈值">
+                    <option value="40000">40K</option>
+                    <option value="60000" selected>60K</option>
+                    <option value="90000">90K</option>
+                    <option value="120000">120K</option>
+                    <option value="200000">200K</option>
+                  </select>
+                </span>
+              </div>
+            </section>
+          </div>
+
+          <div class="update-tab-panel" data-update-panel="cli" role="tabpanel" hidden>
+            <section id="cliUpdateCard" class="tunnel-card update-cli-panel">
+              <div class="tunnel-card-head">
+                <strong class="tunnel-card-title"><span class="btn-icon-glyph" data-icon="terminal" data-icon-size="13" aria-hidden="true"></span> 已检测的 CLI 工具</strong>
+                <button type="button" id="checkCliUpdatesBtn" class="btn-secondary btn-xs">检查 CLI 更新</button>
+              </div>
+              <div id="cliVersionsList" class="cli-cards-grid"></div>
+            </section>
+          </div>
+        </div>
       </div>
       <div class="modal-foot update-modal-foot">
         <button type="button" id="restartServiceBtn" class="btn-secondary btn-sm">重启服务</button>
+        <div class="update-foot-spacer"></div>
         <button type="button" id="applyDesktopUpdateBtn" class="btn-secondary btn-sm" hidden>更新桌面 App</button>
         <button type="button" id="checkUpdateBtn" class="btn-secondary btn-sm">立即检查</button>
         <button type="button" id="applyUpdateBtn" class="btn-primary btn-sm" disabled>一键更新并重启</button>
@@ -851,7 +919,7 @@
     </div>
   </dialog>
 
-  <script type="module" src="./i18n.js?v=20261119goal"></script>
-  <script type="module" src="./app.js?v=20261119goal"></script>
+  <script type="module" src="./i18n.js?v=20261119autocompact1"></script>
+  <script type="module" src="./app.js?v=20261119autocompact1"></script>
 </body>
 </html>

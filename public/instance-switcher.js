@@ -357,16 +357,28 @@ export function compactModelBadgeLabel(rawModel = "") {
   const orchMatch = clean.match(/^orchestrator\s*\(([^)]+)\)/i);
   if (orchMatch?.[1]) {
     const inner = orchMatch[1].trim();
-    return inner.length > 12 ? inner.slice(0, 12) : inner;
+    return inner.length > 18 ? inner.slice(0, 18) : inner;
   }
-  if (clean === "gemini-pro-orchestrator" || lower === "orchestrator") {
-    return "Carbon";
+  const orchIdMatch = clean.match(/^gemini[- ]pro[- ]orchestrator(?:[- ]([a-z][a-z0-9]+))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (orchIdMatch || lower === "orchestrator") {
+    const rawCodename = orchIdMatch?.[1] && !/^(?:low|medium|high|xhigh)$/i.test(orchIdMatch[1])
+      ? orchIdMatch[1]
+      : "Carbon";
+    const word = rawCodename.charAt(0).toUpperCase() + rawCodename.slice(1).toLowerCase();
+    return `${word}${effortSuffix}`;
   }
 
   const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
   if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
     const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
     return `${word}${effortSuffix}`;
+  }
+  const geminiVersioned = clean.match(/^gemini[- ](\d+(?:[.-]\d+)*)[- ](pro|flash|lite|ultra|nano)(?:[- ](lite|exp|preview))?(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiVersioned) {
+    const ver = geminiVersioned[1].replace(/-/g, ".");
+    const tier = geminiVersioned[2].charAt(0).toUpperCase() + geminiVersioned[2].slice(1).toLowerCase();
+    const sub = geminiVersioned[3] ? ` ${geminiVersioned[3].charAt(0).toUpperCase() + geminiVersioned[3].slice(1).toLowerCase()}` : "";
+    return `${ver} ${tier}${sub}${effortSuffix}`;
   }
   if (clean === "gemini-4-carbon-high" || /carbon.*\(high\)/i.test(clean) || /^gemini-.*carbon-high$/i.test(clean)) {
     return "Carbon H";
@@ -410,7 +422,12 @@ export function compactModelBadgeLabel(rawModel = "") {
     return "5.3 Codex";
   }
   if (lower.includes("gpt-")) {
-    return clean.replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1").toUpperCase().slice(0, 12);
+    const baseGpt = clean
+      .replace(/^.*?(gpt-[0-9a-z.-]+).*$/i, "$1")
+      .replace(/-(?:low|medium|high|xhigh)$/i, "")
+      .toUpperCase();
+    const withEffort = `${baseGpt}${effortSuffix}`;
+    return withEffort.length > 20 ? withEffort.slice(0, 20) : withEffort;
   }
   if (lower.startsWith("grok-")) {
     if (lower.includes("4.7-build-fast") || lower.includes("4.7 fast")) return "Grok 4.7F";
@@ -422,7 +439,7 @@ export function compactModelBadgeLabel(rawModel = "") {
     .replace(/^(Claude|Gemini)\s+/i, "")
     .trim();
   if (!stripped) return "默认";
-  return stripped.length > 12 ? stripped.slice(0, 12) : stripped;
+  return stripped.length > 18 ? stripped.slice(0, 18) : stripped;
 }
 
 export function compactEffortBadgeLabel(effort = "") {

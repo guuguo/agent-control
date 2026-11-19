@@ -299,7 +299,7 @@ function stripInjectedBlocksKeepLines(raw) {
     .replace(/\[SYSTEM NOTIFICATION - NOT USER INPUT\](?:[^\n]*\n?){0,6}?(?=\s*<task-notification\b|\s*$)/gi, "\n")
     .replace(/<task-notification\b[^>]*>[\s\S]*?<\/task-notification>/gi, "\n")
     .replace(/(?:^|\n)[ \t]*Another Claude session sent a message:\s*\n?<cross-session-message\b[^>]*>[\s\S]*?<\/cross-session-message>|<cross-session-message\b[^>]*>[\s\S]*?<\/cross-session-message>/gi, "\n")
-    .replace(/<(?:system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/(?:system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)>/gi, "\n")
+    .replace(/<(system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|side-sessions-event|tools-used-before-summary)\b[^>]*>[\s\S]*?<\/\1>/gi, "\n")
     .replace(/<bash-stdout\b[^>]*>[\s\S]*?<\/bash-stdout>/gi, "\n")
     .replace(/<bash-stderr\b[^>]*>[\s\S]*?<\/bash-stderr>/gi, "\n")
     .replace(/<bash-input\b[^>]*>([\s\S]*?)<\/bash-input>/gi, "\n$1\n")

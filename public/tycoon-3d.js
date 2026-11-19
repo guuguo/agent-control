@@ -116,6 +116,38 @@ function topicMatchesSearch(topic, q = "") {
   });
 }
 
+export function resolveWorkstationActivityState({ liveCount = 0, pendingCount = 0, readyToHarvest = false } = {}) {
+  const live = Math.max(0, Number(liveCount) || 0);
+  const pending = Math.max(0, Number(pendingCount) || 0);
+  const intensityTier = live >= 3 ? 3 : (live === 2 ? 2 : (live === 1 ? 1 : 0));
+  const state = pending > 0 ? "pending" : (live > 0 ? "working" : "resting");
+  const statusText = pending > 0
+    ? `待拍板 ${pending}`
+    : (live >= 3
+        ? `超频爆气 ×${live}`
+        : (live === 2 ? "火力全开 ×2" : (live === 1 ? "工作中" : "休息中")));
+  return {
+    state,
+    intensityTier,
+    isWorking: live > 0,
+    isPending: pending > 0,
+    isResting: live === 0 && pending === 0,
+    statusText,
+    showHarvest: Boolean(readyToHarvest),
+  };
+}
+
+export const STATION_ARCHETYPES = Object.freeze({
+  "indie-lab": "code",
+  "drama-studio": "studio",
+  "global-pub": "broadcast",
+  "bounty-guild": "workshop",
+});
+
+export function resolveStationArchetype(roomId = "") {
+  return STATION_ARCHETYPES[roomId] || "code";
+}
+
 export function computeStudioProgression(overview) {
   const domains = Array.isArray(overview?.domains) ? overview.domains : [];
   const flatTopics = domains.flatMap((d) => d.topics || []);
@@ -185,6 +217,7 @@ export function buildTycoonWorldLayout(overview, {
       workstations.push({
         topicId: tp.id,
         roomId,
+        archetype: resolveStationArchetype(roomId),
         name: tp.name,
         landmark: tp.landmark || DEFAULT_LANDMARK_FALLBACK[tp.id] || "tower",
         yieldType: tp.yieldType || "growth",
@@ -560,6 +593,87 @@ export function createTycoon3DWorld(containerEl, {
       }
       g.fillStyle = grd;
       g.fillRect(0, 0, w, h);
+    });
+
+    tex.zzz = canvasTex(128, 128, (g, w, h) => {
+      g.clearRect(0, 0, w, h);
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+      const mainColor = light ? "#475569" : "#cbd5e1";
+      const strokeColor = light ? "rgba(255,255,255,0.92)" : "rgba(15,23,42,0.92)";
+      const drawZ = (char, x, y, size, angle) => {
+        g.save();
+        g.translate(x, y);
+        g.rotate(angle);
+        g.font = `900 ${size}px ui-sans-serif, system-ui, -apple-system, sans-serif`;
+        g.lineWidth = 6;
+        g.strokeStyle = strokeColor;
+        g.strokeText(char, 0, 0);
+        g.fillStyle = mainColor;
+        g.fillText(char, 0, 0);
+        g.restore();
+      };
+      drawZ("z", 40, 86, 34, -0.14);
+      drawZ("Z", 82, 42, 48, 0.12);
+    });
+
+    tex.hazard = canvasTex(256, 64, (g, w, h) => {
+      g.fillStyle = "#1e293b";
+      g.fillRect(0, 0, w, h);
+      g.fillStyle = "#f59e0b";
+      for (let x = -h; x < w + h; x += 32) {
+        g.beginPath();
+        g.moveTo(x, h);
+        g.lineTo(x + 16, h);
+        g.lineTo(x + 16 + h, 0);
+        g.lineTo(x + h, 0);
+        g.closePath();
+        g.fill();
+      }
+    }, { repeat: true });
+    tex.hazard.repeat.set(8, 1);
+
+    tex.aura = canvasTex(128, 256, (g, w, h) => {
+      g.clearRect(0, 0, w, h);
+      for (let i = 0; i < 10; i += 1) {
+        const cx = ((i + 0.5) / 10) * w;
+        const bw = 6 + (i % 3) * 4;
+        const grd = g.createLinearGradient(cx, h, cx, 0);
+        grd.addColorStop(0, "rgba(255,255,255,0)");
+        grd.addColorStop(0.22, "rgba(255,244,190,0.85)");
+        grd.addColorStop(0.6, "rgba(251,146,60,0.65)");
+        grd.addColorStop(1, "rgba(251,191,36,0)");
+        g.fillStyle = grd;
+        g.fillRect(cx - bw / 2, 0, bw, h);
+      }
+    }, { repeat: true });
+    tex.aura.repeat.set(2, 1);
+
+    tex.moon = canvasTex(128, 128, (g, w, h) => {
+      g.clearRect(0, 0, w, h);
+      const tmp = document.createElement("canvas");
+      tmp.width = w;
+      tmp.height = h;
+      const tg = tmp.getContext("2d");
+      tg.fillStyle = light ? "#f59e0b" : "#fde68a";
+      tg.beginPath();
+      tg.arc(58, 66, 40, 0, Math.PI * 2);
+      tg.fill();
+      tg.globalCompositeOperation = "destination-out";
+      tg.beginPath();
+      tg.arc(80, 48, 36, 0, Math.PI * 2);
+      tg.fill();
+      g.save();
+      g.shadowColor = light ? "rgba(15,23,42,0.55)" : "rgba(253,230,138,0.85)";
+      g.shadowBlur = light ? 6 : 14;
+      g.drawImage(tmp, 0, 0);
+      g.restore();
+      g.fillStyle = light ? "#64748b" : "#f8fafc";
+      [[100, 96, 4.5], [108, 26, 3.5], [22, 22, 3]].forEach(([x, y, r]) => {
+        g.beginPath();
+        g.arc(x, y, r, 0, Math.PI * 2);
+        g.fill();
+      });
     });
   }
 
@@ -1319,7 +1433,7 @@ export function createTycoon3DWorld(containerEl, {
   }
 
   // ------------------------------------------------------------- characters
-  function buildBot(provider = "codex", { scale = 1, working = false } = {}) {
+  function buildBot(provider = "codex", { scale = 1, working = false, headband = false, overdrive = false, pose = "seat" } = {}) {
     const light = isLight();
     const pal = PROVIDER_COLORS[provider] || PROVIDER_COLORS.default;
     const bot = new THREE.Group();
@@ -1328,13 +1442,16 @@ export function createTycoon3DWorld(containerEl, {
     const bodyMat = phys(pal.body, { rough: 0.32, clear: 0.9 });
     const shellMat = phys(light ? 0xffffff : 0xe2e8f0, { rough: 0.26, clear: 1 });
     const visorMat = phys(0x070d1a, { rough: 0.1, metal: 0.5, clear: 1 });
-    const eyeMat = neon(pal.eye);
+    const eyeMat = working
+      ? neon(pal.eye)
+      : phys(light ? 0x64748b : 0x475569, { rough: 0.5 });
 
     const torso = mesh(capsuleGeo(0.21, 0.24), bodyMat);
     torso.position.y = 0.48;
     bot.add(torso);
 
-    const belly = mesh(geo("bot-belly", () => new THREE.CircleGeometry(0.065, 20)), neon(pal.emissive), { cast: false });
+    const bellyMat = working ? neon(pal.emissive) : phys(0x475569, { rough: 0.5 });
+    const belly = mesh(geo("bot-belly", () => new THREE.CircleGeometry(0.065, 20)), bellyMat, { cast: false });
     belly.position.set(0, 0.5, 0.212);
     bot.add(belly);
 
@@ -1356,7 +1473,36 @@ export function createTycoon3DWorld(containerEl, {
     const eyeR = mesh(capsuleGeo(0.032, 0.05), eyeMat, { cast: false });
     eyeR.position.x = 0.09;
     eyes.add(eyeL, eyeR);
+    if (!working) {
+      eyes.scale.y = 0.22;
+    }
     headGroup.add(eyes);
+
+    // Working intensity headband (红头巾 + 飘带)
+    let headbandTails = null;
+    if (working && headband) {
+      const bandMat = phys(0xdc2626, { rough: 0.35, emissive: 0x991b1b, ei: 0.45 });
+      const band = mesh(torusGeo(0.305, 0.036, 8, 32), bandMat);
+      band.rotation.x = Math.PI / 2 - 0.18;
+      band.position.set(0, 0.13, 0.02);
+      const knot = mesh(sphereGeo(0.055, 10, 8), bandMat);
+      knot.position.set(0, 0.14, -0.31);
+
+      const tailL = new THREE.Group();
+      tailL.position.set(-0.04, 0.14, -0.32);
+      const tailLMesh = mesh(boxGeo(0.055, 0.26, 0.018), bandMat);
+      tailLMesh.position.y = -0.13;
+      tailL.add(tailLMesh);
+
+      const tailR = new THREE.Group();
+      tailR.position.set(0.04, 0.14, -0.32);
+      const tailRMesh = mesh(boxGeo(0.055, 0.24, 0.018), bandMat);
+      tailRMesh.position.y = -0.12;
+      tailR.add(tailRMesh);
+
+      headGroup.add(band, knot, tailL, tailR);
+      headbandTails = [tailL, tailR];
+    }
 
     // Brand crest
     let crest = null;
@@ -1390,11 +1536,20 @@ export function createTycoon3DWorld(containerEl, {
 
     const leftArm = mesh(capsuleGeo(0.055, 0.17), shellMat);
     leftArm.position.set(-0.29, 0.56, 0.08);
-    leftArm.rotation.x = -0.9;
+    leftArm.rotation.x = working ? -0.9 : -1.25;
     const rightArm = mesh(capsuleGeo(0.055, 0.17), shellMat);
     rightArm.position.set(0.29, 0.56, 0.08);
-    rightArm.rotation.x = -0.9;
+    rightArm.rotation.x = working ? -0.9 : -1.25;
     bot.add(leftArm, rightArm);
+
+    if (!working && pose !== "lying") {
+      torso.rotation.x = 0.24;
+      headGroup.position.set(0, 0.90, 0.14);
+      headGroup.rotation.set(0.56, 0, 0.22);
+    } else if (pose === "lying") {
+      leftArm.rotation.x = -0.3;
+      rightArm.rotation.x = -0.3;
+    }
 
     bot.userData = {
       headGroup,
@@ -1403,7 +1558,11 @@ export function createTycoon3DWorld(containerEl, {
       torso,
       leftArm,
       rightArm,
+      headbandTails,
       working,
+      headband,
+      overdrive,
+      pose,
       nextBlink: performance.now() + 1500 + Math.random() * 3500,
       phase: Math.random() * Math.PI * 2,
     };
@@ -1415,12 +1574,13 @@ export function createTycoon3DWorld(containerEl, {
     const light = isLight();
     const root = new THREE.Group();
     root.position.set(0, 0, -1.25);
-    const speed = live ? 1.6 : 0.7;
+    const speed = live ? 1.8 : 0.1;
 
     const pedMat = phys(light ? 0xe2e8f0 : 0x1e293b, { rough: 0.3, metal: 0.55, clear: 0.8 });
     const ped = mesh(cylGeo(0.92, 1.05, 0.22, 32), pedMat, { cast: true, receive: true });
     ped.position.y = 0.11;
-    const pedRing = mesh(torusGeo(0.95, 0.022, 6, 64), neon(live ? 0x34d399 : 0x38bdf8), { cast: false });
+    const pedRingMat = live ? neon(0x34d399) : phys(light ? 0x94a3b8 : 0x334155, { rough: 0.6 });
+    const pedRing = mesh(torusGeo(0.95, 0.022, 6, 64), pedRingMat, { cast: false });
     pedRing.rotation.x = Math.PI / 2;
     pedRing.position.y = 0.22;
     root.add(ped, pedRing);
@@ -2124,22 +2284,419 @@ export function createTycoon3DWorld(containerEl, {
   }
 
   // --------------------------------------------------------- workstation
+  function buildSafetyCone(alertRed = false) {
+    const g = new THREE.Group();
+    const base = mesh(boxGeo(0.32, 0.04, 0.32), phys(0x1e293b, { rough: 0.6 }), { cast: true, receive: true });
+    base.position.y = 0.02;
+    const cone = mesh(coneGeo(0.13, 0.38, 16), phys(alertRed ? 0xef4444 : 0xf97316, { rough: 0.35 }), { cast: true });
+    cone.position.y = 0.23;
+    const stripe = mesh(cylGeo(0.075, 0.102, 0.08, 16), phys(0xf8fafc, { rough: 0.25 }), { cast: false });
+    stripe.position.y = 0.22;
+    g.add(base, cone, stripe);
+    return g;
+  }
+
+  // Resting lounge couch (bot naps here when the station is idle)
+  function buildCouch(light) {
+    const g = new THREE.Group();
+    const fabric = phys(light ? 0x818cf8 : 0x4338ca, { rough: 0.85 });
+    const cushionMat = phys(light ? 0xc7d2fe : 0x6366f1, { rough: 0.9 });
+    const base = mesh(slabGeo(1.3, 0.72, 0.24, 0.14, 0.05), fabric, { cast: true, receive: true });
+    base.position.y = 0.04;
+    const seat = mesh(slabGeo(1.1, 0.6, 0.1, 0.12, 0.04), cushionMat, { cast: true, receive: true });
+    seat.position.y = 0.28;
+    const back = mesh(panelGeo(1.3, 0.5, 0.2, 0.1), fabric);
+    back.position.set(0, 0.5, -0.27);
+    const armL = mesh(slabGeo(0.16, 0.72, 0.44, 0.06, 0.03), fabric, { cast: true });
+    armL.position.set(-0.62, 0, 0);
+    const armR = mesh(slabGeo(0.16, 0.72, 0.44, 0.06, 0.03), fabric, { cast: true });
+    armR.position.set(0.62, 0, 0);
+    const pillow = mesh(slabGeo(0.3, 0.42, 0.12, 0.1, 0.04), phys(0xf8fafc, { rough: 0.9 }));
+    pillow.position.set(-0.4, 0.38, 0.02);
+    g.add(base, seat, back, armL, armR, pillow);
+    return g;
+  }
+
+  // Room-specific station rigs so every department reads differently at a glance.
+  function buildStationRig(ws, act, light, pal) {
+    const g = new THREE.Group();
+    const anims = [];
+    const powered = act.isWorking || act.isPending;
+    const archetype = ws.archetype || resolveStationArchetype(ws.roomId);
+    const screenMat = screenMaterial(ws);
+    const darkMetal = phys(light ? 0x94a3b8 : 0x334155, { rough: 0.28, metal: 0.85 });
+    const bezelMat = phys(0x0b1220, { rough: 0.28, metal: 0.6, clear: 0.9 });
+    const onColor = act.isPending ? 0xef4444 : (act.intensityTier >= 3 ? 0xfb923c : (act.intensityTier === 2 ? 0xf59e0b : 0x34d399));
+    const offColor = light ? 0x94a3b8 : 0x1e293b;
+    const ledMat = (on, color = onColor) => new THREE.MeshBasicMaterial({
+      color: on ? color : offColor,
+      toneMapped: false,
+      transparent: true,
+      opacity: 1,
+    });
+    const addScreen = (w, h, x, y, z, rotY = 0) => {
+      const sg = new THREE.Group();
+      sg.position.set(x, y, z);
+      sg.rotation.y = rotY;
+      const bezel = mesh(panelGeo(w + 0.08, h + 0.08, 0.05, 0.04), bezelMat);
+      const scr = mesh(geo(`rig-scr|${w}|${h}`, () => new THREE.PlaneGeometry(w, h)), screenMat, { cast: false });
+      scr.position.z = 0.027;
+      sg.add(bezel, scr);
+      g.add(sg);
+      return sg;
+    };
+    const addDesk = (w, d, topMat, y = 0.68) => {
+      const top = mesh(slabGeo(w, d, 0.07, 0.12, 0.025), topMat, { cast: true, receive: true });
+      top.position.set(0, y, 0.12);
+      g.add(top);
+      [-(w / 2 - 0.12), w / 2 - 0.12].forEach((lx) => {
+        const leg = mesh(boxGeo(0.06, y, d - 0.14), darkMetal);
+        leg.position.set(lx, y / 2, 0.12);
+        g.add(leg);
+      });
+    };
+
+    if (archetype === "studio") {
+      // Film camera on a tripod + softbox light + director monitor + clapperboard
+      const cam = new THREE.Group();
+      cam.position.set(0, 0, 0.15);
+      for (let i = 0; i < 3; i += 1) {
+        const a = (i / 3) * Math.PI * 2 + 0.5;
+        const leg = mesh(cylGeo(0.022, 0.03, 1.2, 8), darkMetal);
+        leg.position.set(Math.cos(a) * 0.22, 0.56, Math.sin(a) * 0.22);
+        leg.rotation.set(-Math.sin(a) * 0.36, 0, Math.cos(a) * 0.36);
+        cam.add(leg);
+      }
+      const head = new THREE.Group();
+      head.position.y = 1.18;
+      const camBodyMat = phys(light ? 0x1f2937 : 0x111827, { rough: 0.35, metal: 0.5, clear: 0.6 });
+      const camBody = mesh(boxGeo(0.44, 0.34, 0.66), camBodyMat);
+      camBody.position.y = 0.1;
+      const lens = mesh(cylGeo(0.13, 0.16, 0.32, 20), camBodyMat);
+      lens.rotation.x = Math.PI / 2;
+      lens.position.set(0, 0.1, -0.48);
+      const lensGlass = mesh(cylGeo(0.11, 0.11, 0.012, 20), powered ? neon(0x38bdf8) : phys(0x0b1220, { rough: 0.2 }), { cast: false });
+      lensGlass.rotation.x = Math.PI / 2;
+      lensGlass.position.set(0, 0.1, -0.645);
+      const reelMat = phys(light ? 0x475569 : 0x334155, { rough: 0.3, metal: 0.7 });
+      const reel1 = mesh(cylGeo(0.2, 0.2, 0.06, 24), reelMat);
+      reel1.rotation.z = Math.PI / 2;
+      reel1.position.set(0, 0.47, -0.12);
+      const reel2 = mesh(cylGeo(0.2, 0.2, 0.06, 24), reelMat);
+      reel2.rotation.z = Math.PI / 2;
+      reel2.position.set(0, 0.47, 0.2);
+      const recMat = ledMat(powered, 0xef4444);
+      const rec = mesh(sphereGeo(0.055, 12, 10), recMat, { cast: false });
+      rec.position.set(0.16, 0.3, -0.26);
+      head.add(camBody, lens, lensGlass, reel1, reel2, rec);
+      cam.add(head);
+      g.add(cam);
+
+      const box = new THREE.Group();
+      box.position.set(-1.2, 0, -0.2);
+      const boxBase = mesh(cylGeo(0.2, 0.24, 0.05, 16), darkMetal);
+      boxBase.position.y = 0.025;
+      const pole = mesh(cylGeo(0.025, 0.03, 1.55, 8), darkMetal);
+      pole.position.y = 0.78;
+      box.add(boxBase, pole);
+      const boxHead = new THREE.Group();
+      boxHead.position.y = 1.62;
+      boxHead.rotation.order = "YXZ";
+      boxHead.rotation.set(0.35, 1.2, 0);
+      const boxBody = mesh(boxGeo(0.66, 0.52, 0.26), phys(0x0f172a, { rough: 0.6 }));
+      const faceMat = new THREE.MeshBasicMaterial({ color: powered ? 0xfff7d6 : (light ? 0x64748b : 0x1e293b), toneMapped: false });
+      const face = mesh(geo("softbox-face", () => new THREE.PlaneGeometry(0.6, 0.46)), faceMat, { cast: false });
+      face.position.z = 0.135;
+      boxHead.add(boxBody, face);
+      if (powered) {
+        const beamMatS = new THREE.MeshBasicMaterial({
+          color: 0xfff1c1,
+          transparent: true,
+          opacity: light ? 0.24 : 0.18,
+          blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          toneMapped: false,
+        });
+        const beamCone = new THREE.Mesh(coneGeo(0.6, 1.5, 24, true), beamMatS);
+        beamCone.rotation.x = -Math.PI / 2;
+        beamCone.position.z = 0.9;
+        boxHead.add(beamCone);
+      }
+      box.add(boxHead);
+      g.add(box);
+
+      const monPole = mesh(cylGeo(0.022, 0.026, 0.95, 8), darkMetal);
+      monPole.position.set(0.95, 0.47, -0.2);
+      g.add(monPole);
+      addScreen(0.52, 0.32, 0.95, 1.08, -0.2, -0.5);
+
+      const clap = new THREE.Group();
+      clap.position.set(0.62, 0, 0.62);
+      clap.rotation.y = -0.6;
+      const board = mesh(boxGeo(0.36, 0.26, 0.03), phys(0x0f172a, { rough: 0.5 }));
+      board.position.y = 0.16;
+      const stickPivot = new THREE.Group();
+      stickPivot.position.set(-0.18, 0.32, 0);
+      const stick = mesh(boxGeo(0.38, 0.06, 0.035), phys(0xf8fafc, { rough: 0.4 }));
+      stick.position.x = 0.19;
+      stickPivot.add(stick);
+      clap.add(board, stickPivot);
+      g.add(clap);
+
+      if (powered) {
+        anims.push((t) => {
+          reel1.rotation.x = t * 4;
+          reel2.rotation.x = t * 4;
+          recMat.color.setHex(Math.sin(t * 6) > 0 ? 0xef4444 : 0x450a0a);
+          stickPivot.rotation.z = Math.max(0, Math.sin(t * 2.4)) * 0.55;
+        });
+      }
+    } else if (archetype === "broadcast") {
+      // Broadcast console + video wall + ON AIR light + rotating satellite dish
+      const consoleMat = phys(light ? 0xf1f5f9 : 0x1e293b, { rough: 0.3, clear: 0.8 });
+      const consoleBase = mesh(boxGeo(2.0, 0.62, 0.7), consoleMat, { cast: true, receive: true });
+      consoleBase.position.set(0, 0.31, 0.2);
+      const consoleTop = mesh(boxGeo(2.04, 0.06, 0.8), phys(light ? 0xcbd5e1 : 0x0f172a, { rough: 0.4, metal: 0.4 }));
+      consoleTop.position.set(0, 0.66, 0.2);
+      consoleTop.rotation.x = 0.22;
+      g.add(consoleBase, consoleTop);
+      const btnColors = [0x34d399, 0xf59e0b, 0x38bdf8, 0xef4444];
+      const btnMats = [];
+      for (let i = 0; i < 9; i += 1) {
+        const m = ledMat(powered, btnColors[i % btnColors.length]);
+        const btn = mesh(boxGeo(0.11, 0.04, 0.11), m, { cast: false });
+        btn.position.set(-0.76 + i * 0.19, 0.69, 0.3);
+        btn.rotation.x = 0.22;
+        g.add(btn);
+        btnMats.push(m);
+      }
+      [-0.9, 0.9].forEach((px) => {
+        const post = mesh(cylGeo(0.03, 0.03, 1.1, 8), darkMetal);
+        post.position.set(px, 0.95, -0.36);
+        g.add(post);
+      });
+      addScreen(1.9, 0.72, 0, 1.45, -0.34, 0);
+      const onAirMat = ledMat(powered, 0xef4444);
+      const onAir = mesh(boxGeo(0.56, 0.18, 0.08), onAirMat, { cast: false });
+      onAir.position.set(0, 1.96, -0.34);
+      g.add(onAir);
+      const mic = new THREE.Group();
+      mic.position.set(0.45, 0.7, 0.32);
+      const micStem = mesh(cylGeo(0.012, 0.012, 0.28, 6), darkMetal);
+      micStem.position.y = 0.14;
+      const micHead = mesh(sphereGeo(0.055, 12, 10), phys(0x111827, { rough: 0.6 }));
+      micHead.position.y = 0.3;
+      mic.add(micStem, micHead);
+      g.add(mic);
+
+      const sat = new THREE.Group();
+      sat.position.set(-1.3, 0, -0.1);
+      const satBase = mesh(cylGeo(0.18, 0.22, 0.08, 16), darkMetal);
+      satBase.position.y = 0.04;
+      const satPole = mesh(cylGeo(0.035, 0.045, 1.0, 10), darkMetal);
+      satPole.position.y = 0.5;
+      sat.add(satBase, satPole);
+      const yaw = new THREE.Group();
+      yaw.position.y = 1.02;
+      const tilt = new THREE.Group();
+      tilt.rotation.x = 0.75;
+      const dishMat = cached(`sat-dish-${light}`, () => new THREE.MeshStandardMaterial({
+        color: light ? 0xf8fafc : 0xcbd5e1,
+        roughness: 0.4,
+        metalness: 0.3,
+        side: THREE.DoubleSide,
+      }));
+      const dish = mesh(geo("sat-dish", () => new THREE.SphereGeometry(0.52, 24, 10, 0, Math.PI * 2, 0, 0.78)), dishMat);
+      dish.rotation.x = Math.PI;
+      dish.position.y = 0.52;
+      const feed = mesh(cylGeo(0.015, 0.015, 0.42, 6), darkMetal);
+      feed.position.y = 0.28;
+      const feedTip = mesh(sphereGeo(0.045, 10, 8), powered ? neon(onColor) : phys(offColor, { rough: 0.5 }), { cast: false });
+      feedTip.position.y = 0.5;
+      tilt.add(dish, feed, feedTip);
+      yaw.add(tilt);
+      sat.add(yaw);
+      g.add(sat);
+
+      if (powered) {
+        anims.push((t) => {
+          yaw.rotation.y = t * 0.9;
+          onAirMat.opacity = 0.55 + 0.45 * (Math.sin(t * 5) > 0 ? 1 : 0.3);
+          btnMats.forEach((m, i) => { m.opacity = Math.sin(t * (5 + i) + i * 1.3) > -0.2 ? 1 : 0.25; });
+        });
+      }
+    } else if (archetype === "workshop") {
+      // Workbench + robotic arm welding + spinning gear wheel + crates + toolbox
+      const wood = phys(light ? 0xc2875a : 0x7c4a2a, { rough: 0.7 });
+      const woodDark = phys(light ? 0x8a5a3b : 0x4a2c1a, { rough: 0.75 });
+      const benchTop = mesh(slabGeo(2.15, 0.95, 0.12, 0.06, 0.02), wood, { cast: true, receive: true });
+      benchTop.position.set(0, 0.62, 0.1);
+      g.add(benchTop);
+      [[-0.95, -0.27], [0.95, -0.27], [-0.95, 0.47], [0.95, 0.47]].forEach(([lx, lz]) => {
+        const leg = mesh(boxGeo(0.1, 0.62, 0.1), woodDark);
+        leg.position.set(lx, 0.31, lz);
+        g.add(leg);
+      });
+      const anvil = mesh(boxGeo(0.36, 0.18, 0.24), darkMetal);
+      anvil.position.set(0.5, 0.83, 0.08);
+      const toolbox = mesh(boxGeo(0.44, 0.24, 0.26), phys(0xdc2626, { rough: 0.4, metal: 0.3 }));
+      toolbox.position.set(0.98, 0.12, -0.55);
+      const handle = mesh(boxGeo(0.22, 0.04, 0.04), darkMetal);
+      handle.position.set(0.98, 0.27, -0.55);
+      g.add(anvil, toolbox, handle);
+
+      const armColor = powered ? 0xf97316 : (light ? 0x94a3b8 : 0x475569);
+      const armMat = phys(armColor, { rough: 0.35, metal: 0.4 });
+      const arm = new THREE.Group();
+      arm.position.set(-0.42, 0.68, -0.05);
+      const armBase = mesh(cylGeo(0.14, 0.17, 0.1, 16), darkMetal);
+      armBase.position.y = 0.05;
+      arm.add(armBase);
+      const armYaw = new THREE.Group();
+      armYaw.position.y = 0.1;
+      const shoulder = new THREE.Group();
+      const seg1 = mesh(boxGeo(0.1, 0.55, 0.1), armMat);
+      seg1.position.y = 0.275;
+      const elbow = new THREE.Group();
+      elbow.position.y = 0.55;
+      const seg2 = mesh(boxGeo(0.08, 0.45, 0.08), armMat);
+      seg2.position.y = 0.225;
+      const claw = mesh(sphereGeo(0.06, 10, 8), darkMetal);
+      claw.position.y = 0.46;
+      elbow.add(seg2, claw);
+      shoulder.add(seg1, elbow);
+      armYaw.add(shoulder);
+      arm.add(armYaw);
+      g.add(arm);
+      const weldSparks = [];
+      if (powered) {
+        for (let i = 0; i < 6; i += 1) {
+          const sm = new THREE.SpriteMaterial({
+            map: tex.glow,
+            color: i % 2 ? 0xfbbf24 : 0xfb923c,
+            transparent: true,
+            opacity: 0.95,
+            blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+            depthWrite: false,
+            toneMapped: false,
+          });
+          const sp = new THREE.Sprite(sm);
+          sp.scale.set(0.16, 0.16, 1);
+          sp.position.y = 0.48;
+          sp.userData.seed = Math.random() * Math.PI * 2;
+          elbow.add(sp);
+          weldSparks.push(sp);
+        }
+      } else {
+        shoulder.rotation.z = -0.15;
+        elbow.rotation.z = 2.3;
+      }
+
+      const gear = new THREE.Group();
+      gear.position.set(-1.28, 0, -0.25);
+      gear.rotation.y = Math.PI / 4;
+      [-0.12, 0.12].forEach((px) => {
+        const post = mesh(boxGeo(0.06, 0.8, 0.06), darkMetal);
+        post.position.set(px, 0.4, -0.08);
+        gear.add(post);
+      });
+      const wheel = new THREE.Group();
+      wheel.position.y = 0.86;
+      const gearMat = phys(powered ? 0xf59e0b : (light ? 0x94a3b8 : 0x475569), { rough: 0.3, metal: 0.8 });
+      wheel.add(mesh(torusGeo(0.4, 0.07, 8, 32), gearMat));
+      for (let i = 0; i < 10; i += 1) {
+        const a = (i / 10) * Math.PI * 2;
+        const tooth = mesh(boxGeo(0.12, 0.14, 0.1), gearMat);
+        tooth.position.set(Math.cos(a) * 0.49, Math.sin(a) * 0.49, 0);
+        tooth.rotation.z = a;
+        wheel.add(tooth);
+      }
+      const hub = mesh(cylGeo(0.1, 0.1, 0.14, 16), darkMetal);
+      hub.rotation.x = Math.PI / 2;
+      wheel.add(hub);
+      gear.add(wheel);
+      g.add(gear);
+
+      const crate = mesh(boxGeo(0.44, 0.44, 0.44), wood);
+      crate.position.set(-1.15, 0.22, 0.6);
+      const crate2 = mesh(boxGeo(0.3, 0.3, 0.3), woodDark);
+      crate2.position.set(-1.12, 0.59, 0.58);
+      crate2.rotation.y = 0.4;
+      g.add(crate, crate2);
+
+      if (powered) {
+        anims.push((t) => {
+          armYaw.rotation.y = Math.sin(t * 1.6) * 0.8;
+          shoulder.rotation.z = -0.5 + Math.sin(t * 2.2) * 0.25;
+          elbow.rotation.z = 1.2 + Math.sin(t * 3) * 0.35;
+          wheel.rotation.z = -t * 1.8;
+          weldSparks.forEach((sp) => {
+            const k = (t * 3 + sp.userData.seed) % 1;
+            sp.position.set(Math.cos(sp.userData.seed + t * 9) * k * 0.28, 0.48 + k * 0.18, Math.sin(sp.userData.seed + t * 9) * k * 0.28);
+            sp.material.opacity = 0.95 * (1 - k);
+          });
+        });
+      }
+    } else {
+      // Code lab: wide desk + triple monitors + blinking server rack
+      addDesk(2.1, 0.92, phys(light ? 0xffffff : 0x1e293b, { rough: 0.32, clear: 0.8 }));
+      const kb = mesh(slabGeo(0.62, 0.2, 0.03, 0.03, 0.01), phys(0x0f172a, { rough: 0.35, metal: 0.4, clear: 0.6 }));
+      kb.position.set(0, 0.75, 0.33);
+      g.add(kb);
+      if (powered) {
+        const kbGlow = mesh(boxGeo(0.58, 0.006, 0.16), neon(pal.emissive, { opacity: 0.6, additive: true }), { cast: false });
+        kbGlow.position.set(0, 0.785, 0.33);
+        g.add(kbGlow);
+      }
+      const stand = mesh(cylGeo(0.022, 0.022, 0.34, 8), darkMetal);
+      stand.position.set(0, 0.86, -0.18);
+      g.add(stand);
+      addScreen(0.84, 0.48, 0, 1.12, -0.18, 0);
+      addScreen(0.6, 0.42, -0.78, 1.08, -0.04, 0.5);
+      addScreen(0.6, 0.42, 0.78, 1.08, -0.04, -0.5);
+
+      const rack = new THREE.Group();
+      rack.position.set(-1.3, 0, -0.1);
+      const rackBody = mesh(boxGeo(0.46, 1.5, 0.5), phys(light ? 0x334155 : 0x0f172a, { rough: 0.4, metal: 0.6 }));
+      rackBody.position.y = 0.75;
+      rack.add(rackBody);
+      const leds = [];
+      for (let i = 0; i < 6; i += 1) {
+        const m = ledMat(powered);
+        const led = mesh(boxGeo(0.34, 0.05, 0.02), m, { cast: false });
+        led.position.set(0, 0.3 + i * 0.2, 0.26);
+        rack.add(led);
+        leds.push(m);
+      }
+      g.add(rack);
+      if (powered) {
+        anims.push((t) => {
+          leds.forEach((m, i) => { m.opacity = Math.sin(t * (7 + i * 1.7) + i) > 0 ? 1 : 0.25; });
+        });
+      }
+    }
+
+    return {
+      group: g,
+      anim: anims.length ? (t) => { for (let i = 0; i < anims.length; i += 1) anims[i](t); } : null,
+    };
+  }
+
   function screenMaterial(ws) {
     const light = isLight();
     if (ws.liveCount > 0) {
-      return cached("scr-live", () => new THREE.MeshBasicMaterial({ map: tex.code, color: 0xffffff, toneMapped: false }));
+      return cached(`scr-live-${light}`, () => new THREE.MeshBasicMaterial({ map: tex.code, color: light ? 0xd1fae5 : 0xffffff, toneMapped: false }));
     }
-    if (ws.readyToHarvest) {
-      return cached("scr-harvest", () => new THREE.MeshBasicMaterial({ map: tex.code, color: 0xe7c46b, toneMapped: false }));
+    if (ws.pendingCount > 0) {
+      return cached("scr-pending", () => new THREE.MeshBasicMaterial({ map: tex.code, color: 0xfca5a5, toneMapped: false }));
     }
-    if (ws.activeCount > 0) {
-      return cached(`scr-active-${light}`, () => new THREE.MeshBasicMaterial({ map: tex.code, color: light ? 0x8aa0c0 : 0x6a7f9f, toneMapped: false }));
-    }
-    return cached("scr-off", () => new THREE.MeshBasicMaterial({ color: 0x141c2b, toneMapped: false }));
+    return cached(`scr-off-${light}`, () => new THREE.MeshBasicMaterial({ color: light ? 0x1e293b : 0x0b1220, toneMapped: false }));
   }
 
   function buildWorkstation(ws, idx, now) {
     const light = isLight();
+    const act = resolveWorkstationActivityState(ws);
     const pal = PROVIDER_COLORS[ws.primaryProvider] || PROVIDER_COLORS.default;
     const group = new THREE.Group();
     group.position.set(ws.x, PLAT_TOP, ws.z);
@@ -2150,86 +2707,187 @@ export function createTycoon3DWorld(containerEl, {
     group.add(hit);
     interactiveMeshes.push(hit);
 
-    const pad = mesh(slabGeo(3.5, 3.5, 0.05, 0.55, 0.02), phys(light ? 0xeef2f7 : 0x0c1424, { rough: 0.45, clear: 0.6 }), { cast: false, receive: true });
+    const padColor = act.isPending
+      ? (light ? 0xfee2e2 : 0x2b1218)
+      : (act.isWorking ? (light ? 0xd1fae5 : 0x0b2520) : (light ? 0xe9eef5 : 0x0c1424));
+    const pad = mesh(slabGeo(3.5, 3.5, 0.05, 0.55, 0.02), phys(padColor, { rough: 0.45, clear: 0.6 }), { cast: false, receive: true });
     pad.position.set(0, 0, -0.3);
     group.add(pad);
 
-    const statusHex = ws.pendingCount > 0
+    const powerHex = act.isPending
       ? 0xef4444
-      : (ws.readyToHarvest ? 0xfbbf24 : (ws.liveCount > 0 ? 0x34d399 : 0x38bdf8));
+      : (act.intensityTier >= 3 ? 0xfb923c : (act.intensityTier === 2 ? 0xf59e0b : 0x10b981));
+    const statusHex = (act.isWorking || act.isPending)
+      ? powerHex
+      : (light ? 0x94a3b8 : 0x334155);
+
+    // Macro status floor pool: glowing spotlight when working, dim "lights out" shadow when resting
+    const poolBase = (act.isWorking || act.isPending) ? (light ? 0.42 : 0.6) : (light ? 0.14 : 0.42);
+    const poolMat = new THREE.MeshBasicMaterial({
+      map: tex.pool,
+      color: (act.isWorking || act.isPending) ? powerHex : (light ? 0x334155 : 0x000000),
+      transparent: true,
+      opacity: poolBase,
+      blending: (act.isWorking || act.isPending) && !light ? THREE.AdditiveBlending : THREE.NormalBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const pool = new THREE.Mesh(geo("ws-pool", () => {
+      const g = new THREE.PlaneGeometry(4.6, 4.6);
+      g.rotateX(-Math.PI / 2);
+      return g;
+    }), poolMat);
+    pool.position.set(0, 0.058, -0.3);
+    group.add(pool);
+
+    // Macro status light pillar (visible even at the most zoomed-out overview)
+    let pillar = null;
+    let pillarMat = null;
+    let pillarBase = 0;
+    if (act.isWorking || act.isPending) {
+      pillarBase = light ? 0.62 : 0.78;
+      pillarMat = new THREE.MeshBasicMaterial({
+        map: tex.beam,
+        color: powerHex,
+        transparent: true,
+        opacity: pillarBase,
+        blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+      });
+      pillar = new THREE.Mesh(cylGeo(0.42, 0.78, 6, 20, true), pillarMat);
+      const widen = 1 + 0.28 * Math.max(0, act.intensityTier - 1);
+      pillar.scale.set(widen, 1, widen);
+      pillar.position.set(0, 3.1, -0.3);
+      group.add(pillar);
+    }
     const ringMat = new THREE.MeshBasicMaterial({
       color: statusHex,
       transparent: true,
-      opacity: 0.3,
+      opacity: (act.isWorking || act.isPending) ? (light ? 0.82 : 0.72) : (light ? 0.22 : 0.16),
       toneMapped: false,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
     const ring = new THREE.Mesh(geo("ws-ring", () => {
-      const g = new THREE.RingGeometry(1.6, 1.74, 72);
+      const g = new THREE.RingGeometry(1.56, 1.78, 72);
       g.rotateX(-Math.PI / 2);
       return g;
     }), ringMat);
     ring.position.set(0, 0.065, -0.3);
     group.add(ring);
 
-    group.add(buildLandmark(ws.landmark, ws.liveCount > 0));
-
-    // Desk
-    const deskMat = phys(light ? 0xffffff : 0x1e293b, { rough: 0.32, clear: 0.8 });
-    const deskTop = mesh(slabGeo(2.1, 0.92, 0.07, 0.12, 0.025), deskMat, { cast: true, receive: true });
-    deskTop.position.set(0, 0.68, 0.12);
-    group.add(deskTop);
-    const legMat = phys(light ? 0x94a3b8 : 0x334155, { rough: 0.28, metal: 0.85 });
-    [-0.92, 0.92].forEach((lx) => {
-      const leg = mesh(boxGeo(0.06, 0.68, 0.78), legMat);
-      leg.position.set(lx, 0.34, 0.12);
-      group.add(leg);
-    });
-    const kb = mesh(slabGeo(0.62, 0.2, 0.03, 0.03, 0.01), phys(0x0f172a, { rough: 0.35, metal: 0.4, clear: 0.6 }));
-    kb.position.set(0, 0.75, 0.33);
-    group.add(kb);
-    if (ws.liveCount > 0) {
-      const kbGlow = mesh(boxGeo(0.58, 0.006, 0.16), neon(pal.emissive, { opacity: 0.6, additive: true }), { cast: false });
-      kbGlow.position.set(0, 0.785, 0.33);
-      group.add(kbGlow);
+    let pulseRing = null;
+    let pulseRingMat = null;
+    if (act.isWorking || act.isPending) {
+      pulseRingMat = new THREE.MeshBasicMaterial({
+        color: statusHex,
+        transparent: true,
+        opacity: light ? 0.55 : 0.5,
+        blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+        toneMapped: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      pulseRing = new THREE.Mesh(geo("ws-pulse-ring", () => {
+        const g = new THREE.RingGeometry(1.62, 1.74, 72);
+        g.rotateX(-Math.PI / 2);
+        return g;
+      }), pulseRingMat);
+      pulseRing.position.set(0, 0.068, -0.3);
+      group.add(pulseRing);
     }
 
-    // Monitors
-    const screenMat = screenMaterial(ws);
-    const bezelMat = phys(0x0b1220, { rough: 0.28, metal: 0.6, clear: 0.9 });
-    [-1, 1].forEach((side) => {
-      const mg = new THREE.Group();
-      mg.position.set(side * 0.45, 1.07, -0.12);
-      mg.rotation.y = -side * 0.2;
-      const bezel = mesh(panelGeo(0.86, 0.54, 0.05, 0.04), bezelMat);
-      const scr = mesh(geo("screen-plane", () => new THREE.PlaneGeometry(0.78, 0.46)), screenMat, { cast: false });
-      scr.position.z = 0.027;
-      const stand = mesh(cylGeo(0.022, 0.022, 0.3, 8), legMat);
-      stand.position.set(0, -0.36, -0.03);
-      const foot = mesh(cylGeo(0.12, 0.14, 0.02, 20), legMat);
-      foot.position.set(0, -0.51, -0.03);
-      mg.add(bezel, scr, stand, foot);
-      group.add(mg);
-    });
+    if (act.intensityTier >= 2) {
+      const hazardMat = new THREE.MeshBasicMaterial({
+        map: tex.hazard,
+        transparent: true,
+        opacity: light ? 0.92 : 0.88,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const hazardRing = new THREE.Mesh(geo("ws-hazard-ring", () => {
+        const g = new THREE.RingGeometry(1.78, 1.98, 72);
+        g.rotateX(-Math.PI / 2);
+        return g;
+      }), hazardMat);
+      hazardRing.position.set(0, 0.062, -0.3);
+      group.add(hazardRing);
+    }
+
+    if (act.intensityTier >= 2 || act.isPending) {
+      const cone1 = buildSafetyCone(act.isPending);
+      cone1.position.set(-1.46, 0, 1.22);
+      const cone2 = buildSafetyCone(act.isPending);
+      cone2.position.set(-1.46, 0, -1.52);
+      group.add(cone1, cone2);
+    }
+
+    group.add(buildLandmark(ws.landmark, act.isWorking));
+
+    // Department-specific station rig (code lab / film studio / broadcast desk / workshop)
+    const rig = buildStationRig(ws, act, light, pal);
+    group.add(rig.group);
 
     let screenGlow = null;
-    if (ws.liveCount > 0 || ws.readyToHarvest) {
-      screenGlow = glowSprite(ws.liveCount > 0 ? 0x38bdf8 : 0xfbbf24, 2.2, 0.32);
-      screenGlow.position.set(0, 1.07, 0.15);
+    if (act.isWorking || act.isPending) {
+      screenGlow = glowSprite(act.isPending ? 0xef4444 : powerHex, 2.4, 0.34);
+      screenGlow.position.set(0, 1.1, -0.05);
       group.add(screenGlow);
     }
 
     // Bots
     const bots = [];
-    const mainBot = buildBot(ws.primaryProvider, { scale: 1, working: ws.liveCount > 0 });
-    mainBot.position.set(0, 0.02, 0.92);
-    mainBot.rotation.y = Math.PI;
-    group.add(mainBot);
+    const mainBot = buildBot(ws.primaryProvider, {
+      scale: act.isResting ? 0.75 : 1,
+      working: act.isWorking,
+      headband: act.intensityTier >= 2,
+      overdrive: act.intensityTier >= 3,
+      pose: act.isResting ? "lying" : "seat",
+    });
+    let moonSprite = null;
+    if (act.isResting) {
+      // Idle: the desk is empty, the bot naps on a lounge couch under a moon
+      const couch = buildCouch(light);
+      couch.position.set(1.05, 0, 1.0);
+      couch.rotation.y = Math.PI / 4;
+      mainBot.rotation.set(0, 0, Math.PI / 2);
+      mainBot.position.set(0.4, 0.61, 0.02);
+      couch.add(mainBot);
+      const blanket = mesh(slabGeo(0.62, 0.5, 0.06, 0.1, 0.03), phys(light ? 0xfde68a : 0xa16207, { rough: 0.9 }));
+      blanket.position.set(0.18, 0.78, 0.02);
+      couch.add(blanket);
+      group.add(couch);
+
+      const moonMat = new THREE.SpriteMaterial({
+        map: tex.moon,
+        transparent: true,
+        opacity: light ? 0.95 : 0.92,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      moonSprite = new THREE.Sprite(moonMat);
+      moonSprite.scale.set(0.95, 0.95, 1);
+      moonSprite.position.set(1.3, 2.2, 0.75);
+      moonSprite.renderOrder = 8;
+      group.add(moonSprite);
+    } else {
+      mainBot.position.set(0, 0.02, 0.92);
+      mainBot.rotation.y = Math.PI;
+      group.add(mainBot);
+    }
     bots.push(mainBot);
-    ws.cloneProviders.forEach((prov, cIdx) => {
-      const clone = buildBot(prov, { scale: 0.8, working: ws.liveCount > cIdx + 1 });
-      clone.position.set(cIdx === 0 ? -1.0 : 1.0, 0.02, 1.0);
+    (act.isResting ? [] : ws.cloneProviders).forEach((prov, cIdx) => {
+      const cloneWorking = ws.liveCount > cIdx + 1;
+      const clone = buildBot(prov, {
+        scale: 0.8,
+        working: cloneWorking,
+        headband: cloneWorking && act.intensityTier >= 2,
+        overdrive: cloneWorking && act.intensityTier >= 3,
+      });
+      clone.position.set(cIdx === 0 ? -1.0 : 1.0, cloneWorking ? 0.02 : -0.02, cloneWorking ? 1.0 : 0.9);
       clone.rotation.y = Math.PI + (cIdx === 0 ? -0.4 : 0.4);
       group.add(clone);
       bots.push(clone);
@@ -2237,13 +2895,105 @@ export function createTycoon3DWorld(containerEl, {
 
     // Code sparks
     const sparks = [];
-    if (ws.liveCount > 0) {
+    if (act.isWorking) {
       for (let s = 0; s < 6; s += 1) {
-        const sp = glowSprite(s % 2 ? pal.emissive : 0x7dd3fc, 0.22, 0.9);
+        const sp = light
+          ? (() => {
+              const sm = new THREE.SpriteMaterial({
+                map: tex.glow,
+                color: s % 2 ? 0x059669 : 0x0284c7,
+                transparent: true,
+                opacity: 0.85,
+                blending: THREE.NormalBlending,
+                depthWrite: false,
+                toneMapped: false,
+              });
+              const sprite = new THREE.Sprite(sm);
+              sprite.scale.set(0.24, 0.24, 1);
+              sprite.renderOrder = 6;
+              sprite.userData.baseOpacity = 0.85;
+              return sprite;
+            })()
+          : glowSprite(s % 2 ? pal.emissive : 0x7dd3fc, 0.22, 0.9);
         sp.position.set((Math.random() - 0.5) * 0.9, 1.1, 0.1);
         sp.userData.seed = Math.random();
         group.add(sp);
         sparks.push(sp);
+      }
+    }
+
+    // Tier 3 Super-Saiyan rising energy aura (超频爆气)
+    let auraGroup = null;
+    const auraSparks = [];
+    if (act.intensityTier >= 3) {
+      auraGroup = new THREE.Group();
+      auraGroup.position.set(0, 0.05, 0.92);
+      const outerAuraMat = new THREE.MeshBasicMaterial({
+        map: tex.aura,
+        color: 0xf59e0b,
+        transparent: true,
+        opacity: light ? 0.62 : 0.75,
+        blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const outerAura = new THREE.Mesh(cylGeo(0.58, 0.88, 2.25, 24, true), outerAuraMat);
+      outerAura.position.y = 1.15;
+
+      const innerAuraMat = new THREE.MeshBasicMaterial({
+        map: tex.aura,
+        color: 0xfde047,
+        transparent: true,
+        opacity: light ? 0.45 : 0.55,
+        blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const innerAura = new THREE.Mesh(cylGeo(0.38, 0.62, 1.95, 24, true), innerAuraMat);
+      innerAura.position.y = 1.0;
+      auraGroup.add(outerAura, innerAura);
+      group.add(auraGroup);
+
+      for (let i = 0; i < 8; i += 1) {
+        const aspMat = new THREE.SpriteMaterial({
+          map: tex.glow,
+          color: i % 2 ? 0xf59e0b : 0xfde047,
+          transparent: true,
+          opacity: 0.9,
+          blending: light ? THREE.NormalBlending : THREE.AdditiveBlending,
+          depthWrite: false,
+          toneMapped: false,
+        });
+        const asp = new THREE.Sprite(aspMat);
+        asp.scale.set(0.26, 0.26, 1);
+        asp.renderOrder = 7;
+        asp.userData.seed = i / 8;
+        asp.userData.angle = (i / 8) * Math.PI * 2;
+        group.add(asp);
+        auraSparks.push(asp);
+      }
+    }
+
+    // Resting zZz sleep bubble chain (3 staggered rising bubbles)
+    const sleepSprites = [];
+    if (act.isResting) {
+      for (let i = 0; i < 3; i += 1) {
+        const sleepMat = new THREE.SpriteMaterial({
+          map: tex.zzz,
+          transparent: true,
+          opacity: light ? 0.85 : 0.78,
+          depthWrite: false,
+          toneMapped: false,
+        });
+        const sp = new THREE.Sprite(sleepMat);
+        sp.scale.set(0.5, 0.5, 1);
+        sp.position.set(0.8, 1.0, 1.25);
+        sp.renderOrder = 8;
+        sp.userData.phaseOffset = i / 3;
+        group.add(sp);
+        sleepSprites.push(sp);
       }
     }
 
@@ -2295,25 +3045,41 @@ export function createTycoon3DWorld(containerEl, {
     labelEl.type = "button";
     labelEl.className = [
       "tycoon3d-tag",
-      ws.readyToHarvest ? "is-harvest" : "",
-      ws.liveCount > 0 ? "is-live" : "",
-      ws.pendingCount > 0 ? "is-pending" : "",
+      act.isWorking ? "is-live" : "",
+      act.intensityTier === 2 ? "is-tier-2" : "",
+      act.intensityTier >= 3 ? "is-tier-3" : "",
+      act.isResting ? "is-resting" : "",
+      act.isPending ? "is-pending" : "",
+      act.showHarvest ? "is-harvest" : "",
     ].filter(Boolean).join(" ");
     labelEl.dataset.tycoonTopic = ws.topicId;
+    // Desync per-tag animations so idle panels drift like clouds instead of pulsing in unison
+    {
+      const rnd = (a, b) => (a + Math.random() * (b - a)).toFixed(2);
+      labelEl.style.setProperty("--ty-delay", `-${rnd(0, 9)}s`);
+      labelEl.style.setProperty("--ty-float-dur", `${rnd(7, 11)}s`);
+      labelEl.style.setProperty("--ty-zzz-dur", `${rnd(3, 4.6)}s`);
+      labelEl.style.setProperty("--ty-amp", `${rnd(1.1, 2)}px`);
+      const baseGlow = act.isPending ? 2.2 : (act.intensityTier >= 3 ? 2.3 : (act.intensityTier === 2 ? 2.6 : 3));
+      labelEl.style.setProperty("--ty-glow-dur", `${(baseGlow + Math.random() * 0.6).toFixed(2)}s`);
+    }
     const pipsHtml = [1, 2, 3, 4, 5].map((i) => `<i class="tycoon3d-pip ${i <= ws.stageIndex ? "is-on" : ""}"></i>`).join("");
-    const statusBadge = ws.pendingCount > 0
-      ? `<span class="tycoon3d-mini-badge is-alert">!拍板${ws.pendingCount}</span>`
-      : (ws.readyToHarvest
-          ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>`
-          : (ws.liveCount > 0 ? `<span class="tycoon3d-mini-badge is-live">×${ws.liveCount}</span>` : ""));
+    const stateIconPath = act.isPending
+      ? `<path d="M8 2.6v6.2M8 11.9v.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>`
+      : (act.isWorking
+          ? `<path d="M9.1 1.75 3.6 9h4.1l-1 5.25 5.7-7.25H8.3l.8-5.25Z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>`
+          : `<path d="M12.85 9.95A5.25 5.25 0 0 1 6.05 3.15a5.25 5.25 0 1 0 6.8 6.8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>`);
+    const statePillHtml = `<span class="tycoon3d-state-pill is-${act.state} is-tier-${act.intensityTier}"><svg class="tycoon3d-state-ico" viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">${stateIconPath}</svg>${escapeHtml(act.statusText)}</span>`;
+    const harvestBadgeHtml = act.showHarvest ? `<span class="tycoon3d-mini-badge is-coin">$收菜</span>` : "";
     const kpiLineHtml = ws.kpis.length
       ? `<div class="tycoon3d-kpi-row">${ws.kpis.map((k) => `<span>${escapeHtml(k.label)} <strong>${escapeHtml(k.value)}</strong></span>`).join(" · ")}</div>`
       : "";
     labelEl.innerHTML = `
       <div class="tycoon3d-tag-top">
+        ${statePillHtml}
         <span class="tycoon3d-lv">Lv.${ws.stageIndex}</span>
         <strong class="tycoon3d-name">${escapeHtml(ws.name)}</strong>
-        ${statusBadge}
+        ${harvestBadgeHtml}
       </div>
       ${kpiLineHtml}
       <div class="tycoon3d-pips">${pipsHtml}</div>
@@ -2338,13 +3104,27 @@ export function createTycoon3DWorld(containerEl, {
 
     wsRecords.set(ws.topicId, {
       ws,
+      act,
       group,
       ring,
       ringMat,
+      pulseRing,
+      pulseRingMat,
       statusHex,
       beam,
       bots,
       sparks,
+      sleepSprites,
+      moonSprite,
+      rigAnim: rig.anim,
+      pool,
+      poolMat,
+      poolBase,
+      pillar,
+      pillarMat,
+      pillarBase,
+      auraGroup,
+      auraSparks,
       coin,
       alert,
       screenGlow,
@@ -2626,6 +3406,7 @@ export function createTycoon3DWorld(containerEl, {
     // Shared texture motion
     if (tex.flow) tex.flow.offset.y = (tex.flow.offset.y - dt * 0.55) % 1;
     if (tex.code) tex.code.offset.y = (tex.code.offset.y + dt * 0.28) % 1;
+    if (tex.aura) tex.aura.offset.y = (tex.aura.offset.y - dt * 1.9) % 1;
 
     for (let i = 0; i < envAnimators.length; i += 1) envAnimators[i](t, dt, nowMs);
     for (let i = 0; i < animators.length; i += 1) animators[i](t, dt, nowMs);
@@ -2659,15 +3440,35 @@ export function createTycoon3DWorld(containerEl, {
       rec.hover += (hoverTarget - rec.hover) * Math.min(1, dt * 12);
       rec.group.position.y = PLAT_TOP + rec.hover * 0.14;
 
+      if (rec.rigAnim) rec.rigAnim(t + phase);
+      if (rec.poolMat) {
+        rec.poolMat.opacity = rec.act.isResting
+          ? rec.poolBase
+          : rec.poolBase * (0.72 + 0.28 * Math.sin(t * 3 + phase));
+      }
+      if (rec.pillar && rec.pillarMat) {
+        rec.pillar.rotation.y = t * 0.6;
+        rec.pillarMat.opacity = rec.pillarBase * (0.7 + 0.3 * Math.sin(t * 4 + phase));
+      }
+      if (rec.moonSprite) {
+        rec.moonSprite.position.y = 2.2 + Math.sin(t * 1.1 + phase) * 0.09;
+      }
+
       if (rec.isSelected) {
         rec.ringMat.color.setHex(light ? 0x2563eb : 0xffffff);
         rec.ringMat.opacity = 0.75 + 0.2 * Math.sin(t * 4);
         rec.ring.scale.setScalar(1 + 0.035 * Math.sin(t * 4));
       } else {
         rec.ringMat.color.setHex(rec.statusHex);
-        const base = rec.ws.liveCount > 0 || rec.ws.readyToHarvest || rec.ws.pendingCount > 0 ? 0.5 : 0.18;
-        rec.ringMat.opacity = base + rec.hover * 0.4 + (rec.ws.pendingCount > 0 ? 0.2 * Math.sin(t * 5) : 0);
+        const isBusy = rec.act.isWorking || rec.act.isPending;
+        const base = isBusy ? (light ? 0.82 : 0.72) : (light ? 0.22 : 0.16);
+        rec.ringMat.opacity = base + rec.hover * 0.35 + (isBusy ? 0.12 * Math.sin(t * 4) : 0);
         rec.ring.scale.setScalar(1);
+      }
+      if (rec.pulseRing && rec.pulseRingMat) {
+        const pk = (t * 0.65 + phase * 0.3) % 1;
+        rec.pulseRing.scale.setScalar(1 + pk * 0.36);
+        rec.pulseRingMat.opacity = (light ? 0.55 : 0.5) * (1 - pk);
       }
       if (rec.beam.visible) {
         rec.beam.material.opacity = (light ? 0.4 : 0.55) * (0.75 + 0.25 * Math.sin(t * 3));
@@ -2678,22 +3479,40 @@ export function createTycoon3DWorld(containerEl, {
         const ud = bot.userData;
         const ph = ud.phase + phase;
         if (ud.working) {
-          ud.leftArm.rotation.x = -0.9 + Math.sin(t * 18 + ph) * 0.32;
-          ud.rightArm.rotation.x = -0.9 - Math.sin(t * 18 + ph) * 0.32;
-          ud.headGroup.position.y = 1.0 + Math.abs(Math.sin(t * 9 + ph)) * 0.04;
-          ud.headGroup.rotation.y = Math.sin(t * 2.6 + bIdx) * 0.16;
-          ud.headGroup.rotation.x = 0.12;
+          const freq = ud.overdrive ? 28 : (ud.headband ? 23 : 19);
+          ud.leftArm.rotation.x = -0.9 + Math.sin(t * freq + ph) * 0.36;
+          ud.rightArm.rotation.x = -0.9 - Math.sin(t * freq + ph) * 0.36;
+          ud.headGroup.position.set(
+            ud.overdrive ? Math.sin(t * 24 + ph) * 0.015 : 0,
+            1.0 + Math.abs(Math.sin(t * (freq * 0.5) + ph)) * 0.045,
+            0,
+          );
+          ud.headGroup.rotation.set(0.14, Math.sin(t * 2.8 + bIdx) * 0.18, 0);
+          ud.torso.rotation.x = ud.overdrive ? 0.08 : 0;
           ud.torso.scale.y = 1;
+          if (ud.headbandTails) {
+            ud.headbandTails.forEach((tail, tIdx) => {
+              tail.rotation.z = (tIdx === 0 ? -0.18 : 0.18) + Math.sin(t * 14 + ph + tIdx) * 0.22;
+              tail.rotation.x = 0.45 + Math.sin(t * 16 + ph + tIdx * 1.3) * 0.25;
+            });
+          }
+        } else if (ud.pose === "lying") {
+          ud.leftArm.rotation.x = -0.3 + Math.sin(t * 1.1 + ph) * 0.02;
+          ud.rightArm.rotation.x = -0.3 - Math.sin(t * 1.1 + ph) * 0.02;
+          ud.headGroup.position.set(0, 1.0, 0);
+          ud.headGroup.rotation.set(0.08 + Math.sin(t * 1.2 + ph) * 0.04, 0, -0.12);
+          ud.torso.rotation.x = 0;
+          ud.torso.scale.set(1 + Math.sin(t * 1.2 + ph) * 0.05, 1, 1 + Math.sin(t * 1.2 + ph) * 0.05);
         } else {
-          ud.leftArm.rotation.x = -0.4 + Math.sin(t * 1.4 + ph) * 0.06;
-          ud.rightArm.rotation.x = -0.4 - Math.sin(t * 1.4 + ph) * 0.06;
-          ud.headGroup.position.y = 1.0 + Math.sin(t * 2 + ph) * 0.02;
-          ud.headGroup.rotation.y = Math.sin(t * 0.7 + ph) * 0.35;
-          ud.headGroup.rotation.x = 0;
-          ud.torso.scale.y = 1 + Math.sin(t * 2 + ph) * 0.02;
+          ud.leftArm.rotation.x = -1.25 + Math.sin(t * 1.1 + ph) * 0.03;
+          ud.rightArm.rotation.x = -1.25 - Math.sin(t * 1.1 + ph) * 0.03;
+          ud.headGroup.position.set(0, 0.90 + Math.sin(t * 1.3 + ph) * 0.015, 0.14);
+          ud.headGroup.rotation.set(0.56 + Math.sin(t * 1.3 + ph) * 0.035, 0, 0.22);
+          ud.torso.rotation.x = 0.24;
+          ud.torso.scale.y = 1 + Math.sin(t * 1.3 + ph) * 0.035;
         }
-        if (ud.crest) ud.crest.rotation.y = t * 1.6 + ph;
-        if (nowMs > ud.nextBlink) {
+        if (ud.crest) ud.crest.rotation.y = ud.working ? (t * 1.8 + ph) : (t * 0.2 + ph);
+        if (ud.working && nowMs > ud.nextBlink) {
           ud.eyes.scale.y = 0.12;
           if (nowMs > ud.nextBlink + 130) {
             ud.eyes.scale.y = 1;
@@ -2701,6 +3520,42 @@ export function createTycoon3DWorld(containerEl, {
           }
         }
       });
+
+      if (rec.sleepSprites?.length) {
+        rec.sleepSprites.forEach((sp) => {
+          const sk = (t * 0.34 + sp.userData.phaseOffset + phase * 0.15) % 1;
+          sp.position.set(
+            0.8 + sk * 0.38 + Math.sin(t * 1.6 + sk * 6) * 0.07,
+            1.0 + sk * 1.3,
+            1.25 - sk * 0.12,
+          );
+          sp.material.opacity = Math.sin(sk * Math.PI) * (light ? 0.9 : 0.85);
+          const sScale = 0.4 + sk * 0.55;
+          sp.scale.set(sScale, sScale, 1);
+        });
+      }
+
+      if (rec.auraGroup) {
+        rec.auraGroup.rotation.y = t * 2.4 + phase;
+        rec.auraGroup.scale.set(
+          1 + 0.06 * Math.sin(t * 10 + phase),
+          1 + 0.08 * Math.sin(t * 8 + phase),
+          1 + 0.06 * Math.sin(t * 10 + phase),
+        );
+      }
+
+      if (rec.auraSparks?.length) {
+        rec.auraSparks.forEach((asp) => {
+          const k = (t * 1.35 + asp.userData.seed) % 1;
+          const ang = asp.userData.angle + t * 4.2;
+          const rad = 0.72 * (1 - k * 0.35);
+          asp.position.set(Math.cos(ang) * rad, 0.35 + k * 2.0, 0.92 + Math.sin(ang) * rad);
+          asp.material.opacity = Math.sin(k * Math.PI) * 0.95;
+          const sc = 0.26 * (1 - k * 0.35);
+          asp.scale.set(sc, sc, 1);
+        });
+      }
+
 
       rec.sparks.forEach((sp) => {
         const k = (t * 0.9 + sp.userData.seed) % 1;
