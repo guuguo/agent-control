@@ -6,6 +6,10 @@
 > 如果这个工具帮到了你，欢迎点击右上角 **Star ⭐️** 支持一下。
 
 <p align="center">
+  <img src="docs/tutorial/10-dream-factory-3d.png" alt="Agent Control 3D 梦工厂总控台" width="760" />
+</p>
+
+<p align="center">
   <img src="docs/tutorial/01-desktop-console.png" alt="Agent Control 桌面端主控制台" width="760" />
 </p>
 
