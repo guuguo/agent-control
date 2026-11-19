@@ -2030,8 +2030,21 @@ function shortModelName(rawModel = "") {
   const clean = String(rawModel || "").trim();
   if (!clean) return "";
   const lower = clean.toLowerCase();
-  if (clean === "gemini-pro-orchestrator" || lower.includes("orchestrator")) {
+  const effortSuffix = /\bxhigh\b/i.test(clean)
+    ? " XH"
+    : (/\bhigh\b/i.test(clean) ? " H" : (/\blow\b/i.test(clean) ? " L" : ""));
+  const orchMatch = clean.match(/^orchestrator\s*\(([^)]+)\)/i);
+  if (orchMatch?.[1]) {
+    const inner = orchMatch[1].trim();
+    return inner.length > 16 ? inner.slice(0, 16) : inner;
+  }
+  if (clean === "gemini-pro-orchestrator" || lower === "orchestrator") {
     return "Carbon";
+  }
+  const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
+    const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
+    return `${word}${effortSuffix}`;
   }
   if (lower.includes("carbon")) {
     if (lower.includes("high")) return "Carbon H";

@@ -346,8 +346,27 @@ export function compactModelBadgeLabel(rawModel = "") {
   const clean = String(rawModel || "").trim();
   if (!clean) return "默认";
   const lower = clean.toLowerCase();
-  if (clean === "gemini-pro-orchestrator" || lower.includes("orchestrator")) {
+  const effortSuffix = /\bxhigh\b/i.test(clean)
+    ? " XH"
+    : (/\bhigh\b/i.test(clean)
+      ? " H"
+      : (/\bmedium\b/i.test(clean)
+        ? " M"
+        : (/\blow\b/i.test(clean) ? " L" : "")));
+
+  const orchMatch = clean.match(/^orchestrator\s*\(([^)]+)\)/i);
+  if (orchMatch?.[1]) {
+    const inner = orchMatch[1].trim();
+    return inner.length > 12 ? inner.slice(0, 12) : inner;
+  }
+  if (clean === "gemini-pro-orchestrator" || lower === "orchestrator") {
     return "Carbon";
+  }
+
+  const geminiCodename = clean.match(/^gemini[- ]\d+(?:[.-]\d+)*[- ]([a-z][a-z0-9]+)(?:[- (]+(?:low|medium|high|xhigh)\)?)?$/i);
+  if (geminiCodename?.[1] && !/^(?:pro|flash|lite|ultra|nano|exp|preview)$/i.test(geminiCodename[1])) {
+    const word = geminiCodename[1].charAt(0).toUpperCase() + geminiCodename[1].slice(1).toLowerCase();
+    return `${word}${effortSuffix}`;
   }
   if (clean === "gemini-4-carbon-high" || /carbon.*\(high\)/i.test(clean) || /^gemini-.*carbon-high$/i.test(clean)) {
     return "Carbon H";

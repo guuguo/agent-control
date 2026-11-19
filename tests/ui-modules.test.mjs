@@ -5381,3 +5381,13 @@ test("pasted file URIs and absolute paths format as markdown file links and rend
   assert.match(rendered, /class="md-file-link"/);
   assert.match(rendered, /data-local-file-path="\/Volumes\/External SSD\/dev\/project\/case\.md"/);
 });
+
+test("compactModelBadgeLabel automatically formats future Orchestrator and Gemini codenames without hardcoding", async () => {
+  const { compactModelBadgeLabel } = await import("../public/instance-switcher.js");
+  assert.equal(compactModelBadgeLabel("Orchestrator (Neon)"), "Neon");
+  assert.equal(compactModelBadgeLabel("Orchestrator (Cobalt)"), "Cobalt");
+  assert.equal(compactModelBadgeLabel("Orchestrator (Argon)"), "Argon");
+  assert.equal(compactModelBadgeLabel("Gemini 4.5 Plasma (High)"), "Plasma H");
+  assert.equal(compactModelBadgeLabel("gemini-4-neon-xhigh"), "Neon XH");
+  assert.equal(compactModelBadgeLabel("gpt-6.3-nova"), "GPT-6.3-NOVA");
+});

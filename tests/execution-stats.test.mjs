@@ -159,3 +159,390 @@ test("Antigravity model names normalize effort suffixes on record and load", asy
   assert.equal(med?.count, 2);
   assert.equal(high?.count, 1);
 });
+
+test("ExecutionStats computes medianTokensPerSec, handles short turns, and sorts groups by volume", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { ExecutionStats, computeRunTokensPerSec } = await import("../src/execution-stats.mjs");
+
+  assert.equal(
+    computeRunTokensPerSec({
+      durationMs: 3000,
+      firstResponseMs: 1000,
+      outputTokens: 200,
+      tokenSource: "reported",
+    }),
+    100,
+  );
+  // Estimated tokens are ignored unless useEstimated is enabled
+  assert.equal(
+    computeRunTokensPerSec({
+      durationMs: 3000,
+      firstResponseMs: 1000,
+      outputTokens: null,
+      estimatedOutputTokens: 160,
+      tokenSource: "estimated",
+    }),
+    null,
+  );
+  assert.equal(
+    computeRunTokensPerSec(
+      {
+        durationMs: 3000,
+        firstResponseMs: 1000,
+        outputTokens: null,
+        estimatedOutputTokens: 160,
+        tokenSource: "estimated",
+      },
+      { useEstimated: true },
+    ),
+    80,
+  );
+  // Short generation (< 200ms) is ignored to prevent Infinity/distorted speeds
+  assert.equal(
+    computeRunTokensPerSec({
+      durationMs: 1150,
+      firstResponseMs: 1000,
+      outputTokens: 50,
+      tokenSource: "reported",
+    }),
+    null,
+  );
+  assert.equal(
+    computeRunTokensPerSec({
+      durationMs: 150,
+      firstResponseMs: 0,
+      outputTokens: 50,
+      tokenSource: "reported",
+    }),
+    null,
+  );
+
+  const dir = await mkdtemp(join(tmpdir(), "ac-exec-speed-"));
+  const filePath = join(dir, "execution-stats.json");
+  const now = 1_795_000_000_000;
+  try {
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        startedAt: now - 20_000,
+        runs: [
+          // Small volume group (1 completed) with high reported speed
+          {
+            id: "codex-1",
+            threadId: "codex:default:th-1",
+            provider: "codex",
+            model: "gpt-6.1-sol",
+            effort: "medium",
+            status: "completed",
+            startedAt: now - 10_000,
+            endedAt: now - 5_000,
+            durationMs: 5000,
+            firstResponseMs: 1000,
+            inputTokens: 1000,
+            outputTokens: 400,
+            cachedInputTokens: 0,
+            reasoningTokens: 0,
+            toolIds: [],
+            tokenSource: "reported",
+          },
+          // Ultra-short turn in another group (<200ms generation) -> unavailable speed
+          {
+            id: "fast-1",
+            threadId: "claude:default:th-short",
+            provider: "claude",
+            model: "claude-sonnet-5-5",
+            effort: "low",
+            status: "completed",
+            startedAt: now - 9_000,
+            endedAt: now - 8_850,
+            durationMs: 150,
+            firstResponseMs: 0,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 0,
+            reasoningTokens: 0,
+            toolIds: [],
+            tokenSource: "reported",
+          },
+          // High volume group (3 completed) with estimated streaming speed
+          {
+            id: "agy-1",
+            threadId: "antigravity:default:th-2",
+            provider: "antigravity",
+            model: "gemini-4-hydrogen",
+            effort: "medium",
+            status: "completed",
+            startedAt: now - 8_000,
+            endedAt: now - 5_000,
+            durationMs: 3000,
+            firstResponseMs: 1000,
+            inputTokens: null,
+            outputTokens: null,
+            estimatedOutputTokens: 100,
+            cachedInputTokens: null,
+            reasoningTokens: null,
+            toolIds: [],
+            tokenSource: "estimated",
+          },
+          {
+            id: "agy-2",
+            threadId: "antigravity:default:th-2",
+            provider: "antigravity",
+            model: "gemini-4-hydrogen",
+            effort: "medium",
+            status: "completed",
+            startedAt: now - 7_000,
+            endedAt: now - 3_000,
+            durationMs: 4000,
+            firstResponseMs: 1000,
+            inputTokens: null,
+            outputTokens: null,
+            estimatedOutputTokens: 180,
+            cachedInputTokens: null,
+            reasoningTokens: null,
+            toolIds: [],
+            tokenSource: "estimated",
+          },
+          {
+            id: "agy-3",
+            threadId: "antigravity:default:th-2",
+            provider: "antigravity",
+            model: "gemini-4-hydrogen",
+            effort: "medium",
+            status: "completed",
+            startedAt: now - 6_000,
+            endedAt: now - 3_000,
+            durationMs: 3000,
+            firstResponseMs: 1000,
+            inputTokens: null,
+            outputTokens: null,
+            estimatedOutputTokens: 140,
+            cachedInputTokens: null,
+            reasoningTokens: null,
+            toolIds: [],
+            tokenSource: "estimated",
+          },
+        ],
+      }),
+    );
+
+    const stats = new ExecutionStats({ filePath, now: () => now });
+    await stats.load();
+    const snap = stats.snapshot({ days: 7 });
+    assert.equal(snap.groups.length, 3);
+    // Sorted descending by completed count (3 -> 1 -> 1)
+    assert.equal(snap.groups[0].model, "gemini-4-hydrogen");
+    assert.equal(snap.groups[0].completed, 3);
+    assert.equal(snap.groups[0].tokensPerSecSource, "estimated");
+    assert.equal(snap.groups[0].speedSampleCount, 3);
+    assert.equal(snap.groups[0].medianTokensPerSec, 60);
+
+    const codexGroup = snap.groups.find((g) => g.model === "gpt-6.1-sol");
+    assert.equal(codexGroup?.tokensPerSecSource, "reported");
+    assert.equal(codexGroup?.speedSampleCount, 1);
+    assert.equal(codexGroup?.medianTokensPerSec, 100);
+
+    const shortGroup = snap.groups.find((g) => g.model === "claude-sonnet-5-5");
+    assert.equal(shortGroup?.tokensPerSecSource, "unavailable");
+    assert.equal(shortGroup?.speedSampleCount, 0);
+    assert.equal(shortGroup?.medianTokensPerSec, null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("execution-stats UI builds human summary ignoring 1-turn outliers, renders collapsible raw metrics, escapes XSS, and uses no emojis", async () => {
+  const { buildExecutionSummary, renderExecutionStatsHtml } = await import("../public/execution-stats.js");
+
+  const snapshot = {
+    days: 7,
+    startedAt: 1_794_400_000_000,
+    updatedAt: 1_795_000_000_000,
+    groups: [
+      {
+        provider: "antigravity",
+        model: "gemini-4-hydrogen",
+        effort: "medium",
+        count: 737,
+        completed: 681,
+        failed: 56,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 52_500,
+        p90Ms: 240_000,
+        firstResponseMs: 7_700,
+        medianTokensPerSec: 60,
+        tokensPerSecSource: "estimated",
+        speedSampleCount: 400,
+        meanInputTokens: null,
+        meanOutputTokens: null,
+        meanCachedTokens: null,
+        meanReasoningTokens: null,
+        meanToolCalls: 2,
+        reportedCount: 0,
+      },
+      {
+        provider: "codex",
+        model: "gpt-6.1-sol",
+        effort: "medium",
+        count: 46,
+        completed: 46,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 72_000,
+        p90Ms: 497_000,
+        firstResponseMs: 6_000,
+        medianTokensPerSec: 120,
+        tokensPerSecSource: "reported",
+        speedSampleCount: 46,
+        meanInputTokens: 3_044_377,
+        meanOutputTokens: 3_492,
+        meanCachedTokens: 1_200_000,
+        meanReasoningTokens: 500,
+        meanToolCalls: 3,
+        reportedCount: 46,
+      },
+      {
+        provider: "antigravity",
+        model: "gemini-3.8-flash",
+        effort: "low",
+        count: 18,
+        completed: 18,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 13_700,
+        p90Ms: 33_700,
+        firstResponseMs: 2_600,
+        medianTokensPerSec: 85,
+        tokensPerSecSource: "estimated",
+        speedSampleCount: 18,
+        meanInputTokens: null,
+        meanOutputTokens: null,
+        meanCachedTokens: null,
+        meanReasoningTokens: null,
+        meanToolCalls: 1,
+        reportedCount: 0,
+      },
+      // 1-turn fast outlier should NOT beat high-sample groups
+      {
+        provider: "codex",
+        model: "gpt-outlier-fast",
+        effort: "low",
+        count: 1,
+        completed: 1,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 1_000,
+        p90Ms: 1_000,
+        firstResponseMs: 400,
+        medianTokensPerSec: 999,
+        tokensPerSecSource: "reported",
+        speedSampleCount: 1,
+        meanInputTokens: 1000,
+        meanOutputTokens: 500,
+        meanCachedTokens: 0,
+        meanReasoningTokens: 0,
+        meanToolCalls: 0,
+        reportedCount: 1,
+      },
+      // 1-turn slow outlier
+      {
+        provider: "grok",
+        model: "grok-4.7",
+        effort: "default",
+        count: 1,
+        completed: 1,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 1_265_000,
+        p90Ms: 1_265_000,
+        firstResponseMs: 148_000,
+        medianTokensPerSec: 12,
+        tokensPerSecSource: "estimated",
+        speedSampleCount: 1,
+        meanInputTokens: null,
+        meanOutputTokens: null,
+        meanCachedTokens: null,
+        meanReasoningTokens: null,
+        meanToolCalls: 0,
+        reportedCount: 0,
+      },
+      // Group with script tag in model name to verify HTML escaping
+      {
+        provider: "codex",
+        model: "<script>alert(1)</script>",
+        effort: "high",
+        count: 4,
+        completed: 4,
+        failed: 0,
+        interrupted: 0,
+        running: 0,
+        incomplete: 0,
+        medianMs: 90_000,
+        p90Ms: 150_000,
+        firstResponseMs: 8_000,
+        medianTokensPerSec: 50,
+        tokensPerSecSource: "reported",
+        speedSampleCount: 4,
+        meanInputTokens: 20_000,
+        meanOutputTokens: 1_000,
+        meanCachedTokens: 0,
+        meanReasoningTokens: 100,
+        meanToolCalls: 1,
+        reportedCount: 4,
+      },
+    ],
+    runs: [
+      {
+        id: "recent-1",
+        startedAt: 1_794_999_000_000,
+        threadId: "codex:default:th-recent-1",
+        profileId: "default",
+        provider: "codex",
+        model: "<script>xss</script>",
+        effort: "medium",
+        status: "completed",
+        durationMs: 72_000,
+        firstResponseMs: 6_000,
+        inputTokens: 10_000,
+        outputTokens: 3_492,
+        estimatedOutputTokens: 0,
+        toolCalls: 2,
+        tokenSource: "reported",
+      },
+    ],
+  };
+
+  const summary = buildExecutionSummary(snapshot, { days: 7 });
+  assert.equal(summary.fastestFirstOutput?.model, "gemini-3.8-flash");
+  assert.equal(summary.fastestThroughput?.model, "gpt-6.1-sol");
+  assert.equal(summary.fastestTurn?.model, "gemini-3.8-flash");
+  assert.equal(summary.mostUsed?.model, "gemini-4-hydrogen");
+  assert.ok(typeof summary.headlineText === "string" && summary.headlineText.length > 0);
+
+  const html = renderExecutionStatsHtml(snapshot, { days: 7, provider: "all" });
+  assert.match(html, /class="execution-summary-grid"/);
+  assert.match(html, /class="execution-summary-verdict"/);
+  assert.match(html, /class="execution-stats-table is-human"/);
+  assert.match(html, /<details class="execution-stats-raw"/);
+  assert.match(html, /<details class="execution-stats-recent"/);
+  assert.match(html, /class="execution-stats-scroll"/);
+  assert.match(html, /data-execution-days/);
+  assert.match(html, /data-execution-provider/);
+  assert.match(html, /data-execution-refresh/);
+  assert.match(html, /data-execution-thread/);
+  assert.equal(/\p{Extended_Pictographic}/u.test(html), false);
+  assert.equal(html.includes("<script>"), false);
+  assert.equal(html.includes("&lt;script&gt;"), true);
+});

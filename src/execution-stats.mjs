@@ -9,6 +9,21 @@ const finite = (value) => value !== null && value !== undefined && Number.isFini
 const percentile = (values, p) => values.length ? [...values].sort((a, b) => a - b)[Math.max(0, Math.ceil(values.length * p) - 1)] : null;
 const average = (values) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
 
+export function computeRunTokensPerSec(row = {}, { useEstimated = false } = {}) {
+  const durationMs = finite(row?.durationMs);
+  if (durationMs === null || durationMs <= 0) return null;
+  const firstMs = finite(row?.firstResponseMs);
+  const genMs = (firstMs !== null && durationMs > firstMs + 100)
+    ? (durationMs - firstMs)
+    : durationMs;
+  if (genMs < 200) return null;
+  const rawTokens = useEstimated
+    ? finite(row?.estimatedOutputTokens)
+    : finite(row?.outputTokens);
+  if (rawTokens === null || rawTokens <= 0) return null;
+  return rawTokens / (genMs / 1000);
+}
+
 function cleanEffort(value) {
   if (!value) return "";
   if (typeof value === "object") {
@@ -207,6 +222,16 @@ export class ExecutionStats {
     const groups = [...grouped.values()].map((list) => {
       const finished = list.filter((r) => r.status === "completed");
       const exact = finished.filter((r) => r.tokenSource === "reported");
+      const reportedSpeeds = exact.map((r) => computeRunTokensPerSec(r, { useEstimated: false })).filter((n) => n !== null);
+      const estimatedSpeeds = finished.map((r) => computeRunTokensPerSec(r, { useEstimated: true })).filter((n) => n !== null);
+      const hasReportedSpeed = reportedSpeeds.length > 0;
+      const medianTokensPerSec = hasReportedSpeed
+        ? percentile(reportedSpeeds, 0.5)
+        : (estimatedSpeeds.length > 0 ? percentile(estimatedSpeeds, 0.5) : null);
+      const tokensPerSecSource = hasReportedSpeed
+        ? "reported"
+        : (estimatedSpeeds.length > 0 ? "estimated" : "unavailable");
+      const speedSampleCount = hasReportedSpeed ? reportedSpeeds.length : estimatedSpeeds.length;
       return {
         provider: list[0].provider, model: list[0].model, effort: list[0].effort,
         count: list.length, completed: finished.length, failed: list.filter((r) => r.status === "failed").length,
@@ -222,8 +247,11 @@ export class ExecutionStats {
         meanCachedTokens: average(exact.map((r) => r.cachedInputTokens).filter((n) => n !== null)),
         meanReasoningTokens: average(exact.map((r) => r.reasoningTokens).filter((n) => n !== null)),
         meanToolCalls: average(finished.map((r) => r.toolIds.length)),
+        medianTokensPerSec,
+        tokensPerSecSource,
+        speedSampleCount,
       };
-    });
+    }).sort((a, b) => (b.completed - a.completed) || (b.count - a.count) || ((a.medianMs ?? Infinity) - (b.medianMs ?? Infinity)));
     return { startedAt: this.#startedAt, updatedAt: this.#now(), days: windowDays, retainedLimit: LIMIT, count: runs.length, groups,
       runs: runs.slice(-30).reverse().map(({ toolIds, ...row }) => ({ ...row, toolCalls: toolIds.length })),
     };

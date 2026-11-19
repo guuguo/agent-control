@@ -9,7 +9,7 @@ import {
   renderProviderTabsSettingsHtml,
   visibleProviderFilter,
 } from "./provider-tabs.js?v=20261118tabs";
-import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261117qoder";
+import { renderExecutionStatsHtml } from "./execution-stats.js?v=20261119human";
 import {
   extractGoalDirective,
   renderQueuedTurnsPanelHtml,
@@ -4861,6 +4861,7 @@ async function selectThread(compositeId, { focusScroll = true, preserveStatus = 
   }
   if (compositeId !== prevThreadId) {
     closeSlashCommandMenu();
+    state.composerGoal = false;
   }
   state.activeThreadId = compositeId;
   if (compositeId !== prevThreadId) {
@@ -5123,6 +5124,7 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
       }, { timeoutMs: requestTimeoutMs });
       saveNewThreadPrefs(provider, { model, effort });
       resetDraftIfNeeded();
+      state.composerGoal = false;
       await refreshThreads();
       if (created?.thread?.id) {
         saveLocalThreadPrefs(created.thread.id, { model, effort, permissionMode });
@@ -5172,6 +5174,7 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
     if (submitted.action === "queue") {
       const qRes = submitted.result;
       resetDraftIfNeeded();
+      state.composerGoal = false;
       applyActiveQueuedTurns(state.activeThreadId, qRes.items || state.queuedTurns);
       renderQueuedTurns();
       setComposerStatus("success", "已加入排队，等待当前轮次完成后发送", { autoClearMs: 3000 });
@@ -5181,6 +5184,7 @@ async function handleSend({ overrideText = null, clearDraft = true, forceGoal = 
 
     const turnRes = submitted.result;
     resetDraftIfNeeded();
+    state.composerGoal = false;
     if (turnRes?.redirectedThreadId && turnRes.redirectedThreadId !== state.activeThreadId) {
       const nextThreadId = turnRes.redirectedThreadId;
       saveLocalThreadPrefs(nextThreadId, { model, effort, permissionMode });
@@ -12796,6 +12800,7 @@ function bindEvents() {
         imgEl.onerror = null;
         imgEl.removeAttribute("src");
       }
+      resetMobileViewportAfterModal();
     });
   }
 
@@ -12826,7 +12831,17 @@ function bindEvents() {
     });
     fileModal.addEventListener("close", () => {
       const bodyEl = $("filePreviewBody");
-      if (bodyEl) bodyEl.innerHTML = "";
+      if (bodyEl) {
+        for (const media of bodyEl.querySelectorAll("video, audio")) {
+          try {
+            media.pause();
+            media.removeAttribute("src");
+            media.load();
+          } catch {}
+        }
+        bodyEl.innerHTML = "";
+      }
+      resetMobileViewportAfterModal();
     });
   }
 
@@ -13328,6 +13343,7 @@ function bindEvents() {
       });
       saveNewThreadPrefs(provider, { model, effort });
       $("newPromptInput").value = "";
+      $("newGoalCheckbox").checked = false;
       $("newThreadModal").close();
       const createdProvider = created?.thread?.provider || provider;
       if (state.providerFilter !== "all" && createdProvider && state.providerFilter !== createdProvider) {
@@ -13974,20 +13990,45 @@ function addComposerImageFile(file) {
   return task;
 }
 
+function syncVisualViewportLayout() {
+  const vv = window.visualViewport;
+  if (!vv) {
+    document.documentElement.style.removeProperty("--app-height");
+    document.documentElement.style.removeProperty("--app-offset-top");
+    return;
+  }
+  if (vv.scale > 1.05) return;
+  document.documentElement.style.setProperty("--app-height", `${Math.round(vv.height)}px`);
+  document.documentElement.style.setProperty("--app-offset-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
+  if (document.activeElement === $("promptInput")) {
+    scrollViewportIfFollowing();
+  }
+}
+
+function resetMobileViewportAfterModal() {
+  if (typeof window === "undefined") return;
+  try {
+    if (window.scrollX !== 0 || window.scrollY !== 0) {
+      window.scrollTo(0, 0);
+    }
+  } catch {}
+  syncVisualViewportLayout();
+  requestAnimationFrame(() => {
+    try {
+      if (window.scrollX !== 0 || window.scrollY !== 0) {
+        window.scrollTo(0, 0);
+      }
+    } catch {}
+    syncVisualViewportLayout();
+  });
+}
+
 function bindVisualViewport() {
   const vv = window.visualViewport;
   if (!vv) return;
-  const syncViewport = () => {
-    if (vv.scale > 1.05) return;
-    document.documentElement.style.setProperty("--app-height", `${Math.round(vv.height)}px`);
-    document.documentElement.style.setProperty("--app-offset-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
-    if (document.activeElement === $("promptInput")) {
-      scrollViewportIfFollowing();
-    }
-  };
-  syncViewport();
-  vv.addEventListener("resize", syncViewport);
-  vv.addEventListener("scroll", syncViewport);
+  syncVisualViewportLayout();
+  vv.addEventListener("resize", syncVisualViewportLayout);
+  vv.addEventListener("scroll", syncVisualViewportLayout);
 }
 
 let uiVersionCheckInFlight = false;
