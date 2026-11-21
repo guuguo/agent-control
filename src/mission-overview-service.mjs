@@ -6,6 +6,7 @@ import { basename, dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { defaultDataDir } from "./instance-identity.mjs";
+import { MemoryVault, getSection, parseTable, resolveVaultPath, today as vaultToday } from "./memory-vault.mjs";
 import { prepareCrossPlatformSpawn, killProcessTreeCrossPlatform, normalizeWorkspacePath } from "./platform.mjs";
 import { claudeEnvironment, claudeExecutable, readClaudeCliAuthStatus } from "./providers/claude-runner.mjs";
 import { resolveProviderExecutables } from "./providers/profile-discovery.mjs";
@@ -124,6 +125,62 @@ function pathMatchesPrefix(targetPath, prefix) {
   const sep = cleanPrefix.includes("\\") ? "\\" : "/";
   const normalizedPrefix = cleanPrefix.endsWith(sep) ? cleanPrefix : `${cleanPrefix}${sep}`;
   return cleanTarget.startsWith(normalizedPrefix);
+}
+
+const ARCHIVE_TRANSCRIPT_TURNS = 8;
+const ARCHIVE_TRANSCRIPT_CHARS = 2400;
+const ARCHIVE_TRANSCRIPT_TOTAL_CHARS = 24_000;
+const SECRET_LIKE_RE = /(token|api[_-]?key|secret|password|cookie|session_id|bearer\s+[a-z0-9]|sk-[a-z0-9]{8,})/i;
+
+// Flattens the tail of a thread into "用户/助手" lines so the archive distiller sees real outcomes, not just titles.
+export function buildArchiveTranscript(turns = [], { maxTurns = ARCHIVE_TRANSCRIPT_TURNS, maxChars = ARCHIVE_TRANSCRIPT_CHARS } = {}) {
+  const lines = [];
+  for (const turn of (Array.isArray(turns) ? turns : []).slice(-maxTurns)) {
+    for (const item of turn?.items || []) {
+      if (item?.type === "userMessage") {
+        const text = (Array.isArray(item.content) ? item.content : [])
+          .map((part) => (part?.type === "text" ? part.text : ""))
+          .join(" ");
+        const clean = String(text || "").replace(/\s+/g, " ").trim();
+        if (clean) lines.push(`用户：${clean.slice(0, 400)}`);
+      } else if (item?.type === "agentMessage" && item.text) {
+        const clean = String(item.text).replace(/\s+/g, " ").trim();
+        if (clean) lines.push(`助手：${clean.slice(0, 700)}`);
+      }
+    }
+  }
+  const text = lines.join("\n");
+  return text.length > maxChars ? `…${text.slice(-maxChars)}` : text;
+}
+
+// Loose comparison key so rephrased punctuation/spacing doesn't count as new memory.
+export function memoryDedupKey(text = "") {
+  return String(text || "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+// Keeps only well-formed, secret-free memory entries from the distiller's JSON.
+export function normalizeArchiveMemoryPlan(raw = null) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const str = (v, max) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+  const safe = (...vals) => !vals.some((v) => SECRET_LIKE_RE.test(v));
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const facts = list(obj.facts)
+    .map((f) => ({ key: str(f?.key, 40), value: str(f?.value, 240) }))
+    .filter((f) => f.key && f.value && safe(f.key, f.value))
+    .slice(0, 8);
+  const decisions = list(obj.decisions)
+    .map((d) => str(typeof d === "string" ? d : d?.text, 240))
+    .filter((d) => d && safe(d))
+    .slice(0, 6);
+  const lessons = list(obj.lessons)
+    .map((l) => ({ title: str(l?.title, 40), body: String(l?.body ?? "").trim().slice(0, 1200) }))
+    .filter((l) => l.title && l.body && safe(l.title, l.body))
+    .slice(0, 4);
+  const wip = list(obj.wip)
+    .map((w) => ({ slug: str(w?.slug || w?.title, 40), title: str(w?.title || w?.slug, 60), state: str(w?.state, 300), next: str(w?.next, 300) }))
+    .filter((w) => w.slug && (w.state || w.next) && safe(w.state, w.next))
+    .slice(0, 4);
+  return { summary: str(obj.summary, 480), facts, decisions, lessons, wip };
 }
 
 function compactHeadline(raw = "", maxLen = 22) {
@@ -365,6 +422,7 @@ export function inferPipelineStage(topic, activeThreads = [], gitSnap = null, ca
 }
 
 export const AGENT_SOURCE_LABELS = Object.freeze({
+  ai: "AI 智能分配",
   manual: "你指定的账号",
   remembered: "沿用你上次给该项目选的账号",
   affinity: "沿用该项目历史会话所用账号",
@@ -430,7 +488,16 @@ export function normalizeDispatchPrefs(raw = {}) {
     seen.add(clean);
     providerOrder.push(clean);
   }
-  return { strategy, providerOrder };
+  const incomingExcluded = Array.isArray(src.excludedAgentKeys) ? src.excludedAgentKeys : [];
+  const seenExcluded = new Set();
+  const excludedAgentKeys = [];
+  for (const item of incomingExcluded) {
+    const clean = String(item || "").trim();
+    if (!clean || seenExcluded.has(clean)) continue;
+    seenExcluded.add(clean);
+    excludedAgentKeys.push(clean);
+  }
+  return { strategy, providerOrder, excludedAgentKeys };
 }
 
 export function classifyDispatchTaskDifficulty(text = "") {
@@ -1948,12 +2015,13 @@ export class MissionOverviewService {
     return email && !label.includes(email) ? `${label}（${email}）` : label;
   }
 
-  async updateDispatchPrefs({ strategy = "", providerOrder = null } = {}) {
+  async updateDispatchPrefs({ strategy = "", providerOrder = null, excludedAgentKeys = null } = {}) {
     await this.#ensureLoaded();
     const current = normalizeDispatchPrefs(this.#cache.dispatchPrefs);
     this.#cache.dispatchPrefs = normalizeDispatchPrefs({
       strategy: strategy || current.strategy,
       providerOrder: Array.isArray(providerOrder) ? providerOrder : current.providerOrder,
+      excludedAgentKeys: Array.isArray(excludedAgentKeys) ? excludedAgentKeys : current.excludedAgentKeys,
     });
     await this.#persistCache();
     const overview = await this.getOverview({ trigger: "view", force: false });
@@ -1970,12 +2038,16 @@ export class MissionOverviewService {
     flatTopics = [],
     priorityStrategy = "",
     providerOrder = null,
+    excludedAgentKeys = null,
     taskSpecialty = "general",
   } = {}) {
     const byKey = new Map(profiles.map((p) => [`${p.provider}:${p.id || "default"}`, p]));
     const prefs = normalizeDispatchPrefs({
       strategy: priorityStrategy || this.#cache.dispatchPrefs?.strategy,
       providerOrder: Array.isArray(providerOrder) ? providerOrder : this.#cache.dispatchPrefs?.providerOrder,
+      excludedAgentKeys: Array.isArray(excludedAgentKeys)
+        ? excludedAgentKeys
+        : this.#cache.dispatchPrefs?.excludedAgentKeys,
     });
     const pick = (key, source, reason = "") => {
       const p = byKey.get(key);
@@ -1999,11 +2071,18 @@ export class MissionOverviewService {
       return hit;
     }
 
+    const excludedSet = new Set(prefs.excludedAgentKeys || []);
+    const nonExcludedProfiles = excludedSet.size
+      ? profiles.filter((p) => !excludedSet.has(`${p.provider}:${p.id || "default"}`))
+      : profiles;
+    const autoPool = nonExcludedProfiles.length > 0 ? nonExcludedProfiles : profiles;
+    const autoByKey = new Map(autoPool.map((p) => [`${p.provider}:${p.id || "default"}`, p]));
+
     const remembered = topic ? String(this.#cache.topicAgentPrefs?.[topic.id]?.agentKey || "") : "";
     if (remembered) {
-      const rememberedProfile = byKey.get(remembered);
+      const rememberedProfile = autoByKey.get(remembered);
       const rememberedQuota = rememberedProfile ? extractProfileQuotaScore(rememberedProfile) : null;
-      const hasHealthyAlternative = profiles.some((p) => !extractProfileQuotaScore(p).exhausted);
+      const hasHealthyAlternative = autoPool.some((p) => !extractProfileQuotaScore(p).exhausted);
       if (rememberedProfile && (!rememberedQuota?.exhausted || !hasHealthyAlternative || prefs.strategy === "provider")) {
         return pick(remembered, "remembered", rememberedQuota?.summary || "沿用该项目记忆账号");
       }
@@ -2026,7 +2105,7 @@ export class MissionOverviewService {
       }
     }
 
-    const eligible = profiles.filter((p) => !providerFilter || p.provider === providerFilter);
+    const eligible = autoPool.filter((p) => !providerFilter || p.provider === providerFilter);
     if (eligible.length > 0) {
       const affinityRank = new Map(affinity.map((k, idx) => [k, idx]));
       const anyQuota = eligible.some((p) => extractProfileQuotaScore(p).hasQuota);
@@ -2078,11 +2157,11 @@ export class MissionOverviewService {
       }
     }
 
-    if (defaultKey) {
+    if (defaultKey && autoByKey.has(defaultKey)) {
       const hit = pick(defaultKey, "default", "全局默认账号");
       if (hit) return hit;
     }
-    const first = profiles[0];
+    const first = autoPool[0] || profiles[0];
     if (first) return pick(`${first.provider}:${first.id || "default"}`, "fallback", "首个可用账号");
     return {
       provider: "codex",
@@ -2091,6 +2170,99 @@ export class MissionOverviewService {
       agentLabel: "Codex 默认",
       agentSource: "fallback",
       agentReason: "默认兜底账号",
+    };
+  }
+
+  async #planDispatchWithAi({
+    text = "",
+    scopedTopicId = "",
+    flatTopics = [],
+    profiles = [],
+    agentKey = "auto",
+    mode = "auto",
+    excludedAgentKeys = null,
+    preferredModel = "auto",
+  } = {}) {
+    const excludedSet = new Set(
+      Array.isArray(excludedAgentKeys)
+        ? excludedAgentKeys
+        : (this.#cache.dispatchPrefs?.excludedAgentKeys || []),
+    );
+    const availableProfiles = profiles.filter((p) => !excludedSet.has(`${p.provider}:${p.id || "default"}`));
+    const pool = availableProfiles.length > 0 ? availableProfiles : profiles;
+
+    const topicLines = flatTopics.slice(0, 24).map((tp) => {
+      const idleCandidates = (tp.activeThreads || [])
+        .filter((t) => !t.isSlice && !t.live && !(t.pendingCount > 0) && !t.isCrossWorkspace && !t.isMultiTaskSession)
+        .slice(0, 3)
+        .map((t) => `${t.id}(${agentKeyOfThread(t) || t.provider}):${compactHeadline(t.title, 20)}`);
+      const cwdTail = tp.primaryCwd ? tp.primaryCwd.split("/").slice(-2).join("/") : "-";
+      return `- id="${tp.id}" | 名称="${tp.name}" | 目录=${cwdTail}${tp.description ? ` | 简介=${compactHeadline(tp.description, 32)}` : ""}${idleCandidates.length ? ` | 可复用空闲工位=[${idleCandidates.join("; ")}]` : ""}`;
+    });
+
+    const profileLines = pool.slice(0, 12).map((p) => {
+      const key = `${p.provider}:${p.id || "default"}`;
+      const q = extractProfileQuotaScore(p);
+      const specHint = p.provider === "codex"
+        ? "偏硬核研发/调试/重构"
+        : p.provider === "claude"
+          ? "偏架构/全栈/长文梳理"
+          : p.provider === "antigravity"
+            ? "偏创意/UI视觉/前端/多模态"
+            : "通用助手";
+      return `- agentKey="${key}" | 名称="${this.#describeProfile(p)}" | 专长=${specHint} | 额度=${q.summary || (q.exhausted ? "已耗尽" : "可用")}`;
+    });
+
+    const prompt = [
+      "你是梦工厂总控台的「小精灵总管」智能调度规划器。请理解用户的自然语言指令，判断他是想「派发研发/创作任务」还是「普通咨询/闲聊」。",
+      "",
+      "【可用产线（Projects / Topics）】",
+      ...(topicLines.length ? topicLines : ["- 暂无已配置产线"]),
+      "",
+      "【可用 AI 员工账号】",
+      ...(profileLines.length ? profileLines : ["- codex:default"]),
+      "",
+      "【当前约束】",
+      scopedTopicId ? `- 当前聚焦产线 ID：${scopedTopicId}（若用户未明确指派其他项目，优先归入此产线）` : "- 当前为全厂总览视角（请根据语义匹配最合适的产线）",
+      agentKey && agentKey !== "auto" ? `- 用户已显式指定账号：${agentKey}（请勿更换为其他账号）` : "- 账号由你结合任务性质与剩余额度自动优选",
+      mode === "new" ? "- 用户要求强制新开独立并发工位（action 必须为 spawn_parallel）" : "- 若存在同账号且语义高度相关的空闲干净工位，可建议 reuse_clean，否则建议 spawn_parallel",
+      "",
+      `【用户输入】「${text}」`,
+      "",
+      "请只输出一个合法 JSON 对象，不要附加 markdown 代码块或多余解释：",
+      "{",
+      '  "intent": "dispatch" 或 "chat",',
+      '  "reply": "一句简短自然的中文管家回复（无 emoji；若为 dispatch 则说明你的拆分与分配思路；若为 chat 则直接回答用户问题或给出建议）",',
+      '  "tasks": [',
+      "    {",
+      '      "topicId": "匹配到的产线 id",',
+      '      "instruction": "提炼后的清晰、可直接交给 AI 员工执行的任务描述（去掉称呼和口癖）",',
+      '      "specialty": "hardcore | creative | general",',
+      '      "difficulty": "fast | balanced | heavy",',
+      '      "agentKey": "推荐的账号 agentKey",',
+      '      "action": "reuse_clean | spawn_parallel",',
+      '      "targetThreadId": "若 action 为 reuse_clean 且上文列出了对应产线与账号的空闲工位，填该工位 id；否则留空字符串",',
+      '      "reason": "15~30字简短说明分配理由（如：涉及UI与并发，拆出前端单交Agy）"',
+      "    }",
+      "  ]",
+      "}",
+      "注意：如果用户输入明显不是可执行任务（例如打招呼、问问题、让你给意见），请把 intent 设为 \"chat\"，tasks 设为 []。",
+      "如果用户一句话里包含多个互不依赖或跨项目的事项，请主动拆分为 2~5 条并行 tasks。",
+    ].join("\n");
+
+    const aiRes = await this.#invokeLightweightModel(prompt, preferredModel || this.#cache.preferredModel || "auto").catch(() => null);
+    if (!aiRes?.parsed || typeof aiRes.parsed !== "object") {
+      return null;
+    }
+    const parsed = aiRes.parsed;
+    const intent = parsed.intent === "chat" ? "chat" : "dispatch";
+    const reply = String(parsed.reply || "").trim();
+    const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks.slice(0, 5) : [];
+    return {
+      intent,
+      reply,
+      tasks: rawTasks,
+      modelLabel: aiRes.modelLabel || "",
     };
   }
 
@@ -2104,14 +2276,17 @@ export class MissionOverviewService {
     effort = "",
     priorityStrategy = "",
     providerOrder = null,
+    excludedAgentKeys = null,
     remember = true,
     confirmOnly = false,
     sparkId = "",
     inheritContext = true,
+    useAiPlanner = false,
+    approvedRoutes = null,
   } = {}) {
     await this.#ensureLoaded();
     const cleanText = String(text || "").trim();
-    if (!cleanText) {
+    if (!cleanText && (!Array.isArray(approvedRoutes) || !approvedRoutes.length)) {
       throw Object.assign(new Error("请输入要派发的任务指令"), { status: 400 });
     }
     const cleanModel = String(model || "").trim();
@@ -2122,15 +2297,288 @@ export class MissionOverviewService {
     ]);
     const flatTopics = overview.domains.flatMap((d) => d.topics);
     const topicMap = new Map(flatTopics.map((t) => [t.id, t]));
+    const profileByKey = new Map(profileInfo.profiles.map((p) => [`${p.provider}:${p.id || "default"}`, p]));
 
-    const segments = topicId
-      ? [cleanText]
-      : splitCompoundPromptSegments(cleanText, this.#topics);
+    let routes = [];
+    let aiPlanned = false;
+    let aiModel = "";
+    let aiReply = "";
 
-    const routes = [];
-    const usedThreadIds = new Set();
+    // Fast path: execute already-previewed & user-approved routes verbatim when confirmOnly is false
+    if (!confirmOnly && Array.isArray(approvedRoutes) && approvedRoutes.length > 0) {
+      for (const rt of approvedRoutes.slice(0, 5)) {
+        const targetTopic = topicMap.get(rt?.topicId) || flatTopics[0];
+        const segText = String(rt?.segmentText || cleanText).trim();
+        if (!targetTopic || !segText) continue;
+        const resolvedKey = String(rt?.agentKey || "").trim();
+        const prof = profileByKey.get(resolvedKey);
+        const agent = prof
+          ? {
+              provider: prof.provider,
+              profileId: prof.id || "default",
+              agentKey: resolvedKey,
+              agentLabel: this.#describeProfile(prof),
+              agentSource: rt.agentSource || "ai",
+              agentReason: rt.agentReason || "",
+            }
+          : this.#resolveDispatchAgent({
+              agentKey: agentKey !== "auto" ? agentKey : "auto",
+              preferredProvider,
+              topic: targetTopic,
+              profiles: profileInfo.profiles,
+              defaultKey: profileInfo.defaultKey,
+              flatTopics,
+              priorityStrategy,
+              providerOrder,
+              excludedAgentKeys,
+            });
+        const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
+        const hasTopicDigest = Boolean(topicDigest?.summary);
+        let reuseThread = null;
+        if (rt?.action === "reuse_clean" && rt?.threadId && mode !== "new") {
+          reuseThread = (targetTopic.activeThreads || []).find(
+            (t) => t.id === rt.threadId && !t.live && !(t.pendingCount > 0) && !t.isCrossWorkspace && !t.isMultiTaskSession && agentKeyOfThread(t) === agent.agentKey,
+          ) || null;
+        }
+        routes.push({
+          segmentText: segText,
+          action: reuseThread ? "reuse_clean" : "spawn_parallel",
+          topicId: targetTopic.id,
+          topicName: targetTopic.name,
+          cwd: targetTopic.primaryCwd,
+          stage: rt.stage || inferStageTag({ title: segText, preview: "" }, targetTopic),
+          threadId: reuseThread ? reuseThread.id : "",
+          threadTitle: reuseThread ? reuseThread.title : compactHeadline(segText, 24),
+          provider: agent.provider,
+          profileId: agent.profileId,
+          agentKey: agent.agentKey,
+          agentLabel: agent.agentLabel,
+          agentSource: agent.agentSource,
+          agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
+          agentReason: agent.agentReason || "",
+          model: String(rt.model || cleanModel || "").trim(),
+          effort: String(rt.effort || effort || "").trim(),
+          taskDifficulty: rt.taskDifficulty || "balanced",
+          taskDifficultyLabel: rt.taskDifficultyLabel || TASK_DIFFICULTY_LABELS[rt.taskDifficulty] || "",
+          hasTopicDigest,
+          willInheritContext: !reuseThread && Boolean(inheritContext !== false && hasTopicDigest),
+          contextSummaryPreview: !reuseThread && inheritContext !== false && hasTopicDigest ? compactHeadline(topicDigest.summary, 64) : "",
+          contextFilePath: topicDigest?.contextFilePath || "",
+          reason: String(rt.reason || "").trim() || `在「${targetTopic.name}」执行已确认的派工方案`,
+        });
+      }
+      aiPlanned = Boolean(approvedRoutes.some((r) => r?.agentSource === "ai"));
+    }
 
-    for (const segText of segments) {
+    // AI-assisted planning path for natural-language sprite dispatch previews
+    if (!routes.length && confirmOnly && useAiPlanner) {
+      const aiPlan = await this.#planDispatchWithAi({
+        text: cleanText,
+        scopedTopicId: topicId,
+        flatTopics,
+        profiles: profileInfo.profiles,
+        agentKey,
+        mode,
+        excludedAgentKeys,
+      });
+      if (aiPlan) {
+        aiPlanned = true;
+        aiModel = aiPlan.modelLabel || "";
+        aiReply = aiPlan.reply || "";
+        if (aiPlan.intent === "chat") {
+          return {
+            ok: true,
+            confirmOnly: true,
+            chatOnly: true,
+            aiPlanned: true,
+            aiModel,
+            reply: aiReply || "我在听，请告诉我你需要处理哪个项目或具体任务。",
+            routes: [],
+          };
+        }
+        const usedThreadIds = new Set();
+        const excludedSet = new Set(
+          Array.isArray(excludedAgentKeys)
+            ? excludedAgentKeys
+            : (this.#cache.dispatchPrefs?.excludedAgentKeys || []),
+        );
+        for (const item of aiPlan.tasks) {
+          const segText = String(item?.instruction || "").trim();
+          if (!segText) continue;
+          let targetTopic = topicMap.get(item?.topicId) || (topicId ? topicMap.get(topicId) : null);
+          if (!targetTopic) {
+            let bestScore = 0;
+            for (const tp of flatTopics) {
+              const sc = scoreTextAgainstTopic(segText, tp);
+              if (sc > bestScore) {
+                bestScore = sc;
+                targetTopic = tp;
+              }
+            }
+          }
+          if (!targetTopic) {
+            targetTopic = flatTopics[0] || {
+              id: "general-workspace",
+              name: "默认工作区",
+              primaryCwd: process.cwd(),
+              activeThreads: [],
+            };
+          }
+
+          const taskSpecialty = ["hardcore", "creative", "general"].includes(item?.specialty)
+            ? item.specialty
+            : classifyDispatchTaskSpecialty(segText);
+          const difficulty = ["fast", "balanced", "heavy"].includes(item?.difficulty)
+            ? item.difficulty
+            : classifyDispatchTaskDifficulty(segText);
+
+          let agent = null;
+          const aiKey = String(item?.agentKey || "").trim();
+          if (agentKey && agentKey !== "auto") {
+            agent = this.#resolveDispatchAgent({
+              agentKey,
+              preferredProvider,
+              topic: targetTopic,
+              profiles: profileInfo.profiles,
+              defaultKey: profileInfo.defaultKey,
+              flatTopics,
+              priorityStrategy,
+              providerOrder,
+              excludedAgentKeys,
+              taskSpecialty,
+            });
+          } else if (aiKey && profileByKey.has(aiKey) && !excludedSet.has(aiKey)) {
+            const p = profileByKey.get(aiKey);
+            const quotaInfo = extractProfileQuotaScore(p);
+            const hasHealthyAlt = profileInfo.profiles.some(
+              (cand) => !excludedSet.has(`${cand.provider}:${cand.id || "default"}`) && !extractProfileQuotaScore(cand).exhausted,
+            );
+            if (!quotaInfo.exhausted || !hasHealthyAlt) {
+              agent = {
+                provider: p.provider,
+                profileId: p.id || "default",
+                agentKey: aiKey,
+                agentLabel: this.#describeProfile(p),
+                agentSource: "ai",
+                agentReason: [quotaInfo.summary, String(item?.reason || "").trim()].filter(Boolean).join(" · ") || "AI 结合任务性质优选",
+              };
+            }
+          }
+          if (!agent) {
+            agent = this.#resolveDispatchAgent({
+              agentKey,
+              preferredProvider,
+              topic: targetTopic,
+              profiles: profileInfo.profiles,
+              defaultKey: profileInfo.defaultKey,
+              flatTopics,
+              priorityStrategy,
+              providerOrder,
+              excludedAgentKeys,
+              taskSpecialty,
+            });
+          }
+
+          const availableModels = typeof this.#hub?.listModels === "function"
+            ? await this.#hub.listModels(agent.provider, agent.profileId).catch(() => [])
+            : [];
+          const selectedModel = selectAdaptiveModelForRoute({
+            provider: agent.provider,
+            difficulty,
+            explicitModel: cleanModel,
+            availableModels,
+          });
+          const resolvedEffort = String(effort || selectedModel.effort || "").trim();
+          const segStage = inferStageTag({ title: segText, preview: "" }, targetTopic);
+
+          const topicDigest = this.#contextsStore.topics?.[targetTopic.id] || null;
+          const hasTopicDigest = Boolean(topicDigest?.summary);
+          const forceNew = mode === "new";
+
+          let reuseThread = null;
+          if (!forceNew && item?.action === "reuse_clean" && item?.targetThreadId) {
+            const cand = (targetTopic.activeThreads || []).find((t) => (
+              t.id === item.targetThreadId
+              && !t.isSlice
+              && !usedThreadIds.has(t.id)
+              && !t.live
+              && !(t.pendingCount > 0)
+              && !t.isCrossWorkspace
+              && !t.isMultiTaskSession
+              && agentKeyOfThread(t) === agent.agentKey
+            ));
+            if (cand) reuseThread = cand;
+          }
+
+          if (reuseThread) {
+            usedThreadIds.add(reuseThread.id);
+            routes.push({
+              segmentText: segText,
+              action: "reuse_clean",
+              topicId: targetTopic.id,
+              topicName: targetTopic.name,
+              cwd: targetTopic.primaryCwd,
+              stage: segStage,
+              threadId: reuseThread.id,
+              threadTitle: reuseThread.title,
+              provider: agent.provider,
+              profileId: agent.profileId,
+              agentKey: agent.agentKey,
+              agentLabel: agent.agentLabel,
+              agentSource: agent.agentSource,
+              agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
+              agentReason: agent.agentReason || "",
+              model: selectedModel.model || cleanModel,
+              effort: resolvedEffort,
+              taskDifficulty: difficulty,
+              taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
+              hasTopicDigest,
+              willInheritContext: false,
+              contextSummaryPreview: "",
+              contextFilePath: topicDigest?.contextFilePath || "",
+              reason: String(item?.reason || "").trim() || `AI 匹配并复用空闲工位「${compactHeadline(reuseThread.title, 18)}」`,
+            });
+          } else {
+            const willInherit = Boolean(inheritContext !== false && hasTopicDigest);
+            routes.push({
+              segmentText: segText,
+              action: "spawn_parallel",
+              topicId: targetTopic.id,
+              topicName: targetTopic.name,
+              cwd: targetTopic.primaryCwd,
+              stage: segStage,
+              threadId: "",
+              threadTitle: compactHeadline(segText, 24),
+              provider: agent.provider,
+              profileId: agent.profileId,
+              agentKey: agent.agentKey,
+              agentLabel: agent.agentLabel,
+              agentSource: agent.agentSource,
+              agentSourceLabel: AGENT_SOURCE_LABELS[agent.agentSource] || "",
+              agentReason: agent.agentReason || "",
+              model: selectedModel.model || cleanModel,
+              effort: resolvedEffort,
+              taskDifficulty: difficulty,
+              taskDifficultyLabel: TASK_DIFFICULTY_LABELS[difficulty] || "",
+              hasTopicDigest,
+              willInheritContext: willInherit,
+              contextSummaryPreview: willInherit ? compactHeadline(topicDigest.summary, 64) : "",
+              contextFilePath: topicDigest?.contextFilePath || "",
+              reason: String(item?.reason || "").trim() || `在「${targetTopic.name}」开启独立干净工位`,
+            });
+          }
+        }
+      }
+    }
+
+    if (!routes.length) {
+      const segments = topicId
+        ? [cleanText]
+        : splitCompoundPromptSegments(cleanText, this.#topics);
+
+      const usedThreadIds = new Set();
+
+      for (const segText of segments) {
       let targetTopic = topicId ? topicMap.get(topicId) : null;
       if (!targetTopic) {
         let bestScore = 0;
@@ -2161,6 +2609,7 @@ export class MissionOverviewService {
         flatTopics,
         priorityStrategy,
         providerOrder,
+        excludedAgentKeys,
         taskSpecialty,
       });
       const difficulty = classifyDispatchTaskDifficulty(segText);
@@ -2270,10 +2719,18 @@ export class MissionOverviewService {
           reason,
         });
       }
+      }
     }
 
     if (confirmOnly) {
-      return { ok: true, confirmOnly: true, routes };
+      return {
+        ok: true,
+        confirmOnly: true,
+        aiPlanned,
+        ...(aiModel ? { aiModel } : {}),
+        ...(aiReply ? { reply: aiReply } : {}),
+        routes,
+      };
     }
 
     const dispatched = [];
@@ -2297,7 +2754,8 @@ export class MissionOverviewService {
         });
       } else if (typeof this.#hub?.startThread === "function") {
         const topicDigest = this.#contextsStore.topics?.[route.topicId] || null;
-        const injectedText = (route.willInheritContext && topicDigest?.summary)
+        // Vault-backed digests reach new threads via the hub's memory pointer instead of inlined text.
+        const injectedText = (route.willInheritContext && topicDigest?.summary && !topicDigest.memory)
           ? `${route.segmentText}\n\n---\n[产线历史归档上下文（继承自「${route.topicName}」归档记忆${topicDigest.contextFilePath ? `，详单见 ${topicDigest.contextFilePath}` : ""}）]\n${topicDigest.summary}`
           : route.segmentText;
         const res = await this.#hub.startThread({
@@ -2686,6 +3144,132 @@ export class MissionOverviewService {
     return parts.join(" ").slice(0, 460);
   }
 
+  // Reads each candidate's transcript tail, asks the model which outcomes deserve long-term memory,
+  // and writes them (facts / decisions / lessons / wip + a session ledger row) into the vault.
+  // Returns null when no vault is configured; vault write errors propagate so nothing gets archived.
+  async #distillArchiveToMemory({ topicCfg, targetTopic, candidates = [], preferredModel = "auto" }) {
+    const root = await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir }).catch(() => "");
+    if (!root) return null;
+    const vault = new MemoryVault(root);
+    const scope = topicCfg.id;
+    await vault.ensureCard(scope, { name: topicCfg.name || targetTopic?.name || scope });
+
+    const transcripts = [];
+    let budget = ARCHIVE_TRANSCRIPT_TOTAL_CHARS;
+    for (const c of candidates.slice(0, 25)) {
+      if (budget <= 0) break;
+      let body = "";
+      if (typeof this.#hub?.readThread === "function") {
+        const res = await this.#hub.readThread(c.id, { limit: ARCHIVE_TRANSCRIPT_TURNS }).catch(() => null);
+        body = buildArchiveTranscript(res?.thread?.turns || [], { maxChars: Math.min(ARCHIVE_TRANSCRIPT_CHARS, budget) });
+      }
+      budget -= body.length;
+      transcripts.push(`### [${c.date || `${c.idleDays}天前`}] ${c.title}（${c.id}）\n${body || `预览：${c.preview || "无"}`}`);
+    }
+
+    const existingBrief = await vault.brief({ scope, maxChars: 1600 }).catch(() => "");
+    const scopeDir = `${vault.scopeDir(scope)}/`;
+    const allNotes = await vault.listNotes().catch(() => []);
+    const existingNoteKeys = new Set(allNotes.map((rel) => memoryDedupKey(basename(rel, ".md"))));
+    const scopeNoteTitles = allNotes
+      .filter((rel) => rel.startsWith(scopeDir) && !/^(台账-|任务-)/.test(basename(rel)) && rel !== vault.cardPath(scope))
+      .map((rel) => basename(rel, ".md"));
+    const card = await vault.tryRead(vault.cardPath(scope));
+    const existingFacts = new Map(parseTable(getSection(card?.body || "", "事实")).rows.map((r) => [r["键"], memoryDedupKey(r["值"])]));
+    const existingDecisionKeys = getSection(card?.body || "", "决策").split("\n")
+      .filter((l) => l.startsWith("- "))
+      .map((l) => memoryDedupKey(l.replace(/^- \d{4}-\d{2}-\d{2}\s*/, "").replace(/（(agent|user|code)）$/, "")));
+    const prompt = [
+      `你是「${targetTopic?.name || scope}」项目的共享记忆管理员。下列会话即将归档，请提炼其中值得长期保留的成果写入记忆库。`,
+      "准入三问，满足任一才记：下次新会话会再问吗？花了力气才得到的吗？换个会话会做错吗？",
+      "规则：1. 只记已落地或已验证的结论，不记过程闲聊、一次性输出、能从代码/git 直接读到的内容；",
+      "2. facts 用短键（如「当前进度」「部署端口」），与已有记忆同义时复用原键名以便覆盖；",
+      "3. decisions 只记用户拍板的决定或偏好；lessons 只记可复用的踩坑经验；wip 只记明确做了一半、需要接着做的任务；",
+      "4. 【已有记忆】里已经记过的内容（包括换个说法的同义表述）一律不要再输出，只输出新增的或值发生变化的条目；",
+      "5. 严禁写入密码、token、cookie、API key 等凭证；没有值得记的就返回空数组。",
+      '只输出 JSON：{"summary":"150字内的本批会话成果概述","facts":[{"key":"","value":""}],"decisions":[""],"lessons":[{"title":"","body":""}],"wip":[{"slug":"","title":"","state":"","next":""}]}',
+      existingBrief ? `\n【已有记忆】\n${existingBrief}` : "",
+      scopeNoteTitles.length ? `已有笔记：${scopeNoteTitles.slice(0, 40).join("、")}` : "",
+      `\n【待归档会话 ${candidates.length} 条】`,
+      ...transcripts,
+    ].filter(Boolean).join("\n");
+
+    const aiRes = await this.#invokeLightweightModel(prompt, preferredModel || "auto").catch(() => null);
+    const distilled = Boolean(aiRes?.parsed && typeof aiRes.parsed === "object");
+    const plan = normalizeArchiveMemoryPlan(aiRes?.parsed);
+    const sourceIds = candidates.map((c) => c.id);
+    const files = new Set();
+    const report = { scope, distilled, facts: 0, conflicts: 0, decisions: 0, lessons: 0, wip: 0, skipped: 0, sessions: 0, files: [] };
+
+    // Anything the vault already holds is skipped outright (no rewrite, no "re-confirmed" churn).
+    for (const f of plan.facts) {
+      if (existingFacts.get(f.key) === memoryDedupKey(f.value)) {
+        report.skipped += 1;
+        continue;
+      }
+      const res = await vault.upsertFact(scope, f.key, f.value, { source: "agent" });
+      if (res.action === "conflict") report.conflicts += 1;
+      else report.facts += 1;
+      files.add(res.file);
+    }
+    for (const d of plan.decisions) {
+      const key = memoryDedupKey(d);
+      if (existingDecisionKeys.some((k) => k && (k === key || k.includes(key) || key.includes(k)))) {
+        report.skipped += 1;
+        continue;
+      }
+      existingDecisionKeys.push(key);
+      const res = await vault.addDecision(scope, d, { source: "agent" });
+      if (res.action === "added") report.decisions += 1;
+      files.add(res.file);
+    }
+    for (const l of plan.lessons) {
+      if (existingNoteKeys.has(memoryDedupKey(l.title))) {
+        report.skipped += 1;
+        continue;
+      }
+      existingNoteKeys.add(memoryDedupKey(l.title));
+      try {
+        const res = await vault.addNote({ scope, title: l.title, kind: "lesson", body: `${l.body}\n\n来源会话：${sourceIds.join("、")}` });
+        report.lessons += 1;
+        files.add(res.file);
+      } catch (err) {
+        if (!/已存在同名笔记/.test(String(err?.message || ""))) throw err;
+      }
+    }
+    for (const w of plan.wip) {
+      const res = await vault.updateWip(scope, w.slug, { title: w.title, state: w.state, next: w.next, log: "归档会话时提炼" });
+      report.wip += 1;
+      files.add(res.file);
+    }
+    const archivedOn = vaultToday();
+    for (const c of candidates) {
+      const res = await vault.upsertLedger(scope, "会话", {
+        会话: c.id,
+        日期: c.date || archivedOn,
+        引擎: String(c.id).split(":")[0] || "",
+        标题: compactHeadline(c.title || "未命名会话", 60),
+        归档: archivedOn,
+      }, { keys: ["会话"] });
+      report.sessions += 1;
+      files.add(res.file);
+    }
+    report.files = [...files];
+
+    const counts = [
+      report.facts && `事实 ${report.facts}`,
+      report.decisions && `决策 ${report.decisions}`,
+      report.lessons && `经验 ${report.lessons}`,
+      report.wip && `任务卡 ${report.wip}`,
+      report.conflicts && `待裁决 ${report.conflicts}`,
+      report.skipped && `已有跳过 ${report.skipped}`,
+    ].filter(Boolean).join("、");
+    const head = distilled
+      ? `已落记忆库（${scope}）：${counts || "本批无新增长期记忆"}；${report.sessions} 条会话已登记到「台账-会话」。`
+      : `模型提炼不可用，仅把 ${report.sessions} 条会话登记到记忆库「台账-会话」（${scope}），可随时取消归档回看。`;
+    return { summary: [head, plan.summary].filter(Boolean).join("\n"), report };
+  }
+
   async archiveAndSummarizeTopic({
     topicId = "",
     staleDays = 3,
@@ -2757,6 +3341,7 @@ export class MissionOverviewService {
         staleDays: daysNum,
         candidates,
         existingDigest,
+        memoryVault: Boolean(await resolveVaultPath({ env: this.#env, dataDir: this.#dataDir }).catch(() => "")),
       };
     }
 
@@ -2770,13 +3355,16 @@ export class MissionOverviewService {
       };
     }
 
+    // Distill into the shared memory vault first; threads are archived only after memory lands.
+    const memory = await this.#distillArchiveToMemory({ topicCfg, targetTopic, candidates, preferredModel });
+
     const idsToArchive = candidates.map((c) => c.id);
     if (typeof this.#hub?.archiveThreads === "function") {
       await this.#hub.archiveThreads(idsToArchive, true);
     }
 
-    // Synthesize updated archive digest (AI with deterministic fallback)
-    let distilledSummary = "";
+    // Without a vault, fall back to the legacy digest (AI with deterministic fallback).
+    let distilledSummary = memory?.summary || "";
     const aiPrompt = [
       `你是「${targetTopic.name}」产线的项目记忆总管。请将下列刚刚归档的历史会话与原有归档摘要合并提炼成一段 150~340 字的高密度中文「产线归档记忆摘要」，供后续新开派工单的 AI 员工直接继承上下文。`,
       "要求：1. 只保留已落地的关键结论、架构/脚本约定、踩坑教训与待续方向；2. 严禁空话套话与 emoji；3. 只输出纯文本摘要本身（不要 Markdown 标题或代码块）。",
@@ -2785,7 +3373,7 @@ export class MissionOverviewService {
       ...candidates.slice(0, 25).map((c) => `- [${c.date || `${c.idleDays}天前`}] (${c.stage || "研发"}) ${c.title}：${c.preview || "无预览"}`),
     ].filter(Boolean).join("\n");
 
-    try {
+    if (!memory) try {
       if (this.#runAiImpl) {
         const aiRes = await this.#runAiImpl(aiPrompt, preferredModel || "auto");
         const rawText = typeof aiRes === "string" ? aiRes : String(aiRes?.summary || aiRes?.text || "");
@@ -2820,8 +3408,9 @@ export class MissionOverviewService {
       updatedAt: nowIso,
       contextFilePath: "",
       recentItems: mergedItems,
+      memory: memory?.report || null,
     };
-    nextDigest.contextFilePath = await this.#writeTopicContextMarkdown(topicCfg, nextDigest);
+    if (!memory) nextDigest.contextFilePath = await this.#writeTopicContextMarkdown(topicCfg, nextDigest);
 
     this.#contextsStore.topics[cleanId] = nextDigest;
     await this.#persistContexts();

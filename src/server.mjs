@@ -18,8 +18,9 @@ import {
   sendJson,
 } from "./http-response.mjs";
 import { defaultDataDir, ensureInstanceIdentity } from "./instance-identity.mjs";
+import { listLanUrls } from "./lan-network.mjs";
 import { listLocalApps, LOCAL_APPS_DIR, proxyLocalApp } from "./local-apps.mjs";
-import { isSubpathOrEqual } from "./platform.mjs";
+import { execFileCrossPlatform, isSubpathOrEqual } from "./platform.mjs";
 import { ProviderHub } from "./provider-hub.mjs";
 import { listSlashCommands } from "./slash-commands.mjs";
 import {
@@ -36,6 +37,7 @@ import { acquireRuntimeLease } from "./runtime-lease.mjs";
 import { AutomationScheduler } from "./automation-scheduler.mjs";
 import { MissionOverviewService } from "./mission-overview-service.mjs";
 import { UpdateService } from "./update-service.mjs";
+import { createUsagePing } from "./usage-ping.mjs";
 import { VoiceCallService } from "./voice-call-service.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -132,11 +134,13 @@ export async function createAgentControlServer({
   disableRelay = env.AGENT_CONTROL_DISABLE_RELAY === "1",
   disableTunnel = env.AGENT_CONTROL_DISABLE_TUNNEL === "1",
   disableUpdateCheck = env.AGENT_CONTROL_DISABLE_AUTO_UPDATE === "1",
+  disableTelemetry = disableUpdateCheck,
   requireAuth = env.AGENT_CONTROL_REQUIRE_AUTH === "1",
   providers = null,
   hub: customHub = null,
   remoteBridgeOptions = null,
   updateServiceOptions = null,
+  revealFileImpl = null,
   writeErrorLog,
 } = {}) {
   const identity = await ensureInstanceIdentity({ dataDir });
@@ -256,6 +260,42 @@ export async function createAgentControlServer({
 
   let actualPort = port;
   let leaseHandle = null;
+  let lastKnownRemoteFallbackUrl = "";
+
+  const normalizeFallbackUrl = (rawUrl) => {
+    const text = String(rawUrl || "").trim();
+    if (!text) return "";
+    try {
+      const parsed = new URL(text);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return "";
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString();
+    } catch {
+      return "";
+    }
+  };
+
+  const resolveRemoteFallbackUrl = () => {
+    if (lastKnownRemoteFallbackUrl) return lastKnownRemoteFallbackUrl;
+    const remoteSnap = bridge.statusSnapshot();
+    if (remoteSnap.connected && remoteSnap.relayUrl) {
+      return `${String(remoteSnap.relayUrl).replace(/\/+$/, "")}/i/${encodeURIComponent(identity.instanceId)}/`;
+    }
+    if (tunnelAuth.fixedPublicUrl) {
+      return `${String(tunnelAuth.fixedPublicUrl).replace(/\/+$/, "")}/`;
+    }
+    const tunnelSnap = quickTunnel.statusSnapshot();
+    if (tunnelSnap.publicUrl) {
+      return `${String(tunnelSnap.publicUrl).replace(/\/+$/, "")}/`;
+    }
+    return "";
+  };
+
+  const getLanStatusSnapshot = () => ({
+    ...listLanUrls({ port: actualPort, host }),
+    fallbackUrl: resolveRemoteFallbackUrl(),
+  });
 
   const server = http.createServer(async (request, response) => {
     const requestId = randomUUID().slice(0, 8);
@@ -297,8 +337,10 @@ export async function createAgentControlServer({
           return;
         }
         const secureSuffix = isHttpsForwardedRequest(request) ? "; Secure" : "";
+        const nextThread = String(url.searchParams.get("thread") || "").trim();
+        const redirectLocation = nextThread ? `/?thread=${encodeURIComponent(nextThread)}` : "/";
         response.writeHead(302, {
-          Location: "/",
+          Location: redirectLocation,
           "Cache-Control": "no-store",
           "Set-Cookie": `${tunnelAuth.cookieName()}=${encodeURIComponent(sessionToken)}; Path=/; Max-Age=${30 * 24 * 3600}; HttpOnly; SameSite=Lax${secureSuffix}`,
           "X-Content-Type-Options": "nosniff",
@@ -327,6 +369,7 @@ export async function createAgentControlServer({
           ...providerSummary,
           remote: canManageRemote ? remoteSnap : { ...remoteSnap, pairUrl: "" },
           tunnel: quickTunnel.statusSnapshot({ includeSecrets: canManageRemote }),
+          lan: getLanStatusSnapshot(),
           update: updateService.statusSnapshot(),
         }, { requestId });
         return;
@@ -571,6 +614,7 @@ export async function createAgentControlServer({
         const result = await overviewService.updateDispatchPrefs({
           strategy: body.strategy || "",
           providerOrder: Array.isArray(body.providerOrder) ? body.providerOrder : null,
+          excludedAgentKeys: Array.isArray(body.excludedAgentKeys) ? body.excludedAgentKeys : null,
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -588,10 +632,13 @@ export async function createAgentControlServer({
           effort: body.effort || "",
           priorityStrategy: body.priorityStrategy || "",
           providerOrder: Array.isArray(body.providerOrder) ? body.providerOrder : null,
+          excludedAgentKeys: Array.isArray(body.excludedAgentKeys) ? body.excludedAgentKeys : null,
           remember: body.remember !== false,
           confirmOnly: Boolean(body.confirmOnly),
           sparkId: body.sparkId || "",
           inheritContext: body.inheritContext !== false,
+          useAiPlanner: Boolean(body.useAiPlanner),
+          approvedRoutes: Array.isArray(body.approvedRoutes) ? body.approvedRoutes : null,
         });
         sendJson(response, 200, result, { requestId });
         return;
@@ -855,6 +902,31 @@ export async function createAgentControlServer({
           });
           rs.pipe(response);
         });
+        return;
+      }
+
+      if (pathname === "/api/thread/reveal" && request.method === "POST") {
+        if (!canManageRemote) {
+          sendJson(response, 403, { error: { code: "LOCAL_ONLY", message: "仅支持在本机控制台打开访达" } }, { requestId });
+          return;
+        }
+        const body = await readJsonBody(request);
+        const threadId = String(body?.threadId || "").trim();
+        const rawPath = String(body?.path || "").trim();
+        context.threadId = threadId;
+        const resolved = await hub.resolveThreadOutputFile(threadId, rawPath);
+        if (revealFileImpl) {
+          await revealFileImpl(resolved.filePath);
+        } else if (process.platform === "darwin") {
+          await execFileCrossPlatform("open", ["-R", resolved.filePath], { timeout: 5000 });
+        } else if (process.platform === "win32") {
+          await execFileCrossPlatform("explorer.exe", [`/select,${resolved.filePath}`], { timeout: 5000 }).catch((err) => {
+            if (Number(err?.code) !== 1) throw err;
+          });
+        } else {
+          await execFileCrossPlatform("xdg-open", [dirname(resolved.filePath)], { timeout: 5000 });
+        }
+        sendJson(response, 200, { ok: true, path: resolved.filePath }, { requestId });
         return;
       }
 
@@ -1244,6 +1316,7 @@ export async function createAgentControlServer({
           telemetry: await hub.getTelemetry().catch(() => null),
           remote: canManageRemote ? remoteSnap : { ...remoteSnap, pairUrl: "" },
           tunnel: quickTunnel.statusSnapshot({ includeSecrets: canManageRemote }),
+          lan: getLanStatusSnapshot(),
           update: updateService.statusSnapshot(),
         };
         if (clientClosed || response.writableEnded) return;
@@ -1349,6 +1422,37 @@ export async function createAgentControlServer({
           canManage: canManageRemote,
           tunnel: { ...tunnel, canManage: canManageRemote },
           fixedTunnel: { ...fixedTunnel, canManage: canManageRemote },
+          lan: getLanStatusSnapshot(),
+        }, { requestId });
+        return;
+      }
+
+      if (pathname === "/api/remote/lan-switch" && request.method === "POST") {
+        const body = await readJsonBody(request);
+        const normalizedFallback = normalizeFallbackUrl(body.fallbackUrl);
+        if (normalizedFallback) {
+          lastKnownRemoteFallbackUrl = normalizedFallback;
+        }
+        const lan = getLanStatusSnapshot();
+        if (!lan.enabled || !lan.primaryUrl) {
+          sendJson(response, 409, {
+            error: {
+              code: "lan_unavailable",
+              message: !lan.enabled
+                ? "当前服务仅监听本机回环地址，请以 HOST=0.0.0.0 或重启后台服务后再试"
+                : "未检测到可用的局域网 IPv4 地址",
+            },
+          }, { requestId });
+          return;
+        }
+        if (!tunnelAuth.browserToken) await tunnelAuth.load();
+        const threadId = String(body.threadId || "").trim();
+        const threadSuffix = threadId ? `?thread=${encodeURIComponent(threadId)}` : "";
+        const connectUrl = `${lan.primaryUrl}/connect/${encodeURIComponent(tunnelAuth.browserToken)}${threadSuffix}`;
+        sendJson(response, 200, {
+          ok: true,
+          lan,
+          connectUrl,
         }, { requestId });
         return;
       }
@@ -1485,10 +1589,18 @@ export async function createAgentControlServer({
     }
   });
 
+  const usagePing = createUsagePing({
+    dataDir,
+    instanceId: identity.instanceId,
+    env,
+    disabled: disableTelemetry,
+  });
+
   const closeResources = async () => {
     clearInterval(heartbeat);
     automationScheduler.close();
     updateService.close();
+    usagePing.close();
     unsubscribeHub();
     for (const res of [...sseClients]) {
       try { res.end(); } catch {}
@@ -1539,6 +1651,7 @@ export async function createAgentControlServer({
       if (!disableUpdateCheck) {
         updateService.start();
       }
+      usagePing.start();
       if (!env.AGENT_CONTROL_DISABLE_AUTOMATIONS) {
         automationScheduler.start();
       }

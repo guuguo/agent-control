@@ -1430,6 +1430,14 @@ body.is-resizing-sidebar * {
   color: var(--text-muted);
 }
 
+.msg-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .msg-copy-btn {
   display: inline-flex;
   align-items: center;

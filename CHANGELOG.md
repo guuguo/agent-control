@@ -1,5 +1,19 @@
 # 更新日志 (CHANGELOG)
 
+## v0.2.4 (2026-11-21)
+
+UI 资源版本：`20261121a`
+
+- feat(agy): allow auto-compact thresholds up to 900K (9e08217)
+- feat(ui): Mermaid diagrams, unarchive actions, 3D factory and stats polish (4ba9f6c)
+- feat(update): bilingual user-facing release notes in update panel (33d84cd)
+- feat(cli): detect Homebrew cask installs for CLI maintenance (5ad2e23)
+- feat(providers): AGY auto-compact before send and archived-thread recovery (54318de)
+- feat(memory): opt-in shared memory vault with one-line session pointer (c551bf0)
+- docs: refresh overview GIFs with upgraded 3D Dream Factory and Sprite Assistant UI (83595f2)
+- docs(en): use raw.githubusercontent.com URLs in English README (2669460)
+- docs: add 14-second animated overview GIF to Chinese and English READMEs (f9885e2)
+
 ## v0.2.3 (2026-11-18)
 
 UI 资源版本：`20261118a`

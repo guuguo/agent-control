@@ -2,6 +2,21 @@
 
 > Plain-language English release notes for end users covering key additions, improvements, and fixes in each version. Keep this file in sync with `RELEASE_NOTES.md` whenever user-visible changes ship; the in-app "Version & Updates" modal loads it automatically for non-Chinese UI locales.
 
+## v0.2.4 (2026-11-21) — 3D Dream Factory Polish, LAN Switch & Anonymous Usage Ping
+
+Summary: Upgraded the 3D Dream Factory overview and Sprite Assistant, added quick LAN access switching, improved file/image previewing, and introduced an opt-out anonymous startup ping.
+
+### Added
+
+- **Quick LAN Access Switching**: View and switch local network URLs directly so phones and tablets on the same Wi-Fi can connect effortlessly.
+- **Opt-Out Anonymous Usage Ping**: Sends a lightweight startup/daily ping containing only a hashed instance ID, version, OS, arch, and Node major version; disable anytime via `AGENT_CONTROL_DISABLE_TELEMETRY=1` or `DO_NOT_TRACK=1`.
+
+### Improved
+
+- **3D Dream Factory & Sprite Assistant**: Enhanced 3D workspace visuals, mission overview sync, and sprite status feedback.
+- **Higher AGY Auto-Compact Threshold**: Allows raising the Antigravity pre-send auto-compact threshold up to 900K tokens.
+- **Markdown File Links & Image Preview**: Refined local file link resolution and image preview sizing inside chat replies.
+
 ## v0.2.3 (2026-11-19) — Inline Mermaid Diagrams, Unarchive & Clearer Execution Stats
 
 Summary: Render Mermaid flowcharts inline in chat, unarchive archived Codex sessions in one click, read human-friendly model speed stats, and view dedicated user-facing release notes.

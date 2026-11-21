@@ -1,5 +1,9 @@
 import { apiGet, apiPost, apiUrl, isDemoMode } from "./api-client.js?v=20261118demo";
-import { autoPreviewThreadImages } from "./image-preview-policy.js?v=20261118images";
+import {
+  autoPreviewThreadImages,
+  isLocalOrLanHostname,
+  isLoopbackHostname,
+} from "./image-preview-policy.js?v=20261120lan";
 import {
   computeDefaultHiddenProviderTabs,
   hasSavedProviderTabsPref,
@@ -86,7 +90,7 @@ import {
   renderMessageCopyButton,
   renderTurnHtml,
   turnEndsWithProcessGroup,
-} from "./markdown.js?v=20261119mermaid";
+} from "./markdown.js?v=20261120msgtime";
 import {
   SIDEBAR_MANUAL_HOLD_MS,
   THREAD_EXPAND_STEP,
@@ -593,6 +597,7 @@ const state = {
   lastDispatchReceipt: null,
   sprite: {
     open: false,
+    prefsOpen: false,
     ttsEnabled: loadSpritePrefs().ttsEnabled,
     mood: "idle",
     unreadCount: 0,
@@ -676,6 +681,7 @@ const state = {
   hotExtensionRoutes: new Set(),
   remoteStatus: null,
   tunnelStatus: null,
+  lanInfo: null,
   tunnelBusy: false,
   fixedTunnelStatus: null,
   fixedTunnelBusy: false,
@@ -2661,12 +2667,20 @@ function buildDispatchAgentContext() {
     const email = String(p.account?.email || "").trim();
     return email && !name.includes(email) ? `${name}（${email}）` : name;
   };
-  const agentOptions = profiles.map((p) => ({
-    key: `${p.provider}:${p.id || "default"}`,
-    provider: p.provider,
-    providerLabel: providerDisplayName(p.provider),
-    label: describe(p),
-  }));
+  const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
+    ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
+    : [];
+  const excludedSet = new Set(excludedAgentKeys);
+  const agentOptions = profiles.map((p) => {
+    const key = `${p.provider}:${p.id || "default"}`;
+    return {
+      key,
+      provider: p.provider,
+      providerLabel: providerDisplayName(p.provider),
+      label: describe(p),
+      excluded: excludedSet.has(key),
+    };
+  });
   const byKey = new Map(agentOptions.map((o) => [o.key, o]));
 
   // Preview what "auto" will resolve to for the targeted production line (mirrors backend priority).
@@ -2674,10 +2688,10 @@ function buildDispatchAgentContext() {
   const topics = (state.missionOverview?.domains || []).flatMap((d) => d.topics || []);
   const tp = state.dispatchTopicId ? topics.find((t) => t.id === state.dispatchTopicId) : null;
   if (tp) {
-    if (tp.agentPref && byKey.has(tp.agentPref)) {
+    if (tp.agentPref && byKey.has(tp.agentPref) && !excludedSet.has(tp.agentPref)) {
       autoResolvedLabel = `${byKey.get(tp.agentPref).label}（上次所选）`;
     } else {
-      const hitKey = (tp.agentAffinity || []).find((k) => byKey.has(k));
+      const hitKey = (tp.agentAffinity || []).find((k) => byKey.has(k) && !excludedSet.has(k));
       autoResolvedLabel = hitKey ? `${byKey.get(hitKey).label}（项目历史）` : "全局默认账号";
     }
   }
@@ -4101,11 +4115,21 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
   const metaEl = $("imagePreviewMeta");
   const loadRawBtn = $("imagePreviewLoadRawBtn");
   const rawLink = $("imagePreviewOpenRaw");
+  const revealBtn = $("imagePreviewRevealBtn");
   if (!modal || !img || !src) return;
 
   const isCompressedUrl = !src.startsWith("data:") && /[?&]w=\d+/i.test(src) && !/[?&]raw=1/i.test(src);
   const resolvedRaw = rawSrc || "";
-  state.imagePreview = { svgMode: false, src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0 };
+  const localPath = resolveImagePreviewLocalPath(resolvedRaw || src);
+  let revealThreadId = state.activeThread?.id || state.activeThreadId || "";
+  let revealPath = localPath;
+  try {
+    const parsedUrl = new URL(resolvedRaw || src, location.href);
+    revealThreadId = parsedUrl.searchParams.get("threadId") || revealThreadId;
+    const paramPath = parsedUrl.searchParams.get("path");
+    if (paramPath && localPath) revealPath = paramPath;
+  } catch {}
+  state.imagePreview = { svgMode: false, src, rawSrc: resolvedRaw, caption, showingRaw: !isCompressedUrl, scale: 1, tx: 0, ty: 0, revealThreadId, revealPath };
   modal.classList.remove("is-svg-preview");
 
   if (svgHost) {
@@ -4116,7 +4140,6 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
   }
   img.hidden = false;
 
-  const localPath = resolveImagePreviewLocalPath(resolvedRaw || src);
   for (const target of [img, capEl]) {
     if (!target) continue;
     if (localPath) target.dataset.localFilePath = localPath;
@@ -4155,6 +4178,11 @@ function openImagePreviewModal(src, caption = "", rawSrc = "") {
       rawLink.hidden = false;
       rawLink.setAttribute("href", targetHref);
     }
+  }
+  if (revealBtn) {
+    const canReveal = Boolean(localPath && revealThreadId && (typeof isLoopbackHostname === "function" ? isLoopbackHostname(location.hostname) : false));
+    revealBtn.hidden = !canReveal;
+    revealBtn.disabled = false;
   }
   if (!modal.open && typeof modal.showModal === "function") {
     modal.showModal();
@@ -4202,6 +4230,8 @@ function openMermaidPreviewModal(svgHtml, caption = "Mermaid 图表") {
       rawLink.hidden = true;
       rawLink.setAttribute("href", "#");
     }
+    const revealBtn = $("imagePreviewRevealBtn");
+    if (revealBtn) revealBtn.hidden = true;
     if (!modal.open && typeof modal.showModal === "function") {
       modal.showModal();
     }
@@ -4289,6 +4319,7 @@ async function openFilePreviewModal(threadId, filePath, lineAnchor = null) {
   const toggleBtn = $("filePreviewToggleRawBtn");
   const copyBtn = $("filePreviewCopyBtn");
   const dlBtn = $("filePreviewDownloadBtn");
+  const revealBtn = $("filePreviewRevealBtn");
   const bodyEl = $("filePreviewBody");
   if (!modal || !bodyEl) return;
 
@@ -4301,6 +4332,11 @@ async function openFilePreviewModal(threadId, filePath, lineAnchor = null) {
   if (dlBtn) {
     dlBtn.hidden = false;
     dlBtn.setAttribute("href", `./api/thread/file?threadId=${encodeURIComponent(cleanThreadId)}&path=${encodeURIComponent(cleanPath)}&mode=raw&download=1`);
+  }
+  if (revealBtn) {
+    const canReveal = Boolean(cleanThreadId && cleanPath && (typeof isLoopbackHostname === "function" ? isLoopbackHostname(location.hostname) : false));
+    revealBtn.hidden = !canReveal;
+    revealBtn.disabled = false;
   }
   bodyEl.innerHTML = `<div class="file-preview-empty">正在读取文件内容…</div>`;
   state.filePreview = { threadId: cleanThreadId, path: cleanPath, meta: null, rawMode: false };
@@ -6045,6 +6081,7 @@ function bindEventSourceListeners(es) {
     state.sseConnected = true;
     sseReconnectAttempt = 0;
     clearSseReconnectTimer();
+    clearLanFallbackTimer();
     syncConnectionDots("connected");
     if (state.toastActive && !state.toastTimer && $("liveBanner")?.classList.contains("is-error")) {
       state.toastActive = false;
@@ -6057,6 +6094,7 @@ function bindEventSourceListeners(es) {
     state.sseConnected = true;
     sseReconnectAttempt = 0;
     clearSseReconnectTimer();
+    clearLanFallbackTimer();
     syncConnectionDots("connected");
     if (state.toastActive && !state.toastTimer && $("liveBanner")?.classList.contains("is-error")) {
       state.toastActive = false;
@@ -6089,7 +6127,9 @@ function bindEventSourceListeners(es) {
     if (data.telemetry) applyTelemetrySnapshot(data.telemetry);
     if (data.remote) state.remoteStatus = data.remote;
     if (data.tunnel) state.tunnelStatus = data.tunnel;
+    if (data.lan) applyLanInfo(data.lan);
     if (data.update) applyUpdateStatusSnapshot(data.update, { fromReconnectReady: true });
+    clearLanFallbackTimer();
     syncRemoteButtonIndicator();
   });
 
@@ -6815,6 +6855,7 @@ function bindEventSourceListeners(es) {
       state.eventSource = null;
       scheduleSseReconnect();
     }
+    scheduleLanFallbackCheck();
   });
 }
 
@@ -7677,6 +7718,153 @@ async function refreshLocalApps() {
   return state.localApps;
 }
 
+const LAN_FALLBACK_URL_STORAGE_KEY = "ac.lanFallbackUrl";
+let lanFallbackTimer = null;
+let lanFallbackChecking = false;
+
+function isCurrentLanSession() {
+  if (typeof location === "undefined") return false;
+  return isLocalOrLanHostname(location.hostname) && !isLoopbackHostname(location.hostname);
+}
+
+function isCurrentRemoteSession() {
+  if (typeof location === "undefined") return false;
+  return !isLocalOrLanHostname(location.hostname);
+}
+
+function getSavedLanFallbackUrl() {
+  const fromState = String(state.lanInfo?.fallbackUrl || "").trim();
+  if (fromState) return fromState;
+  try {
+    return String(localStorage.getItem(LAN_FALLBACK_URL_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function buildUrlWithCurrentThread(baseUrl) {
+  try {
+    const target = new URL(baseUrl);
+    if (state.activeThreadId) {
+      target.searchParams.set("thread", state.activeThreadId);
+    } else {
+      target.searchParams.delete("thread");
+    }
+    return target.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+function syncNetworkSwitchMenuButton() {
+  const btn = $("switchNetworkLinkBtn");
+  if (!btn) return;
+  if (isCurrentLanSession()) {
+    const fallbackUrl = getSavedLanFallbackUrl();
+    if (fallbackUrl) {
+      btn.hidden = false;
+      btn.textContent = "切回公网中继";
+      btn.title = "切回公网中继访问地址";
+      return;
+    }
+  } else if (isCurrentRemoteSession() && state.lanInfo?.enabled && state.lanInfo?.primaryUrl) {
+    btn.hidden = false;
+    btn.textContent = "切到局域网直连";
+    btn.title = `切换到局域网直连 (${state.lanInfo.primaryUrl})`;
+    return;
+  }
+  btn.hidden = true;
+}
+
+function applyLanInfo(lan) {
+  if (!lan || typeof lan !== "object") return;
+  state.lanInfo = lan;
+  if (isCurrentLanSession() && lan.fallbackUrl) {
+    try {
+      localStorage.setItem(LAN_FALLBACK_URL_STORAGE_KEY, lan.fallbackUrl);
+    } catch {}
+  }
+  syncNetworkSwitchMenuButton();
+}
+
+function clearLanFallbackTimer() {
+  if (lanFallbackTimer) {
+    clearTimeout(lanFallbackTimer);
+    lanFallbackTimer = null;
+  }
+}
+
+async function probeUrlReachable(url, { timeoutMs = 2500, noCors = false } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      mode: noCors ? "no-cors" : "same-origin",
+      signal: controller.signal,
+    });
+    return noCors ? true : response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runLanFallbackCheck() {
+  if (lanFallbackChecking || !isCurrentLanSession() || state.sseConnected) return;
+  const fallbackUrl = getSavedLanFallbackUrl();
+  if (!fallbackUrl) return;
+  lanFallbackChecking = true;
+  try {
+    const localOk = await probeUrlReachable(apiUrl("health"), { timeoutMs: 2000, noCors: false });
+    if (localOk || state.sseConnected) return;
+    const remoteHealthUrl = new URL("health", fallbackUrl).toString();
+    const remoteOk = await probeUrlReachable(remoteHealthUrl, { timeoutMs: 3000, noCors: true });
+    if (!remoteOk || state.sseConnected) return;
+    showToastBanner("局域网已断开，正在切回公网中继…", { sticky: true });
+    location.replace(buildUrlWithCurrentThread(fallbackUrl));
+  } finally {
+    lanFallbackChecking = false;
+  }
+}
+
+function scheduleLanFallbackCheck(delayMs = 5000) {
+  if (!isCurrentLanSession() || !getSavedLanFallbackUrl()) return;
+  if (lanFallbackTimer) return;
+  lanFallbackTimer = setTimeout(() => {
+    lanFallbackTimer = null;
+    void runLanFallbackCheck();
+  }, delayMs);
+}
+
+async function switchNetworkLink() {
+  if (isCurrentLanSession()) {
+    const fallbackUrl = getSavedLanFallbackUrl();
+    if (!fallbackUrl) return;
+    showToastBanner("正在切回公网中继…");
+    location.href = buildUrlWithCurrentThread(fallbackUrl);
+    return;
+  }
+  if (!isCurrentRemoteSession()) return;
+  try {
+    const fallbackUrl = `${location.origin}${location.pathname}`;
+    const data = await apiPost("api/remote/lan-switch", {
+      threadId: state.activeThreadId || "",
+      fallbackUrl,
+    });
+    if (!data?.connectUrl) {
+      throw new Error("未获取到可用的局域网连接地址");
+    }
+    showToastBanner(`正在切换到局域网直连（${data.lan?.primaryUrl || ""}）…`, { sticky: true });
+    location.href = data.connectUrl;
+  } catch (error) {
+    const errMsg = formatActionError(error, "切换局域网直连失败");
+    showToastBanner("切换局域网直连失败", { detail: errMsg, error: true });
+  }
+}
+
 function syncRemoteButtonIndicator() {
   const active = state.tunnelStatus?.state === "running" || Boolean(state.remoteStatus?.connected);
   const dot = $("remoteActiveDot");
@@ -7819,6 +8007,9 @@ function renderRemoteStatus(status) {
   }
   if (status.fixedTunnel) {
     renderFixedTunnelStatus(status.fixedTunnel);
+  }
+  if (status.lan) {
+    applyLanInfo(status.lan);
   }
 }
 
@@ -8250,6 +8441,7 @@ function renderSpriteAssistantMount() {
   mount.classList.add("is-3d");
   mount.classList.remove("is-2d", "is-chat", "is-chat-idle");
   mount.classList.toggle("has-inspector", hasInspector);
+  mount.classList.toggle("is-open", Boolean(state.sprite.open));
 
   // Sync live input draft before re-rendering so typing is never lost on background SSE ticks
   const liveInput = $("spriteCommandInput");
@@ -8276,10 +8468,17 @@ function renderSpriteAssistantMount() {
     || (prevFeedEl.scrollHeight - prevFeedEl.scrollTop - prevFeedEl.clientHeight <= 28);
   const shouldPinFeedToBottom = enteringOpen || isNewMsg || feedWasNearBottom;
 
+  const { agentOptions } = buildDispatchAgentContext();
+  const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
+    ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
+    : [];
+
   const stableHtml = renderSpriteAssistantHtml(state.sprite, {
     is3dMode: is3d,
     enteringOpen: false,
     enteringToast: false,
+    agentOptions,
+    excludedAgentKeys,
   });
   if (!enteringOpen && !enteringToast && mount._acLastStableHtml === stableHtml) {
     return;
@@ -8291,6 +8490,8 @@ function renderSpriteAssistantMount() {
         is3dMode: is3d,
         enteringOpen,
         enteringToast,
+        agentOptions,
+        excludedAgentKeys,
       })
     : stableHtml;
 
@@ -8455,10 +8656,11 @@ async function requestSpriteArchivePreview({ topicId = "", staleDays = 3 } = {})
       topicName: res.topicName || tp?.name || targetId,
       staleDays: Number(res.staleDays ?? staleDays),
       candidates: Array.isArray(res.candidates) ? res.candidates : [],
+      memoryVault: Boolean(res.memoryVault),
     };
     const count = state.sprite.pendingArchive.candidates.length;
     const msg = count > 0
-      ? `已在「${state.sprite.pendingArchive.topicName}」筛出 ${count} 条闲置满 ${state.sprite.pendingArchive.staleDays} 天的历史会话。点下方「确认归档」或说「确认」，我将批量归档并提炼产线记忆摘要。`
+      ? `已在「${state.sprite.pendingArchive.topicName}」筛出 ${count} 条闲置满 ${state.sprite.pendingArchive.staleDays} 天的历史会话。点下方「确认归档」或说「确认」，${state.sprite.pendingArchive.memoryVault ? "我会先把值得长期保留的成果落进共享记忆库，再批量归档。" : "我将批量归档并提炼产线记忆摘要。"}`
       : `「${state.sprite.pendingArchive.topicName}」目前没有闲置满 ${state.sprite.pendingArchive.staleDays} 天的会话，可在预览卡切换「≥1天」。`;
     pushSpriteMessage({
       role: "sprite",
@@ -8499,12 +8701,18 @@ async function confirmSpriteArchivePreview() {
     }
     void refreshThreads().catch(() => {});
     const summary = res?.digest?.summary || "";
-    const msg = `已完成！共归档 ${res?.archivedCount || ids.length} 条历史会话，并已提炼双存「产线归档记忆」（后续新开分身工位将自动继承）：\n${summary}`;
+    const archivedCount = res?.archivedCount || ids.length;
+    const toVault = Boolean(res?.digest?.memory);
+    const msg = toVault
+      ? `已完成！先落记忆再归档了 ${archivedCount} 条历史会话（新会话会通过共享记忆指针检索）：\n${summary}`
+      : `已完成！共归档 ${archivedCount} 条历史会话，并已提炼双存「产线归档记忆」（后续新开分身工位将自动继承）：\n${summary}`;
     pushSpriteMessage({
       role: "sprite",
       tone: "work",
       text: msg,
-      spokenText: `已成功归档 ${res?.archivedCount || ids.length} 条历史会话并生成产线记忆摘要，后续新开工单会自动继承。`,
+      spokenText: toVault
+        ? `已把成果落进记忆库，并归档 ${archivedCount} 条历史会话。`
+        : `已成功归档 ${archivedCount} 条历史会话并生成产线记忆摘要，后续新开工单会自动继承。`,
     });
     renderProjectBoard();
   } catch (error) {
@@ -8596,7 +8804,18 @@ async function requestSpriteDispatchPreview({ instruction = "", topicId = "", ag
     const res = await apiPost("/api/overview/dispatch", {
       ...payload,
       confirmOnly: true,
+      useAiPlanner: true,
     });
+    if (res?.chatOnly) {
+      const replyText = String(res.reply || "我在听，请告诉我你想安排的具体任务或项目。").trim();
+      pushSpriteMessage({
+        role: "sprite",
+        tone: "idle",
+        text: replyText,
+        spokenText: replyText,
+      });
+      return;
+    }
     const routes = Array.isArray(res?.routes) ? res.routes : [];
     if (!routes.length) {
       pushSpriteMessage({
@@ -8606,20 +8825,28 @@ async function requestSpriteDispatchPreview({ instruction = "", topicId = "", ag
       });
       return;
     }
-    state.sprite.pendingPreview = { payload, routes };
+    state.sprite.pendingPreview = {
+      payload,
+      routes,
+      aiPlanned: Boolean(res?.aiPlanned),
+      aiModel: String(res?.aiModel || "").trim(),
+      reply: String(res?.reply || "").trim(),
+    };
     const first = routes[0];
     const agentDesc = first.agentLabel || first.providerLabel || first.provider || "自动匹配账号";
     const actDesc = first.action === "reuse_clean" ? "复用干净工位" : "新开并发分身";
-    const summaryText = routes.length === 1
+    const aiReply = String(res?.reply || "").trim();
+    const fallbackSummary = routes.length === 1
       ? `已生成派工预览：将派往「${first.topicName}」（${agentDesc} · ${actDesc}）。请点下方「确认派出」或直接说「确认」。`
       : `已拆分为 ${routes.length} 条并发派工预览（首单「${first.topicName}」· ${agentDesc}）。请确认后派出。`;
+    const summaryText = aiReply || fallbackSummary;
     pushSpriteMessage({
       role: "sprite",
       tone: "coin",
       text: summaryText,
-      spokenText: routes.length === 1
+      spokenText: aiReply || (routes.length === 1
         ? `已生成派工预览，将派往${first.topicName}，使用${agentDesc}。请确认是否派出。`
-        : `已生成 ${routes.length} 条派工预览，请确认是否派出。`,
+        : `已生成 ${routes.length} 条派工预览，请确认是否派出。`),
     });
   } catch (error) {
     pushSpriteMessage({
@@ -8657,6 +8884,7 @@ async function confirmSpriteDispatchPreview() {
     const res = await apiPost("/api/overview/dispatch", {
       ...payload,
       confirmOnly: false,
+      approvedRoutes: routes,
     });
     state.sprite.pendingPreview = null;
     state.lastDispatchReceipt = res;
@@ -8780,6 +9008,9 @@ async function handleSpriteCommand(rawInput = "") {
   pushSpriteMessage({ role: "user", text });
 
   const agentCtx = buildDispatchAgentContext();
+  const excludedAgentKeys = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
+    ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
+    : [];
   const parsed = classifySpriteUserInput(text, {
     hasPendingPreview: Boolean(state.sprite.pendingPreview),
     hasPendingArchive: Boolean(state.sprite.pendingArchive),
@@ -8787,6 +9018,7 @@ async function handleSpriteCommand(rawInput = "") {
     scopedTopicId: state.sprite.scopedTopicId,
     overview: state.missionOverview,
     agentOptions: agentCtx.agentOptions,
+    excludedAgentKeys,
   });
 
   if (parsed.intent === "confirm_reorg") {
@@ -12135,6 +12367,10 @@ function bindEvents() {
     });
   });
 
+  $("switchNetworkLinkBtn")?.addEventListener("click", () => {
+    void switchNetworkLink();
+  });
+
   $("composerConfigBtn")?.addEventListener("click", (e) => {
     e.stopPropagation();
     setComposerConfigOpen(!state.composerConfigOpen);
@@ -12313,6 +12549,44 @@ function bindEvents() {
       renderSpriteAssistantMount();
       return;
     }
+    const spriteExcludeCheck = e.target.closest("[data-sprite-toggle-excluded]");
+    if (spriteExcludeCheck) {
+      const targetKey = String(spriteExcludeCheck.dataset.spriteToggleExcluded || "").trim();
+      if (!targetKey) return;
+      const prev = Array.isArray(state.missionOverview?.meta?.dispatchPrefs?.excludedAgentKeys)
+        ? state.missionOverview.meta.dispatchPrefs.excludedAgentKeys
+        : [];
+      const nextSet = new Set(prev);
+      if (spriteExcludeCheck.checked) nextSet.add(targetKey);
+      else nextSet.delete(targetKey);
+      const excludedAgentKeys = [...nextSet];
+      if (state.missionOverview) {
+        if (!state.missionOverview.meta) state.missionOverview.meta = {};
+        if (!state.missionOverview.meta.dispatchPrefs) state.missionOverview.meta.dispatchPrefs = {};
+        state.missionOverview.meta.dispatchPrefs.excludedAgentKeys = excludedAgentKeys;
+      }
+      state.dispatchPreview = null;
+      renderSpriteAssistantMount();
+      void apiPost("/api/overview/dispatch-prefs", { excludedAgentKeys }).then((res) => {
+        if (res?.overview) {
+          if (!Array.isArray(res.overview?.meta?.dispatchPrefs?.excludedAgentKeys)) {
+            if (!res.overview.meta) res.overview.meta = {};
+            if (!res.overview.meta.dispatchPrefs) res.overview.meta.dispatchPrefs = {};
+            res.overview.meta.dispatchPrefs.excludedAgentKeys = excludedAgentKeys;
+            showToastBanner("后台服务尚未重启，跳过账号暂未持久化", {
+              detail: "请在左下角版本弹窗点击「重启服务」后再保存",
+              error: true,
+            });
+          }
+          state.missionOverview = res.overview;
+        }
+        renderSpriteAssistantMount();
+        renderProjectBoard();
+      }).catch((error) => {
+        showToastBanner("保存跳过账号设置失败", { detail: formatActionError(error), error: true });
+      });
+      return;
+    }
     if (e.target.id === "moDispatchModeSelect") {
       state.dispatchMode = e.target.value || "auto";
       state.dispatchPreview = null;
@@ -12375,6 +12649,9 @@ function bindEvents() {
           clearTimeout(state.sprite.toastTimer);
           state.sprite.toastTimer = null;
         }
+        renderSpriteAssistantMount();
+      } else if (sAct === "toggle-dispatch-prefs") {
+        state.sprite.prefsOpen = !state.sprite.prefsOpen;
         renderSpriteAssistantMount();
       } else if (sAct === "toggle-tts") {
         const nextTts = !state.sprite.ttsEnabled;
@@ -13613,6 +13890,34 @@ function bindEvents() {
       btn.textContent = "重试原图";
     };
     img.src = info.rawSrc;
+  });
+
+  async function revealLocalThreadFile(threadId, path, triggerBtn = null) {
+    const cleanThreadId = String(threadId || "").trim();
+    const cleanPath = String(path || "").trim();
+    if (!cleanThreadId || !cleanPath) return;
+    if (triggerBtn) triggerBtn.disabled = true;
+    try {
+      await apiPost("api/thread/reveal", { threadId: cleanThreadId, path: cleanPath });
+    } catch (error) {
+      showToastBanner("打开访达失败", { detail: formatActionError(error, "无法在访达中定位该文件"), error: true });
+    } finally {
+      if (triggerBtn) triggerBtn.disabled = false;
+    }
+  }
+
+  $("imagePreviewRevealBtn")?.addEventListener("click", () => {
+    const info = state.imagePreview;
+    const btn = $("imagePreviewRevealBtn");
+    if (!info?.revealThreadId || !info?.revealPath) return;
+    void revealLocalThreadFile(info.revealThreadId, info.revealPath, btn);
+  });
+
+  $("filePreviewRevealBtn")?.addEventListener("click", () => {
+    const fp = state.filePreview;
+    const btn = $("filePreviewRevealBtn");
+    if (!fp?.threadId || !fp?.path) return;
+    void revealLocalThreadFile(fp.threadId, fp.path, btn);
   });
 
   const imgModal = $("imagePreviewModal");
@@ -15383,6 +15688,7 @@ async function init() {
   window.addEventListener("online", () => {
     if (!state.sseConnected || !state.eventSource || state.eventSource.readyState === EventSource.CLOSED) {
       connectEvents();
+      scheduleLanFallbackCheck(2500);
     }
     if (state.activeThreadId && !isBoardViewActive() && !state.initialThreadLoading) {
       void reloadActiveThreadProgress(state.activeThreadId);
@@ -15451,6 +15757,7 @@ async function init() {
   syncProfileSelectors();
   syncModelAndEffortSelectors();
   syncPermissionSelectors();
+  syncNetworkSwitchMenuButton();
   bindEvents();
   connectEvents();
   startLiveActivityPolling();

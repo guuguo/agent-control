@@ -71,6 +71,8 @@ ${programArgs}
   <dict>
     <key>PORT</key>
     <string>${xmlEscape(port)}</string>
+    <key>HOST</key>
+    <string>0.0.0.0</string>
     <key>AGENT_CONTROL_DATA_DIR</key>
     <string>${xmlEscape(dataDir)}</string>
     <key>PATH</key>
@@ -117,6 +119,7 @@ Type=simple
 WorkingDirectory=${rootDir}
 ExecStart=${systemdQuote(nodeBin)} ${execArgs}
 Environment=${systemdQuote(`PORT=${port}`)}
+Environment=${systemdQuote("HOST=0.0.0.0")}
 Environment=${systemdQuote(`AGENT_CONTROL_DATA_DIR=${dataDir}`)}
 Environment=${systemdQuote(`PATH=${pathValue}`)}
 Restart=always

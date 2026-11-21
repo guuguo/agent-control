@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
-import { escapeHtml, renderMessageCopyButton, renderTurnHtml } from "../public/markdown.js";
+import { escapeHtml, formatMessageTimeMeta, renderMessageCopyButton, renderTurnHtml } from "../public/markdown.js";
 
 const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
 const clipboardHelper = source.match(/async function copyTextToClipboard\(text\) \{[\s\S]*?\n\}/)?.[0];
@@ -67,4 +67,47 @@ test("clipboard falls back to browser copy when Clipboard API is denied", async 
   assert.equal(await copy("```\n保留格式\n```"), true);
   assert.equal(copied, "```\n保留格式\n```");
   assert.equal(removed, true);
+});
+
+test("messages render formatted timestamps when turn or item timestamps exist", () => {
+  const nowMs = new Date(2026, 10, 20, 12, 0, 0).getTime();
+  const sameDaySec = Math.floor(new Date(2026, 10, 20, 9, 5, 8).getTime() / 1000);
+  const sameYearSec = Math.floor(new Date(2026, 10, 19, 22, 59, 12).getTime() / 1000);
+  const crossYearSec = Math.floor(new Date(2025, 11, 31, 23, 45, 0).getTime() / 1000);
+
+  assert.deepEqual(formatMessageTimeMeta(sameDaySec, nowMs), {
+    label: "09:05",
+    full: "2026-11-20 09:05:08",
+  });
+  assert.deepEqual(formatMessageTimeMeta(sameYearSec, nowMs), {
+    label: "11-19 22:59",
+    full: "2026-11-19 22:59:12",
+  });
+  assert.deepEqual(formatMessageTimeMeta(crossYearSec, nowMs), {
+    label: "2025-12-31 23:45",
+    full: "2025-12-31 23:45:00",
+  });
+  assert.equal(formatMessageTimeMeta(0, nowMs), null);
+
+  const html = renderTurnHtml({
+    status: "completed",
+    startedAt: sameYearSec,
+    completedAt: sameDaySec,
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "你好" }] },
+      { type: "agentMessage", text: "已收到" },
+    ],
+  });
+  assert.equal((html.match(/class="msg-time"/g) || []).length, 2);
+  assert.match(html, /title="2026-11-19 22:59:12"/);
+  assert.match(html, /title="2026-11-20 09:05:08"/);
+
+  const noTimeHtml = renderTurnHtml({
+    status: "completed",
+    items: [
+      { type: "userMessage", content: [{ type: "text", text: "无时间" }] },
+      { type: "agentMessage", text: "无时间回复" },
+    ],
+  });
+  assert.doesNotMatch(noTimeHtml, /class="msg-time"/);
 });

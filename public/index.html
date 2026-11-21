@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="ac-ui-version" content="20261119autocompact1" />
+  <meta name="ac-ui-version" content="20261121a" />
   <title>Agent Control · 多智能体远程控制台</title>
   <script>
     (function () {
@@ -18,8 +18,8 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./app.css?v=20261119autocompact1" />
-  <link rel="stylesheet" href="./project-workspace.css?v=20261119autocompact1" />
+  <link rel="stylesheet" href="./app.css?v=20261121a" />
+  <link rel="stylesheet" href="./project-workspace.css?v=20261121a" />
 </head>
 <body>
   <div id="appShell" class="app-shell">
@@ -171,6 +171,7 @@
               <button type="button" id="toggleThreadImagesBtn" class="btn-secondary btn-sm" hidden>加载本会话预览图</button>
               <button type="button" id="archiveThreadBtn" class="btn-secondary btn-sm" hidden>归档</button>
               <button type="button" id="refreshThreadBtn" class="btn-secondary btn-sm" title="刷新当前视图">刷新</button>
+              <button type="button" id="switchNetworkLinkBtn" class="btn-secondary btn-sm" hidden title="在局域网直连与公网中继间切换">切到局域网直连</button>
               <button type="button" id="openAutomationsModalBtn" class="btn-secondary btn-sm topbar-update-menu-btn" title="查看与托管各个 Agent 的定时计划任务">
                 <span>定时任务</span>
                 <span id="topbarMenuAutomationsBadge" class="menu-update-badge" hidden>0</span>
@@ -648,6 +649,7 @@
           <button type="button" id="imagePreviewZoomInBtn" class="btn-secondary btn-xs" title="放大" hidden>+</button>
           <button type="button" id="imagePreviewLoadRawBtn" class="btn-secondary btn-xs" hidden>加载原图</button>
           <a id="imagePreviewOpenRaw" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>原图新窗</a>
+          <button type="button" id="imagePreviewRevealBtn" class="btn-secondary btn-xs" title="在访达中显示" hidden>在访达中打开</button>
           <button type="button" class="icon-btn" data-close-modal="imagePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
         </div>
       </div>
@@ -670,6 +672,7 @@
           <button type="button" id="filePreviewToggleRawBtn" class="btn-secondary btn-xs" hidden>源码</button>
           <button type="button" id="filePreviewCopyBtn" class="btn-secondary btn-xs" hidden>复制</button>
           <a id="filePreviewDownloadBtn" class="btn-secondary btn-xs" href="#" target="_blank" rel="noopener noreferrer" hidden>下载</a>
+          <button type="button" id="filePreviewRevealBtn" class="btn-secondary btn-xs" title="在访达中显示" hidden>在访达中打开</button>
           <button type="button" class="icon-btn" data-close-modal="filePreviewModal" aria-label="关闭"><span class="btn-icon-glyph" data-icon="close" data-icon-size="14" aria-hidden="true"></span></button>
         </div>
       </div>
@@ -924,6 +927,6 @@
   </dialog>
 
   <script type="module" src="./i18n.js?v=20261119autocompact1"></script>
-  <script type="module" src="./app.js?v=20261119autocompact1"></script>
+  <script type="module" src="./app.js?v=20261121a"></script>
 </body>
 </html>

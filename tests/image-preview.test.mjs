@@ -56,13 +56,14 @@ test("自动预览观察可见附件卡，隐藏的图片节点不会阻断加�
   assert.deepEqual(loaded, [img]);
 });
 
-test("电脑本机及局域网默认预览；手机和公网保留按需加载", () => {
+test("电脑本机及手机局域网默认预览；公网中继保留按需加载", () => {
   for (const hostname of ["localhost", "127.0.0.1", "[::1]", "192.168.1.8", "10.1.2.3", "172.16.0.1", "172.31.255.254", "macbook.local"]) {
     assert.equal(autoPreviewThreadImages({ hostname, finePointer: true }), true, hostname);
-    assert.equal(autoPreviewThreadImages({ hostname, finePointer: false }), false, `触屏 ${hostname}`);
+    assert.equal(autoPreviewThreadImages({ hostname, finePointer: false }), true, `触屏 ${hostname}`);
   }
   for (const hostname of ["relay.example.com", "8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.1.8", "192.168.300.1"]) {
     assert.equal(autoPreviewThreadImages({ hostname, finePointer: true }), false, hostname);
+    assert.equal(autoPreviewThreadImages({ hostname, finePointer: false }), false, `触屏 ${hostname}`);
   }
 });
 

@@ -365,6 +365,7 @@ export function classifySpriteUserInput(rawText, {
   scopedTopicId = "",
   overview = null,
   agentOptions = [],
+  excludedAgentKeys = [],
 } = {}) {
   const text = String(rawText || "").trim();
   if (!text) return { intent: "empty" };
@@ -445,7 +446,11 @@ export function classifySpriteUserInput(rawText, {
   // Natural language dispatch extraction
   let agentKey = "auto";
   const lower = text.toLowerCase();
+  const excludedSet = new Set(Array.isArray(excludedAgentKeys) ? excludedAgentKeys : []);
+  const isExcludedOpt = (o) => Boolean(o?.excluded || excludedSet.has(o?.key));
   const pickProvider = (prov) => {
+    const activeHit = (agentOptions || []).find((o) => o.provider === prov && !isExcludedOpt(o));
+    if (activeHit) return activeHit.key;
     const hit = (agentOptions || []).find((o) => o.provider === prov);
     return hit ? hit.key : "auto";
   };
@@ -563,7 +568,9 @@ function renderPendingArchiveCardHtml(pendingArchive, busy = false) {
           `).join("")}
           ${candidates.length > 12 ? `<div class="sprite-preview-reason">…以及其余 ${candidates.length - 12} 条闲置历史会话</div>` : ""}
         </div>
-        <div class="sprite-preview-reason">确认后批量归档并提炼「产线归档摘要」，双存至面板与 <code>.agent-context.${escapeHtml(pendingArchive.topicId)}.md</code></div>
+        <div class="sprite-preview-reason">${pendingArchive.memoryVault
+          ? `确认后先读取会话内容，把事实 / 决策 / 经验 / 未完成任务落进共享记忆库（<code>项目/${escapeHtml(pendingArchive.topicId)}/</code>），再批量归档`
+          : `确认后批量归档并提炼「产线归档摘要」，双存至面板与 <code>.agent-context.${escapeHtml(pendingArchive.topicId)}.md</code>`}</div>
       ` : `
         <div class="sprite-preview-reason">当前没有闲置满 ${days} 天的未置顶会话，可点右上角切换「≥1天」查看。</div>
       `}
@@ -586,11 +593,14 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
   const chosenModel = pendingPreview.payload?.model || "";
   const inheritEnabled = pendingPreview.payload?.inheritContext !== false;
   const anySpawnHasDigest = routes.some((rt) => rt.action === "spawn_parallel" && rt.hasTopicDigest);
+  const aiPlanned = Boolean(pendingPreview.aiPlanned);
+  const aiModel = String(pendingPreview.aiModel || "").trim();
 
   return `
     <div class="sprite-preview-card" role="region" aria-label="待确认派工预览">
       <div class="sprite-preview-head">
         <strong>${iconSvg("split", { size: 12 })} 派工预览（共 ${routes.length} 单 · 待你确认）</strong>
+        ${aiPlanned ? `<span class="sprite-ai-badge" title="${escapeHtml(aiModel ? `由 ${aiModel} 规划` : "由 AI 规划")}">AI 分配${aiModel ? ` · ${escapeHtml(aiModel)}` : ""}</span>` : ""}
       </div>
       <div class="sprite-preview-routes">
         ${routes.map((rt) => {
@@ -599,6 +609,7 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
           const modelBase = rt.model || chosenModel || "账号默认模型";
           const modelLabel = rt.effort ? `${modelBase} · ${rt.effort}` : modelBase;
           const diffLabel = rt.taskDifficultyLabel || "";
+          const taskBrief = String(rt.segmentText || "").trim();
           return `
             <div class="sprite-preview-route">
               <div class="sprite-preview-line1">
@@ -607,6 +618,7 @@ function renderPendingPreviewCardHtml(pendingPreview, busy = false) {
                 ${diffLabel ? `<span class="mo-inherit-pill">${escapeHtml(diffLabel)}</span>` : ""}
                 ${rt.action === "spawn_parallel" && rt.hasTopicDigest && inheritEnabled ? `<span class="mo-inherit-pill">继承归档记忆</span>` : ""}
               </div>
+              ${taskBrief ? `<div class="sprite-route-task">${escapeHtml(taskBrief)}</div>` : ""}
               <div class="sprite-preview-meta">
                 <span>账号：<strong>${escapeHtml(agentLabel)}</strong></span>
                 <span>模型：<strong>${escapeHtml(modelLabel)}</strong></span>
@@ -642,13 +654,57 @@ function formatVoiceElapsed(sec = 0) {
   return `${m}:${r}`;
 }
 
+function renderSpriteDispatchPrefsDrawerHtml({
+  prefsOpen = false,
+  agentOptions = [],
+  excludedAgentKeys = [],
+  busy = false,
+} = {}) {
+  if (!prefsOpen) return "";
+  const excludedSet = new Set(Array.isArray(excludedAgentKeys) ? excludedAgentKeys : []);
+  return `
+    <div class="sprite-prefs-drawer" role="region" aria-label="默认跳过分派账号">
+      <div class="sprite-prefs-head">
+        <div>
+          <strong>自动派单默认跳过</strong>
+          <span>手动指定时仍可选用</span>
+        </div>
+        <button type="button" class="mo-ctrl-btn sprite-prefs-done" data-sprite-action="toggle-dispatch-prefs">完成</button>
+      </div>
+      ${agentOptions.length ? `
+        <div class="sprite-prefs-list">
+          ${agentOptions.map((opt) => {
+            const checked = excludedSet.has(opt.key);
+            return `
+              <label class="sprite-prefs-item ${checked ? "is-excluded" : ""}">
+                <input
+                  type="checkbox"
+                  data-sprite-toggle-excluded="${escapeHtml(opt.key)}"
+                  ${checked ? "checked" : ""}
+                  ${busy ? "disabled" : ""}
+                />
+                <span class="sprite-prefs-provider">${escapeHtml(opt.providerLabel || opt.provider || "")}</span>
+                <span class="sprite-prefs-label">${escapeHtml(opt.label || opt.key)}</span>
+                ${checked ? `<span class="sprite-prefs-badge">已跳过</span>` : ""}
+              </label>
+            `;
+          }).join("")}
+        </div>
+      ` : `<div class="sprite-prefs-empty">暂未检测到已登录的可用账号</div>`}
+    </div>
+  `;
+}
+
 export function renderSpriteAssistantHtml(spriteState = {}, {
   is3dMode = false,
   enteringOpen = false,
   enteringToast = false,
+  agentOptions = [],
+  excludedAgentKeys = [],
 } = {}) {
   const {
     open = false,
+    prefsOpen = false,
     ttsEnabled = false,
     mood = "idle",
     unreadCount = 0,
@@ -741,6 +797,13 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
               ` : ""}
               <button
                 type="button"
+                class="sprite-icon-btn ${prefsOpen ? "is-active" : ""}"
+                data-sprite-action="toggle-dispatch-prefs"
+                title="${excludedAgentKeys.length ? `已默认跳过 ${excludedAgentKeys.length} 个账号（点击设置）` : "设置自动派单默认跳过的账号"}"
+                aria-pressed="${prefsOpen ? "true" : "false"}"
+              >${iconSvg("settings", { size: 13 })}</button>
+              <button
+                type="button"
                 class="sprite-icon-btn ${ttsEnabled ? "is-active" : ""}"
                 data-sprite-action="toggle-tts"
                 title="${ttsEnabled ? "语音播报已开启（点击静音）" : "语音播报已关闭（点击开启自动朗读）"}"
@@ -763,6 +826,8 @@ export function renderSpriteAssistantHtml(spriteState = {}, {
               </button>
             </div>
           </header>
+
+          ${renderSpriteDispatchPrefsDrawerHtml({ prefsOpen, agentOptions, excludedAgentKeys, busy })}
 
           <div id="spriteFeedList" class="sprite-feed">
             ${messages.length ? messages.slice(-10).map((m) => `

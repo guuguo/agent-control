@@ -567,6 +567,9 @@ export async function createHotExtensionServer({
           remember: body.remember !== false,
           confirmOnly: Boolean(body.confirmOnly),
           sparkId: body.sparkId || "",
+          inheritContext: body.inheritContext !== false,
+          useAiPlanner: Boolean(body.useAiPlanner),
+          approvedRoutes: Array.isArray(body.approvedRoutes) ? body.approvedRoutes : null,
         });
         sendJson(response, 200, result);
         return;

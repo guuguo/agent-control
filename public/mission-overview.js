@@ -1,7 +1,7 @@
 import { iconSvg, providerIconSvg } from "./icons.js";
 import { escapeHtml } from "./markdown.js";
 import { formatCompactRelativeTime, projectBaseName } from "./project-board.js";
-import { LANDMARK_BADGE_LABELS, ROOM_BLUEPRINTS, computeStudioProgression } from "./tycoon-3d.js";
+import { LANDMARK_BADGE_LABELS, ROOM_BLUEPRINTS, computeStudioProgression, readTycoonVisualPrefs } from "./tycoon-3d.js";
 
 const DEFAULT_STAGES = [
   { index: 1, label: "立项" },
@@ -481,7 +481,7 @@ function renderDispatchAgentControlsHtml({
       <option value="auto" ${isAuto ? "selected" : ""}>${escapeHtml(autoText)}</option>
       ${[...groups.entries()].map(([gLabel, items]) => `
         <optgroup label="${escapeHtml(gLabel)}">
-          ${items.map((o) => `<option value="${escapeHtml(o.key)}" ${o.key === dispatchAgentKey ? "selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}
+          ${items.map((o) => `<option value="${escapeHtml(o.key)}" ${o.key === dispatchAgentKey ? "selected" : ""}>${escapeHtml(o.excluded ? `${o.label}（默认跳过）` : o.label)}</option>`).join("")}
         </optgroup>
       `).join("")}
     </select>
@@ -1446,6 +1446,7 @@ export function renderTycoonHudHtml(overview, {
   const harvestReadyTotal = Number(radar.harvestReadyCount) || allFlatTopics.filter((tp) => tp.pipeline?.readyToHarvest).length;
   const eggCount = Number(incubator.totalActive) || (incubator.eggs?.length || 0);
   const prog = computeStudioProgression(overview);
+  const visPrefs = readTycoonVisualPrefs();
 
   const selectedTopic = selectedTopicId
     ? allFlatTopics.find((tp) => tp.id === selectedTopicId) || null
@@ -1616,10 +1617,11 @@ export function renderTycoonHudHtml(overview, {
             <span>运转员工</span>
             <strong>${liveTotal}</strong>
           </button>
-          <button type="button" class="tycoon-res-pill is-alert ${pendingTotal > 0 ? "is-urgent" : ""}" data-tycoon-fly-pending="1" title="需要老板拍板授权的工位">
+          <button type="button" class="tycoon-res-pill is-alert ${pendingTotal > 0 ? "is-urgent" : ""}" data-tycoon-fly-pending="1" title="需要老板拍板授权的工位（按 Space 一键跳转下一个）">
             ${iconSvg("bell", { size: 13 })}
             <span>待拍板</span>
             <strong>${pendingTotal}</strong>
+            ${pendingTotal > 0 ? `<kbd class="tycoon-space-kbd">Space</kbd>` : ""}
           </button>
           <button type="button" class="tycoon-res-pill is-egg" data-tycoon-open-incubator="1" title="点击飞往 3D 灵感孵化温室">
             ${iconSvg("egg", { size: 13 })}
@@ -1643,6 +1645,11 @@ export function renderTycoonHudHtml(overview, {
         </div>
 
         <div class="tycoon-sys-controls">
+          <div class="tycoon-vis-group" role="group" aria-label="3D 画面与视角开关">
+            <button type="button" class="mo-ctrl-btn tycoon-top-btn tycoon-vis-btn ${visPrefs.perspective ? "is-active" : ""}" data-tycoon-toggle-vis="perspective" aria-pressed="${visPrefs.perspective ? "true" : "false"}" title="切换等距正交 / 36° 微缩透视视角">36° 透视</button>
+            <button type="button" class="mo-ctrl-btn tycoon-top-btn tycoon-vis-btn ${visPrefs.tiltShift ? "is-active" : ""}" data-tycoon-toggle-vis="tiltShift" aria-pressed="${visPrefs.tiltShift ? "true" : "false"}" title="开启或关闭微缩移轴景深（关闭可省 4 次模糊开销）">移轴景深</button>
+            <button type="button" class="mo-ctrl-btn tycoon-top-btn tycoon-vis-btn ${visPrefs.bloom ? "is-active" : ""}" data-tycoon-toggle-vis="bloom" aria-pressed="${visPrefs.bloom ? "true" : "false"}" title="开启或关闭高光选择性泛光">泛光</button>
+          </div>
           ${renderRefreshControlHtml({ modelOptions, preferredModel, summarizing, meta, btnClass: "mo-ctrl-btn tycoon-top-btn" })}
           <button type="button" class="mo-ctrl-btn tycoon-top-btn ${immersive ? "is-active" : ""}" data-mo-action="toggle-immersive" title="全屏游戏沉浸模式 (Esc 退出)">
             ${iconSvg(immersive ? "minimize" : "maximize", { size: 13 })}<span>${immersive ? "退全屏" : "全屏"}</span>
@@ -1689,7 +1696,7 @@ export function renderTycoonHudHtml(overview, {
                 </div>
               `).join("")}
             </div>
-            <div class="tycoon-cam-tips">左键按住拖拽平移地图 · WASD移动 · 滚轮缩放</div>
+            <div class="tycoon-cam-tips">左键拖拽平移 · WASD移动 · 滚轮缩放 · Space跳待拍板</div>
           ` : ""}
         </aside>
 

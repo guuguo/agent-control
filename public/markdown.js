@@ -1081,15 +1081,49 @@ export function cleanStreamingAgentText(rawText = "") {
   return combined || "正在执行定时巡检…";
 }
 
-function formatHeartbeatTimeLabel(rawIsoOrSec) {
-  if (!rawIsoOrSec) return "";
-  let tsMs = NaN;
+function parseTimestampMs(rawIsoOrSec) {
+  if (!rawIsoOrSec) return NaN;
   if (typeof rawIsoOrSec === "number" && Number.isFinite(rawIsoOrSec)) {
-    tsMs = rawIsoOrSec > 1e12 ? rawIsoOrSec : rawIsoOrSec * 1000;
-  } else {
-    const parsed = Date.parse(String(rawIsoOrSec).trim());
-    if (Number.isFinite(parsed)) tsMs = parsed;
+    return rawIsoOrSec > 1e12 ? rawIsoOrSec : rawIsoOrSec * 1000;
   }
+  const parsed = Date.parse(String(rawIsoOrSec).trim());
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function pad2(num) {
+  return String(num).padStart(2, "0");
+}
+
+export function formatMessageTimeMeta(rawIsoOrSec, nowMs = Date.now()) {
+  const tsMs = parseTimestampMs(rawIsoOrSec);
+  if (!Number.isFinite(tsMs) || tsMs <= 0) return null;
+  const dt = new Date(tsMs);
+  if (Number.isNaN(dt.getTime())) return null;
+  const now = new Date(nowMs);
+  const year = dt.getFullYear();
+  const month = pad2(dt.getMonth() + 1);
+  const day = pad2(dt.getDate());
+  const hour = pad2(dt.getHours());
+  const minute = pad2(dt.getMinutes());
+  const second = pad2(dt.getSeconds());
+  const timePart = `${hour}:${minute}`;
+  const full = `${year}-${month}-${day} ${timePart}:${second}`;
+  const sameYear = year === now.getFullYear();
+  const sameDay = sameYear && dt.getMonth() === now.getMonth() && dt.getDate() === now.getDate();
+  const label = sameDay
+    ? timePart
+    : (sameYear ? `${month}-${day} ${timePart}` : `${year}-${month}-${day} ${timePart}`);
+  return { label, full };
+}
+
+function renderMessageTimeTag(rawIsoOrSec) {
+  const meta = formatMessageTimeMeta(rawIsoOrSec);
+  if (!meta) return "";
+  return `<span class="msg-time" title="${escapeHtml(meta.full)}">${escapeHtml(meta.label)}</span>`;
+}
+
+function formatHeartbeatTimeLabel(rawIsoOrSec) {
+  const tsMs = parseTimestampMs(rawIsoOrSec);
   if (!Number.isFinite(tsMs) || tsMs <= 0) return "";
   try {
     return new Intl.DateTimeFormat("zh-CN", {
@@ -1650,7 +1684,7 @@ export function renderMessageCopyButton(text = "", { forkTurnIndex = -1, forkTur
   return `${copyHtml}${forkHtml}`;
 }
 
-function renderUserItem(item, { threadId = "", deferImages = false, forkTurnIndex = -1, forkTurnId = "" } = {}) {
+function renderUserItem(item, { threadId = "", deferImages = false, forkTurnIndex = -1, forkTurnId = "", timestamp = null } = {}) {
   const {
     textParts,
     images,
@@ -1731,9 +1765,10 @@ function renderUserItem(item, { threadId = "", deferImages = false, forkTurnInde
       </div>
     `
     : "";
+  const userTimeHtml = renderMessageTimeTag(item?.timestamp || item?.createdAt || item?.startedAt || timestamp);
   return `${eventCards.join("")}
     <div class="msg-row msg-user">
-      <div class="msg-meta"><span class="msg-role">你</span>${renderMessageCopyButton([
+      <div class="msg-meta"><span class="msg-role">你</span>${userTimeHtml}${renderMessageCopyButton([
         ...questionReplies.map((qr) => [qr.question, qr.answer].filter(Boolean).join("\n")),
         textParts.join("\n"),
       ].filter(Boolean).join("\n\n"), { forkTurnIndex, forkTurnId })}</div>
@@ -2264,7 +2299,7 @@ export function formatTurnModelBadge(turnOrModel, fallbackModel = "", fallbackEf
   return { label, title };
 }
 
-function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null, deferImages = false, forkTurnIndex = -1, forkTurnId = "" } = {}) {
+function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, threadId = "", modelBadge = null, deferImages = false, forkTurnIndex = -1, forkTurnId = "", timestamp = null } = {}) {
   const rawText = String(item.text || "");
   const parsedHb = item.heartbeat || parseClientHeartbeatAgentReply(rawText, { allowIncomplete: false });
   const text = item.heartbeat
@@ -2307,6 +2342,7 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
       ? `<span class="heartbeat-notify-tag">${iconSvg("bell", { size: 11 })} 巡检通知</span>`
       : `<span class="phase-tag">巡检结果</span>`)
     : "";
+  const agentTimeHtml = renderMessageTimeTag(item?.completedAt || item?.timestamp || item?.createdAt || timestamp);
   return `
     <div class="msg-row msg-agent ${isCommentary ? "is-commentary" : ""}">
       <div class="msg-meta">
@@ -2315,6 +2351,7 @@ function renderAgentMessageItem(item, agentLabel, { forcePrimary = false, thread
         ${hbTagHtml}
         ${isCommentary ? `<span class="phase-tag">过程汇报</span>` : ""}
         ${goalComplete ? `<span class="goal-done-tag">目标已达成</span>` : ""}
+        ${agentTimeHtml}
         ${renderMessageCopyButton(text, { forkTurnIndex, forkTurnId })}
       </div>
       <div class="msg-bubble agent-bubble md-body">
@@ -3249,6 +3286,9 @@ export function renderTurnHtml(turn, {
     if (html) parts.push(html);
   };
 
+  const turnStartTime = normalizedTurn?.startedAt || normalizedTurn?.createdAt || null;
+  const turnReplyTime = normalizedTurn?.completedAt || normalizedTurn?.startedAt || normalizedTurn?.createdAt || null;
+
   for (let i = 0; i < cleanItems.length; i += 1) {
     const item = cleanItems[i];
     if (!item || typeof item !== "object") continue;
@@ -3259,10 +3299,10 @@ export function renderTurnHtml(turn, {
       parts.push(renderAskQuestionItemHtml(item, askQuestions));
     } else if (item.type === "userMessage") {
       flushProcessGroup(false, false);
-      parts.push(renderUserItem(item, { threadId, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "" }));
+      parts.push(renderUserItem(item, { threadId, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "", timestamp: turnStartTime }));
     } else if (item.type === "agentMessage" && primaryAgentIndexes.has(i)) {
       flushProcessGroup(false, false);
-      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "" }));
+      parts.push(renderAgentMessageItem(item, agentLabel, { forcePrimary: true, threadId, modelBadge, deferImages, forkTurnIndex: turnIndex, forkTurnId: normalizedTurn?.id || "", timestamp: turnReplyTime }));
     } else if (isTurnProcessItem(item)) {
       pendingProcessItems.push(item);
     }

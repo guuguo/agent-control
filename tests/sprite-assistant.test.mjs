@@ -206,3 +206,52 @@ test("Sprite Assistant supports scoped topic archive preview, confirm, and conte
   assert.match(reorgHtml, /梦工厂布局调整方案/);
   assert.match(reorgHtml, /确认调整/);
 });
+
+test("Sprite Assistant skips excluded accounts on provider match and renders excluded accounts drawer", () => {
+  const agentOptions = [
+    { key: "codex:company", provider: "codex", providerLabel: "Codex", label: "张苍", excluded: true },
+    { key: "codex:personal", provider: "codex", providerLabel: "Codex", label: "个人主力", excluded: false },
+  ];
+
+  const disp = classifySpriteUserInput("用 Codex 给漫画翻译修个问题", {
+    overview: mockOverview,
+    agentOptions,
+    excludedAgentKeys: ["codex:company"],
+  });
+  assert.equal(disp.intent, "dispatch_preview");
+  assert.equal(disp.agentKey, "codex:personal");
+
+  const html = renderSpriteAssistantHtml({
+    open: true,
+    prefsOpen: true,
+  }, {
+    agentOptions,
+    excludedAgentKeys: ["codex:company"],
+  });
+  assert.match(html, /自动派单默认跳过/);
+  assert.match(html, /data-sprite-toggle-excluded="codex:company"/);
+  assert.match(html, /张苍/);
+  assert.match(html, /已跳过/);
+  assert.doesNotMatch(html, /sprite-tool-count/);
+
+  const aiHtml = renderSpriteAssistantHtml({
+    open: true,
+    pendingPreview: {
+      aiPlanned: true,
+      aiModel: "Gemini 3.8 Flash",
+      payload: { model: "gemini-4-pro" },
+      routes: [
+        {
+          action: "spawn_parallel",
+          topicName: "控制台",
+          segmentText: "排查后台队列死锁问题 <script>bad</script>",
+          agentLabel: "Codex 主力",
+          reason: "AI 拆单：硬核排查交 Codex",
+        },
+      ],
+    },
+  });
+  assert.match(aiHtml, /AI 分配 · Gemini 3\.8 Flash/);
+  assert.match(aiHtml, /排查后台队列死锁问题/);
+  assert.doesNotMatch(aiHtml, /<script>bad/);
+});

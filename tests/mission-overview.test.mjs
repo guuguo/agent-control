@@ -1108,3 +1108,151 @@ test("overview, tycoon HUD, and project board render recent unread completed ind
   assert.match(boardHtml, /board-status-pill is-recent-done/);
   assert.match(boardHtml, />3m</);
 });
+
+
+test("AI-assisted sprite dispatch plans semantic splits, chat-only replies, approvedRoutes execution, and deterministic fallback", async () => {
+  const dir = await mkdtemp(join(os.tmpdir(), "ac-overview-ai-dispatch-"));
+  let aiBehavior = "split";
+
+  const hub = createMockHub(
+    [
+      {
+        id: "antigravity:cli:ui-1",
+        provider: "antigravity",
+        profileId: "cli",
+        title: "梦工厂 3D 卡片排版",
+        firstUserText: "梦工厂 3D 卡片排版",
+        cwd: "/repo/control-panel",
+        live: false,
+        pendingCount: 0,
+        updatedAt: Math.floor(Date.now() / 1000) - 300,
+      },
+    ],
+    [
+      { provider: "codex", id: "personal", name: "Codex 主力", installed: true, quota: { windows: { weekly: { remainingPercent: 88 } } } },
+      { provider: "antigravity", id: "cli", name: "Agy 创意", installed: true, quota: { windows: { weekly: { remainingPercent: 92 } } } },
+    ],
+  );
+  const sent = hub.sentTurns;
+  const started = hub.startedThreads;
+
+  try {
+    await seedGenericTestDomains(dir, [
+      {
+        id: "control-panel",
+        domainId: "indie-lab",
+        name: "控制台",
+        primaryCwd: "/repo/control-panel",
+        cwdPrefixes: ["/repo/control-panel"],
+        keywords: ["控制台"],
+        order: 1,
+      },
+      {
+        id: "manga-trans",
+        domainId: "indie-lab",
+        name: "漫画翻译",
+        primaryCwd: "/repo/manga",
+        cwdPrefixes: ["/repo/manga"],
+        keywords: ["漫画翻译"],
+        order: 2,
+      },
+    ]);
+    const service = new MissionOverviewService({
+      hub,
+      dataDir: dir,
+      collectGitImpl: async () => null,
+      runAiImpl: async () => {
+        if (aiBehavior === "chat") {
+          return {
+            intent: "chat",
+            reply: "当前建议先处理控制台登录态问题，再推进漫画翻译上线。",
+            tasks: [],
+          };
+        }
+        if (aiBehavior === "broken") {
+          throw new Error("simulated AI failure");
+        }
+        return {
+          intent: "dispatch",
+          reply: "已帮你拆成两单：UI 走查复用 Agy 空闲工位，死锁排查新开 Codex 并发处理。",
+          tasks: [
+            {
+              topicId: "control-panel",
+              instruction: "走查梦工厂弹窗响应式样式",
+              specialty: "creative",
+              difficulty: "fast",
+              agentKey: "antigravity:cli",
+              action: "reuse_clean",
+              targetThreadId: "antigravity:cli:ui-1",
+              reason: "复用同项目空闲 UI 工位",
+            },
+            {
+              topicId: "manga-trans",
+              instruction: "排查后台任务队列并发死锁根因",
+              specialty: "hardcore",
+              difficulty: "heavy",
+              agentKey: "codex:personal",
+              action: "spawn_parallel",
+              targetThreadId: "",
+              reason: "硬核并发排查由 Codex 新开干净工位",
+            },
+          ],
+        };
+      },
+    });
+
+    // 1. AI semantic split + reuse + spawn
+    const preview = await service.dispatchTask({
+      text: "把弹窗样式再顺一下，另外队列好像有并发死锁去查一下",
+      confirmOnly: true,
+      useAiPlanner: true,
+    });
+    assert.equal(preview.aiPlanned, true);
+    assert.match(preview.reply || "", /拆成两单/);
+    assert.equal(preview.routes.length, 2);
+    assert.equal(preview.routes[0].topicId, "control-panel");
+    assert.equal(preview.routes[0].action, "reuse_clean");
+    assert.equal(preview.routes[0].threadId, "antigravity:cli:ui-1");
+    assert.equal(preview.routes[0].agentSource, "ai");
+    assert.equal(preview.routes[1].topicId, "manga-trans");
+    assert.equal(preview.routes[1].action, "spawn_parallel");
+    assert.equal(preview.routes[1].agentKey, "codex:personal");
+
+    // 2. Confirming with approvedRoutes executes exact previewed routes without re-planning
+    const execRes = await service.dispatchTask({
+      text: "把弹窗样式再顺一下，另外队列好像有并发死锁去查一下",
+      confirmOnly: false,
+      approvedRoutes: preview.routes,
+    });
+    assert.equal(execRes.dispatched.length, 2);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].threadId, "antigravity:cli:ui-1");
+    assert.equal(started.length, 1);
+    assert.equal(started[0].provider, "codex");
+    assert.equal(started[0].cwd, "/repo/manga");
+
+    // 3. Chat-only intent does not fabricate dispatch routes
+    aiBehavior = "chat";
+    const chatRes = await service.dispatchTask({
+      text: "现在先做哪件事比较好？",
+      confirmOnly: true,
+      useAiPlanner: true,
+    });
+    assert.equal(chatRes.chatOnly, true);
+    assert.equal(chatRes.routes.length, 0);
+    assert.match(chatRes.reply || "", /当前建议/);
+
+    // 4. Seamless fallback to deterministic rule engine when AI fails
+    aiBehavior = "broken";
+    const fallbackRes = await service.dispatchTask({
+      text: "帮漫画翻译补一个单测",
+      confirmOnly: true,
+      useAiPlanner: true,
+    });
+    assert.equal(fallbackRes.aiPlanned, false);
+    assert.equal(fallbackRes.routes.length, 1);
+    assert.equal(fallbackRes.routes[0].topicId, "manga-trans");
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch(() => {});
+  }
+});
